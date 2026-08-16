@@ -3,17 +3,17 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "teams-audio-spike"
+name = "work-audio-capture"
 version = "0.1.0"
 description = "Minimal concurrent WASAPI loopback and microphone recorder"
 requires-python = ">=3.10"
-dependencies = ["PyAudioWPatch==0.2.12.7"]
+dependencies = ["PyAudioWPatch==0.2.12.8"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
 
 [project.scripts]
-audio-capture-spike = "audio_capture.cli:main"
+work-audio-capture = "audio_capture.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
