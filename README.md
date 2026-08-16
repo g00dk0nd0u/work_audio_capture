@@ -34,7 +34,7 @@ For development convenience only, `python -m pip install -e .` installs the opti
 
 ## Mandatory real Teams acceptance test
 
-This cannot be validated by CI or on non-Windows hardware. A release is blocked until all steps pass on a representative managed corporate PC:
+This cannot be validated by CI or on non-Windows hardware. [Issue #2](https://github.com/g00dk0nd0u/work_audio_capture/issues/2) is blocked until all steps pass on a representative managed corporate PC:
 
 1. In Teams, choose a playback device that is **not** the Windows default (preferably a USB headset), and choose a microphone. Confirm a remote participant is audible through that playback device.
 2. Run `python run.py list`. Record the listed indices and verify both the Teams render device's **loopback** entry and intended microphone are present.
