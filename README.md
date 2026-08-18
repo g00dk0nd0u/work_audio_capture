@@ -24,9 +24,26 @@ Version `0.2.12.8` supersedes `0.2.12.7` as the current upstream patch release. 
 From the repository root, without installing this project:
 
 ```powershell
+.venv\Scripts\python run.py doctor
 .venv\Scripts\python run.py list
 .venv\Scripts\python run.py record --render 12 --microphone 4
 ```
+
+`doctor` reports Python/Windows architecture, the installed package version,
+backend initialization, and device-discovery counts without recording or printing
+device names. Follow it with `list` to inspect the actual endpoints.
+
+These are three separate validation levels:
+
+1. **CI/import validation** installs and imports the pinned wheel on 64-bit Windows
+   with CPython 3.10, 3.12, and 3.13. It proves only wheel installation/import.
+2. **Windows runtime preflight** (`doctor`, then `list`) checks native backend loading
+   and endpoint discovery on the target PC.
+3. **Real WASAPI/Teams acceptance** is the mandatory Issue #2 procedure below.
+
+CI cannot approve a corporate binary, exercise managed-PC DLL policy, or prove
+WASAPI loopback capture. Therefore Issue #3 remains open until the managed-PC
+approval and runtime checks are completed.
 
 The output directory is printed and contains `render.wav` and `microphone.wav`. Use `--output PATH` to retain them in a chosen location. Stop with Ctrl+C.
 
@@ -78,4 +95,6 @@ python run.py --help
 python -m compileall -q run.py src tests
 ```
 
-GitHub Actions runs only these hardware-independent checks. It does not establish WASAPI or Microsoft Teams feasibility; the manual test above remains the P0 release gate.
+GitHub Actions runs these hardware-independent checks plus the Windows pinned-wheel
+installation/import smoke matrix. It does not establish WASAPI or Microsoft Teams
+feasibility; the manual test above remains the P0 release gate.

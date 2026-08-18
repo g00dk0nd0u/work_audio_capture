@@ -12,12 +12,20 @@ class PyAudioWPatchBackend:
     def __init__(self) -> None:
         try:
             import pyaudiowpatch as pyaudio
-        except ImportError as exc:
+        except (ImportError, OSError) as exc:
             raise RuntimeError(
-                "PyAudioWPatch is required on Windows; install the project dependencies"
+                "PyAudioWPatch could not be loaded. Install PyAudioWPatch==0.2.12.8 "
+                "for this Python version and architecture; on a managed PC, confirm "
+                f"that native DLL loading is allowed. Original error: {exc}"
             ) from exc
         self.module = pyaudio
-        self.audio = pyaudio.PyAudio()
+        try:
+            self.audio = pyaudio.PyAudio()
+        except Exception as exc:
+            raise RuntimeError(
+                "PyAudioWPatch imported, but the PortAudio backend could not be "
+                f"initialized. Check Windows audio services and corporate policy. Original error: {exc}"
+            ) from exc
 
     def endpoints(self) -> tuple[list[Endpoint], list[Endpoint]]:
         default_output = self._default_index("get_default_wasapi_loopback")
