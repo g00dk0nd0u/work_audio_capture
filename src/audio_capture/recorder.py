@@ -59,8 +59,12 @@ class ConcurrentRecorder:
                 output.setnchannels(endpoint.channels)
                 output.setsampwidth(self.backend.sample_width())
                 output.setframerate(endpoint.sample_rate)
-                while not self.stop_event.is_set():
+                # Complete at least one read so every successfully opened stream leaves
+                # a structurally useful WAV, even when stop races startup.
+                while True:
                     output.writeframesraw(stream.read(self.frames, exception_on_overflow=False))
+                    if self.stop_event.is_set():
+                        break
         except BaseException as exc:
             self.errors.append(exc)
             self.stop_event.set()

@@ -1,27 +1,17 @@
 # GitHub Issue backlog
 
-The initial work is grouped into four GitHub Issues. Issue #2 is the release gate and must be completed first.
+## #2 — P0: managed-PC native WASAPI acceptance
 
-## [#2 — P0: Prove remote Teams audio on an explicitly selected render endpoint](https://github.com/g00dk0nd0u/work_audio_capture/issues/2)
+標準ライブラリ native backend で、非既定も含む明示 render endpoint の remote Teams 音声が `render.wav`、local speech が `microphone.wav` に入ることを実機確認する。CI だけでは閉じない。README の 5 分・60 分手順、Ctrl+C、再接続後の新規 recording、OS/Python/device/driver 情報を記録する。
 
-**Goal:** Prove the core feasibility condition on a representative managed corporate Windows PC.
+## #3 — P0: corporate deployment review
 
-**Acceptance:** Follow the mandatory README procedure with Teams routed to a non-default playback device. Attach OS, CPython, PyAudioWPatch wheel/hash, endpoint/driver details, five-minute samples and 60-minute CPU/memory observations. Confirm audible remote speech in `render.wav`, local speech in `microphone.wav`, clean Ctrl+C output, and a successful new recording after disconnect/reconnect and re-enumeration. This gate must close before claiming the spike complete.
+PRIMARY は CPython と Windows system DLL のみであり、wheel/DLL の配布承認課題は解消した。`ctypes` による Core Audio 利用、microphone privacy、endpoint access、script execution policy を管理 PC で確認する。PyAudioWPatch の wheel/SBOM 審査は、明示的な optional comparison backend を配布する場合だけ必要。
 
-## [#3 — P0: Approve the native audio dependency for corporate PCs](https://github.com/g00dk0nd0u/work_audio_capture/issues/3)
+## #4 — P1: long-session lifecycle
 
-**Goal:** Establish a reproducible, policy-compliant installation path for `PyAudioWPatch==0.2.12.8` and its bundled/patched PortAudio native code.
+P0 実機 gate 後、endpoint notification、device invalidation、suspend、bounded retry、stable endpoint ID による再列挙を一つの state machine として設計する。部分 WAV を readable に保ち deadlock を避け、8 時間 soak test を行う。今回の native vertical slice には reconnect を含めない。
 
-**Acceptance:** Record supported Windows/CPython architectures, wheel hash, licenses, SBOM and scanner output; mirror the wheel internally; validate Python/DLL execution, microphone privacy and endpoint policies without admin rights. Document the rejection/fallback criterion for a future direct-WASAPI prototype.
+## #5 — P1: timing and format policy
 
-## [#4 — P1: Make capture lifecycle reliable for long-running sessions](https://github.com/g00dk0nd0u/work_audio_capture/issues/4)
-
-**Goal:** After the P0 hardware gate, handle the major lifecycle failures as one coherent state machine rather than isolated fixes.
-
-**Acceptance:** Add endpoint notifications, explicit teardown, re-enumeration by stable endpoint identity, user-confirmed fallback and bounded retry for device removal/default changes/suspend. Preserve readable partial WAVs and avoid deadlocks for Ctrl+C, console close, one-stream failure, permission loss and disk-full. Add diagnostic counters and an eight-hour CPU/memory/disk/buffer soak test.
-
-## [#5 — P1: Define time alignment and capture format policy](https://github.com/g00dk0nd0u/work_audio_capture/issues/5)
-
-**Goal:** Quantify the independent render/microphone clock behavior before any mixing or downstream processing.
-
-**Acceptance:** Record monotonic timing metadata, measure drift and gaps, and decide channel/sample-rate conversion policy outside capture callbacks. Explicitly defer mixing, M4A/AAC, chunk rotation, transcription, diarization, GUI/tray and AI integration to later planning.
+render と microphone の独立 clock、gap、drift を計測し、capture callback 外での将来の resampling/channel policy を決める。mixing、M4A/AAC、chunk rotation、transcription、diarization、GUI、AI は引き続き対象外。
