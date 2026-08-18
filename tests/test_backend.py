@@ -57,3 +57,19 @@ def test_source_entry_point_does_not_require_project_installation():
 
     assert result.returncode == 0
     assert "WASAPI loopback + microphone" in result.stdout
+
+
+def test_default_cli_import_does_not_import_optional_pyaudio():
+    repository = Path(__file__).resolve().parents[1]
+    code = (
+        "import sys; sys.path.insert(0, 'src'); import audio_capture.cli; "
+        "assert 'pyaudiowpatch' not in sys.modules"
+    )
+    result = subprocess.run([sys.executable, "-c", code], cwd=repository,
+                            capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_choose_accepts_string_form_for_optional_pyaudio_cli():
+    endpoint = Endpoint(7, "USB headset", 2, 48000, "render-loopback")
+    assert choose([endpoint], "7") is endpoint

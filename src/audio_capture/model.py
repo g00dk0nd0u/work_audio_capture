@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Endpoint:
-    index: int
+    index: int | str
     name: str
     channels: int
     sample_rate: int

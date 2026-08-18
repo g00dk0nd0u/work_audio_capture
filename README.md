@@ -1,100 +1,52 @@
 # work_audio_capture
 
-`work_audio_capture` is a source-executed Windows work-audio recorder foundation for meeting applications (including Microsoft Teams and Zoom), browser/system playback, and microphone speech. This repository is deliberately a vertical slice: it enumerates Windows endpoints, requires an explicit render-loopback endpoint and microphone selection, captures both concurrently, streams PCM into separate WAV files, and stops on Ctrl+C. It does **not** transcribe, provide a GUI, call AI services, mix sources, or compress output.
+Windows の再生エンドポイント・ループバックとマイクを、別々の PCM16 WAV に記録する小さなツールです。
 
-## Decision
+## 配置方針
 
-Use **PyAudioWPatch** for this first pass. It exposes PortAudio's WASAPI loopback devices to Python, supports normal capture streams at the same time, and writes incrementally without an ffmpeg/Node.js/runtime EXE requirement. Crucially, the CLI lists every loopback render endpoint and never silently substitutes the Windows default: Teams may be routed to a headset or other endpoint.
+**PRIMARY: CPython + Windows のみ。** 通常経路は標準ライブラリ `ctypes` から Windows MMDevice / WASAPI を直接使用します。venv、pip、NumPy、ffmpeg、追加 DLL、コンパイルは不要です。
 
-This decision remains conditional on the mandatory hardware test below and corporate deployment approval. The Microsoft loopback contract captures the mix actually played by the selected render endpoint; it does not capture a Teams process by name. A selected device with no audible Teams output will correctly produce silence.
+**OPTIONAL FALLBACK: PyAudioWPatch.** 初期検証で使った実装を比較・障害切り分け用に残していますが、`--backend pyaudio` を明示した場合だけ遅延 import されます。必要なら開発者が `python -m pip install '.[pyaudio]'` で追加します。標準経路には第三者 runtime dependency はありません。
 
-## Install the required audio backend
+PyAudioWPatch-first から移行した理由は、管理 PC で wheel、PYD、同梱 PortAudio DLL の承認・配布を不要にするためです。
 
-The repository's Python source does not need installation. It does require the pinned **PyAudioWPatch 0.2.12.8** native wheel. Use 64-bit CPython 3.10+ matching the approved wheel architecture, preferably with a wheel mirrored in the corporate artifact repository:
+## 実行
 
-```powershell
-py -m venv .venv
-.venv\Scripts\python -m pip install PyAudioWPatch==0.2.12.8
-```
-
-Version `0.2.12.8` supersedes `0.2.12.7` as the current upstream patch release. The loopback enumeration/opening API used here is unchanged, and no concrete compatibility reason to retain `0.2.12.7` was identified, so the newest stable patch is pinned. Reconfirm the approved wheel's hash and supported CPython/Windows tags before corporate rollout.
-
-## Run this repository directly from source
-
-From the repository root, without installing this project:
+リポジトリ直下で、プロジェクト自体を install せず実行します。
 
 ```powershell
-.venv\Scripts\python run.py doctor
-.venv\Scripts\python run.py list
-.venv\Scripts\python run.py record --render 12 --microphone 4
+python run.py doctor
+python run.py list
+python run.py record --render "{endpoint-id}" --microphone "{endpoint-id}" --output recordings
 ```
 
-`doctor` reports Python/Windows architecture, the installed package version,
-backend initialization, and device-discovery counts without recording or printing
-device names. Follow it with `list` to inspect the actual endpoints.
+`list` が表示する安定した Windows endpoint ID を明示してください。Teams が Windows の既定出力を使うとは限らないため、自動的に既定 endpoint へフォールバックしません。選択した render endpoint から実際に聞こえる音の mix を loopback capture し、プロセス別 capture は行いません。停止は Ctrl+C です。
 
-These are three separate validation levels:
+比較時のみ `--backend pyaudio` を付けます。この fallback の ID は PortAudio の数値 index です。
 
-1. **CI/import validation** installs and imports the pinned wheel on 64-bit Windows
-   with CPython 3.10, 3.12, and 3.13. It proves only wheel installation/import.
-2. **Windows runtime preflight** (`doctor`, then `list`) checks native backend loading
-   and endpoint discovery on the target PC.
-3. **Real WASAPI/Teams acceptance** is the mandatory Issue #2 procedure below.
+## 実装と制限
 
-CI cannot approve a corporate binary, exercise managed-PC DLL policy, or prove
-WASAPI loopback capture. Therefore Issue #3 remains open until the managed-PC
-approval and runtime checks are completed.
+各 capture thread は COM を初期化し、`IMMDevice` → `IAudioClient` → `IAudioCaptureClient` を開きます。render は shared mode + `AUDCLNT_STREAMFLAGS_LOOPBACK`、microphone は shared capture です。event callback で packet を待ち、silent flag はゼロ PCM として扱います。mix format の PCM16/24/32 と IEEE float32/64 を標準ライブラリだけで PCM16 に変換します。未知の format は破損 WAV を作らず明示的に失敗します。
 
-The output directory is printed and contains `render.wav` and `microphone.wav`. Use `--output PATH` to retain them in a chosen location. Stop with Ctrl+C.
+この縦切り実装には endpoint 自動再接続、source mixing、drift 補正、chunk rotation、process loopback、GUI、転記はありません。200 ms の有限 event wait により、開始時に無音でも capture loop は継続し、後から始まる再生を待てます。device invalidation は現在の recording をエラー終了させます。
 
-For development convenience only, `python -m pip install -e .` installs the optional `work-audio-capture` command. It is not required for source execution.
+## 必須の実機 acceptance
 
-## Mandatory real Teams acceptance test
+Hosted Windows CI は import、構造・変換 unit test、COM/MMDevice smoke までで、音声 hardware や Teams loopback を証明しません。Issue #2 は次を管理 Windows PC で完了するまで閉じません。
 
-This cannot be validated by CI or on non-Windows hardware. [Issue #2](https://github.com/g00dk0nd0u/work_audio_capture/issues/2) is blocked until all steps pass on a representative managed corporate PC:
+1. `python run.py doctor` が render/capture を各 1 件以上検出することを確認。
+2. `python run.py list` で YouTube/Windows 音声が実際に聞こえる render と使用する microphone の ID を確認。
+3. 上記 `record` を実行し、発話と再生後 Ctrl+C。`render.wav` に再生音、`microphone.wav` にローカル発話があり、双方が再生可能か確認。
+4. Teams で remote speech が聞こえる同じ endpoint を明示して繰り返す。
+5. 5 分、その後 60 分で CPU/メモリ、clean shutdown を確認。切断時は readable な部分 WAV を残して明示的に終了し、再接続後は `list` し直して新規 recording を確認。
 
-1. In Teams, choose a playback device that is **not** the Windows default (preferably a USB headset), and choose a microphone. Confirm a remote participant is audible through that playback device.
-2. Run `python run.py list`. Record the listed indices and verify both the Teams render device's **loopback** entry and intended microphone are present.
-3. Run `python run.py record --render <render-id> --microphone <mic-id>` with those explicit indices. Talk locally while a remote participant talks for at least five minutes, then press Ctrl+C once.
-4. Verify both WAVs are playable: remote speech is audible in `render.wav`, local speech is audible in `microphone.wav`, and neither source was silently replaced by the Windows default.
-5. Repeat for at least 60 minutes while monitoring process CPU and working set. Disconnect/reconnect the selected headset during capture. The current spike is expected to stop with an error after invalidation; verify it exits and leaves readable WAV headers rather than hanging.
-6. Repeat after reconnect by listing endpoints again and starting a new recording. Record OS/Python/device/driver details and results in the acceptance issue.
-
-## Dependency and corporate-PC implications
-
-`PyAudioWPatch==0.2.12.8` is pinned and is **not pure Python**. Its Windows wheel contains a CPython extension and bundled/patched PortAudio native code. These are the remaining native/binary runtime dependencies; this repository adds none of its own. Corporate controls may block PyPI, unapproved wheels/DLL loading, virtual-environment creation, microphone privacy permission, endpoint access, or unsigned/unknown binaries. Python version, bitness, and wheel tags must match. Security review should acquire the wheel through the approved internal artifact repository, retain hashes/SBOM/license data, and vulnerability-scan both the wheel and native library. Building from source instead requires a C/C++ toolchain and PortAudio build dependencies and is not a reasonable end-user fallback.
-
-No ffmpeg, Node.js, packaged application executable, admin access, or audio driver installation is intended. Windows privacy policy and Teams/device exclusive-mode policy still require validation.
-
-## Alternatives considered
-
-| Approach | Result |
-|---|---|
-| PyAudioWPatch | Selected for the spike: direct endpoint loopback enumeration plus concurrent capture, simple streaming API, published Windows wheels; carries native-wheel approval risk. |
-| SoundCard (CFFI/PulseAudio/CoreAudio/WASAPI) | Plausible, but its Windows loopback behavior and device-change edge cases add uncertainty; also has CFFI/native binary dependencies, so it does not avoid corporate approval. Keep as fallback if the real test fails. |
-| Direct WASAPI via `comtypes`/`ctypes` | Technically satisfies the requirements and can reduce third-party binaries, but correct COM/event-driven capture, format conversion, invalidation, and shutdown substantially exceed a short spike. Preferred future fallback if policy forbids PortAudio wheels. |
-| Standard PyAudio / `sounddevice` | Rejected for this slice: upstream APIs do not provide the same straightforward, supported render-loopback discovery path needed here without patches or host-API-specific additions. |
-
-## Lifecycle limits and references
-
-The recorder streams frames directly to disk and closes streams/WAV headers on normal stop or capture failure. It does not yet recover in place from default-device changes, device removal, suspend/resume, format changes, or stalled drivers. Production work should follow OBS's win-wasapi lifecycle patterns (notification-driven reconnect and explicit teardown), and Microsoft's `AUDCLNT_E_DEVICE_INVALIDATED` recovery guidance rather than polling aggressively.
-
-Behavioral references (no implementation copied):
-
-- [Microsoft: Loopback Recording](https://learn.microsoft.com/windows/win32/coreaudio/loopback-recording)
-- [Microsoft: Recovering from an Invalid-Device Error](https://learn.microsoft.com/windows/win32/coreaudio/recovering-from-an-invalid-device-error)
-- [OBS Studio win-wasapi](https://github.com/obsproject/obs-studio/tree/master/plugins/win-wasapi)
-- [PyAudioWPatch](https://github.com/s0d3s/PyAudioWPatch)
-- [SoundCard](https://github.com/bastibe/SoundCard)
-
-## Test
+## 開発テスト
 
 ```bash
+python -m pip install pytest
 PYTHONPATH=src python -m pytest
 python run.py --help
 python -m compileall -q run.py src tests
 ```
 
-GitHub Actions runs these hardware-independent checks plus the Windows pinned-wheel
-installation/import smoke matrix. It does not establish WASAPI or Microsoft Teams
-feasibility; the manual test above remains the P0 release gate.
+参考にした Microsoft の契約: [Loopback Recording](https://learn.microsoft.com/windows/win32/coreaudio/loopback-recording), [IAudioClient::Initialize](https://learn.microsoft.com/windows/win32/api/audioclient/nf-audioclient-iaudioclient-initialize), [IAudioCaptureClient::GetBuffer](https://learn.microsoft.com/windows/win32/api/audioclient/nf-audioclient-iaudiocaptureclient-getbuffer), [MMDevice API](https://learn.microsoft.com/windows/win32/coreaudio/mmdevice-api)。

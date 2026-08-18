@@ -8,6 +8,7 @@ from pathlib import Path
 from .backend import PyAudioWPatchBackend, choose
 from .doctor import run_doctor
 from .model import Endpoint
+from .native_backend import NativeWasapiBackend
 from .recorder import ConcurrentRecorder
 
 
@@ -18,22 +19,32 @@ def _print_group(title: str, endpoints: list[Endpoint]) -> None:
         print(f"  {item.index}: {item.name} ({item.channels}ch, {item.sample_rate}Hz){marker}")
 
 
+def _backend(name: str):
+    return NativeWasapiBackend() if name == "native" else PyAudioWPatchBackend()
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="WASAPI loopback + microphone recording spike")
+    parser = argparse.ArgumentParser(description="WASAPI loopback + microphone recorder")
     parser.add_argument("command", choices=("doctor", "list", "record"))
-    parser.add_argument("--render", type=int, help="loopback endpoint index (required for record)")
-    parser.add_argument("--microphone", type=int, help="capture endpoint index (required for record)")
+    parser.add_argument("--backend", choices=("native", "pyaudio"), default="native",
+                        help="audio backend (default: native; pyaudio is optional)")
+    parser.add_argument("--render", help="explicit render endpoint ID (required for record)")
+    parser.add_argument("--microphone", help="explicit capture endpoint ID (required for record)")
     parser.add_argument("--output", type=Path, help="output directory; defaults to a temporary directory")
     args = parser.parse_args()
-    if args.command == "doctor":
+    if args.command == "doctor" and args.backend == "native":
         return 0 if run_doctor() else 1
 
     backend = None
     try:
-        backend = PyAudioWPatchBackend()
+        backend = _backend(args.backend)
         render, capture = backend.endpoints()
+        if args.command == "doctor":
+            print("Optional PyAudioWPatch backend initialized successfully")
+            print(f"Endpoints: {len(render)} render loopback, {len(capture)} capture")
+            return 0 if render and capture else 1
         if args.command == "list":
-            _print_group("Render endpoints (WASAPI loopback):", render)
+            _print_group("Render endpoints (select the endpoint carrying audible Teams/system audio):", render)
             _print_group("Capture endpoints:", capture)
             return 0
         if args.render is None or args.microphone is None:
@@ -43,10 +54,9 @@ def main() -> int:
         print(f"Recording to {directory}; press Ctrl+C to stop")
         ConcurrentRecorder(backend).record(
             choose(render, args.render), choose(capture, args.microphone),
-            directory / "render.wav", directory / "microphone.wav",
-        )
+            directory / "render.wav", directory / "microphone.wav")
         return 0
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError, OSError) as exc:
         print(f"Audio backend error: {exc}", file=sys.stderr)
         return 1
     finally:

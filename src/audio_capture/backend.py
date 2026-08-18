@@ -67,8 +67,8 @@ class PyAudioWPatchBackend:
         self.audio.terminate()
 
 
-def choose(endpoints: Iterable[Endpoint], index: int) -> Endpoint:
+def choose(endpoints: Iterable[Endpoint], index: int | str) -> Endpoint:
     for endpoint in endpoints:
-        if endpoint.index == index:
+        if endpoint.index == index or str(endpoint.index) == str(index):
             return endpoint
     raise ValueError(f"endpoint index {index} is not available")
