@@ -4,11 +4,13 @@ from audio_capture.doctor import run_doctor
 
 
 class WorkingBackend:
-    def __init__(self):
+    def __init__(self, render=None, capture=None):
         self.closed = False
+        self.render = [object()] if render is None else render
+        self.capture = [object(), object()] if capture is None else capture
 
     def endpoints(self):
-        return [object()], [object(), object()]
+        return self.render, self.capture
 
     def close(self):
         self.closed = True
@@ -55,3 +57,34 @@ def test_doctor_handles_backend_initialization_failure(capsys):
 
     assert not run_doctor(fail, lambda name: "0.2.12.8")
     assert "FAILED: PortAudio initialization failed" in capsys.readouterr().out
+
+
+def test_doctor_fails_without_loopback_endpoint(capsys):
+    backend = WorkingBackend(render=[])
+
+    assert not run_doctor(lambda: backend, lambda name: "0.2.12.8")
+
+    output = capsys.readouterr().out
+    assert "no WASAPI loopback render endpoint found" in output
+    assert "cannot yet capture Teams/system playback" in output
+    assert backend.closed
+
+
+def test_doctor_fails_without_capture_endpoint(capsys):
+    backend = WorkingBackend(capture=[])
+
+    assert not run_doctor(lambda: backend, lambda name: "0.2.12.8")
+
+    assert "no microphone/capture endpoint found" in capsys.readouterr().out
+    assert backend.closed
+
+
+def test_doctor_fails_with_wrong_package_version(capsys):
+    backend = WorkingBackend()
+
+    assert not run_doctor(lambda: backend, lambda name: "0.2.12.7")
+
+    output = capsys.readouterr().out
+    assert "expected 0.2.12.8, detected 0.2.12.7" in output
+    assert "pip install PyAudioWPatch==0.2.12.8" in output
+    assert not backend.closed
