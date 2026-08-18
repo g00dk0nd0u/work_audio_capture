@@ -28,7 +28,7 @@ python run.py record --render "{endpoint-id}" --microphone "{endpoint-id}" --out
 
 各 capture thread は COM を初期化し、`IMMDevice` → `IAudioClient` → `IAudioCaptureClient` を開きます。render は shared mode + `AUDCLNT_STREAMFLAGS_LOOPBACK`、microphone は shared capture です。event callback で packet を待ち、silent flag はゼロ PCM として扱います。mix format の PCM16/24/32 と IEEE float32/64 を標準ライブラリだけで PCM16 に変換します。未知の format は破損 WAV を作らず明示的に失敗します。
 
-この縦切り実装には endpoint 自動再接続、source mixing、drift 補正、chunk rotation、process loopback、GUI、転記はありません。200 ms の有限 event wait により、開始時に無音でも capture loop は継続し、後から始まる再生を待てます。device invalidation は現在の recording をエラー終了させます。
+この縦切り実装には endpoint 自動再接続、source mixing、drift 補正、chunk rotation、process loopback、GUI、転記はありません。200 ms の有限 event wait は shutdown 確認のためだけに制御を返し、synthetic silence は生成しません。記録時間は WASAPI packet（silent packet を含む）の frame 数だけに基づき、開始時に無音でも後から始まる再生を待てます。device invalidation は現在の recording をエラー終了させます。
 
 ## 必須の実機 acceptance
 

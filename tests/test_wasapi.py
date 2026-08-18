@@ -56,3 +56,27 @@ def test_documented_audio_client_vtable_slots_are_kept_in_adapter_source():
     assert "_method(self.client, 3, HRESULT" in source
     assert "_method(self.client, 8, HRESULT" in source
     assert "_method(self.client, 10, HRESULT" in source
+
+
+def test_pcm16_16_valid_preserves_samples():
+    fmt = AudioFormat(1, 48000, 16, 16, "pcm", 2)
+    data = struct.pack("<hhh", -32768, 0, 32767)
+    assert pcm16(data, fmt, 3) == data
+
+
+def test_pcm32_32_valid_scales_by_container_width():
+    fmt = AudioFormat(1, 48000, 32, 32, "pcm", 4)
+    converted = pcm16(struct.pack("<iii", -2147483648, 0, 2147483647), fmt, 3)
+    assert struct.unpack("<hhh", converted) == (-32768, 0, 32767)
+
+
+def test_pcm32_container_24_valid_uses_left_aligned_valid_bits():
+    fmt = AudioFormat(1, 48000, 32, 24, "pcm", 4)
+    # WAVEFORMATEXTENSIBLE puts the unused eight bits in the low end.
+    data = struct.pack("<iii", -8388608 << 8, 0, 8388607 << 8)
+    assert struct.unpack("<hhh", pcm16(data, fmt, 3)) == (-32768, 0, 32767)
+
+
+def test_float64_is_converted_to_pcm16():
+    fmt = AudioFormat(1, 48000, 64, 64, "float", 8)
+    assert struct.unpack("<hhh", pcm16(struct.pack("<ddd", -1.0, 0.0, 1.0), fmt, 3)) == (-32767, 0, 32767)

@@ -173,6 +173,13 @@ def interpret_format(fmt: WAVEFORMATEX) -> AudioFormat:
         valid = ext.wValidBitsPerSample or fmt.wBitsPerSample
     if kind is None or (kind == "float" and fmt.wBitsPerSample not in (32, 64)) or (kind == "pcm" and fmt.wBitsPerSample not in (16, 24, 32)):
         raise ValueError(f"unsupported WASAPI format tag={fmt.wFormatTag} bits={fmt.wBitsPerSample}")
+    if kind == "pcm" and not 16 <= valid <= fmt.wBitsPerSample:
+        raise ValueError(
+            f"unsupported PCM valid-bits layout: {valid} valid bits in "
+            f"{fmt.wBitsPerSample}-bit container"
+        )
+    if kind == "float" and valid != fmt.wBitsPerSample:
+        raise ValueError("unsupported extensible float valid-bits layout")
     expected = fmt.nChannels * ((fmt.wBitsPerSample + 7) // 8)
     if not fmt.nChannels or fmt.nBlockAlign != expected:
         raise ValueError("invalid WASAPI channel/block alignment")
@@ -195,7 +202,10 @@ def pcm16(data: bytes, fmt: AudioFormat, frames: int, silent: bool = False) -> b
     for pos in range(samples):
         chunk = data[pos * width:(pos + 1) * width]
         value = int.from_bytes(chunk, "little", signed=True)
-        shift = max(0, fmt.valid_bits - 16)
+        # WAVEFORMATEXTENSIBLE stores valid PCM bits left-aligned in the
+        # container; padding therefore occupies the least-significant bits.
+        # Scaling to PCM16 is based on container width, not valid precision.
+        shift = fmt.bits - 16
         value = max(-32768, min(32767, value >> shift))
         struct.pack_into("<h", out, pos * 2, value)
     return bytes(out)

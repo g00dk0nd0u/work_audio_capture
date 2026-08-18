@@ -133,8 +133,11 @@ class NativeWasapiStream:
                 self.client, ctypes.byref(IID_IAudioCaptureClient), ctypes.byref(self.capture)), "IAudioClient.GetService(IAudioCaptureClient)")
             check_hresult(_method(self.client, 10, HRESULT)(self.client), "IAudioClient.Start")
             self.started = True
-        except BaseException:
-            self.close()
+        except BaseException as exc:
+            try:
+                self.close()
+            except BaseException as cleanup_error:
+                raise exc from cleanup_error
             raise
 
     def read(self, frames: int, exception_on_overflow: bool = False) -> bytes:
@@ -143,8 +146,10 @@ class NativeWasapiStream:
         while len(self.pending) < target:
             wait = kernel32.WaitForSingleObject(self.event, 200)
             if wait == WAIT_TIMEOUT:
-                self.pending.extend(bytes(target - len(self.pending)))
-                break
+                # The timeout exists only to return control to the recorder so
+                # it can observe shutdown. WASAPI packet frame counts, including
+                # SILENT packets, are the sole source of recorded duration.
+                return b""
             if wait != WAIT_OBJECT_0:
                 raise ctypes.WinError()
             while True:
@@ -170,13 +175,27 @@ class NativeWasapiStream:
             self.started = False
 
     def close(self) -> None:
+        first_error: BaseException | None = None
+
+        def cleanup(action) -> None:
+            nonlocal first_error
+            try:
+                action()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+
         if self.started:
-            self.stop_stream()
-        release(self.capture); release(self.client); release(self.device); release(self.enumerator)
+            cleanup(self.stop_stream)
+        for pointer in (self.capture, self.client, self.device, self.enumerator):
+            cleanup(lambda pointer=pointer: release(pointer))
         if self.event:
-            ctypes.windll.kernel32.CloseHandle(self.event)
+            event = self.event
             self.event = None
-        self.apartment.__exit__(None, None, None)
+            cleanup(lambda: ctypes.windll.kernel32.CloseHandle(event))
+        cleanup(lambda: self.apartment.__exit__(None, None, None))
+        if first_error is not None:
+            raise first_error
 
 
 class NativeWasapiBackend:
