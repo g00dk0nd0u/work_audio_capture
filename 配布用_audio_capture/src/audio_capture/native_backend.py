@@ -53,6 +53,14 @@ def _default_device_id(enumerator: LPVOID, flow: int) -> str:
         release(device)
 
 
+def _safe_default_device_id(enumerator: LPVOID, flow: int) -> str | None:
+    try:
+        return _default_device_id(enumerator, flow)
+    except OSError as exc:
+        print(f"Could not determine default endpoint: {exc}", file=sys.stderr)
+        return None
+
+
 def _friendly_name(device: LPVOID) -> str:
     store = LPVOID()
     prop = PROPVARIANT()
@@ -90,7 +98,7 @@ def enumerate_endpoints(flow: int) -> list[NativeEndpointInfo]:
     results: list[NativeEndpointInfo] = []
     try:
         enumerator = _create_enumerator()
-        default_id = _default_device_id(enumerator, flow)
+        default_id = _safe_default_device_id(enumerator, flow)
         collection = LPVOID()
         check_hresult(_method(enumerator, 3, HRESULT, ctypes.c_int, DWORD, ctypes.POINTER(LPVOID))(
             enumerator, flow, DEVICE_STATE_ACTIVE, ctypes.byref(collection)), "IMMDeviceEnumerator.EnumAudioEndpoints")

@@ -58,7 +58,7 @@ def main() -> int:
         print(f"Recording to {directory}; press Ctrl+C to stop")
         ConcurrentRecorder(backend).record(
             choose(render, args.render), choose(capture, args.microphone),
-            directory / "render.wav", directory / "microphone.wav")
+            directory / "render_0001.wav", directory / "microphone_0001.wav")
         return 0
     except (RuntimeError, ValueError, OSError) as exc:
         print(f"Audio backend error: {exc}", file=sys.stderr)

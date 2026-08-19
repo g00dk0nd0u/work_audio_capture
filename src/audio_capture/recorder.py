@@ -20,9 +20,11 @@ class Backend(Protocol):
 
 
 class ConcurrentRecorder:
-    def __init__(self, backend: Backend, frames_per_buffer: int = 1024) -> None:
+    def __init__(self, backend: Backend, frames_per_buffer: int = 1024,
+                 chunk_duration_seconds: int = 3600) -> None:
         self.backend = backend
         self.frames = frames_per_buffer
+        self.chunk_duration_seconds = chunk_duration_seconds
         self.stop_event = threading.Event()
         self.errors: list[BaseException] = []
 
@@ -53,22 +55,51 @@ class ConcurrentRecorder:
 
     def _capture(self, endpoint: Endpoint, path: Path) -> None:
         stream = None
+        capture_error: BaseException | None = None
         try:
             stream = self.backend.open_input(endpoint, self.frames)
-            with wave.open(str(path), "wb") as output:
-                output.setnchannels(endpoint.channels)
-                output.setsampwidth(self.backend.sample_width())
-                output.setframerate(endpoint.sample_rate)
-                # Complete at least one read so every successfully opened stream leaves
-                # a structurally useful WAV, even when stop races startup.
-                while True:
-                    output.writeframesraw(stream.read(self.frames, exception_on_overflow=False))
-                    if self.stop_event.is_set():
-                        break
+            sample_width = self.backend.sample_width()
+            frames_in_chunk = 0
+            chunk_number = 1
+            while True:
+                chunk_path = path if chunk_number == 1 else path.with_name(
+                    f"{path.stem.rsplit('_', 1)[0]}_{chunk_number:04d}{path.suffix}"
+                    if path.stem.rsplit('_', 1)[-1].isdigit() else
+                    f"{path.stem}_{chunk_number:04d}{path.suffix}"
+                )
+                with wave.open(str(chunk_path), "wb") as output:
+                    output.setnchannels(endpoint.channels)
+                    output.setsampwidth(sample_width)
+                    output.setframerate(endpoint.sample_rate)
+                    frames_in_chunk = 0
+                    # Complete at least one read so every successfully opened stream leaves
+                    # a structurally useful WAV, even when stop races startup.
+                    while True:
+                        data = stream.read(self.frames, exception_on_overflow=False)
+                        output.writeframesraw(data)
+                        frames_in_chunk += len(data) // (endpoint.channels * sample_width)
+                        if self.stop_event.is_set():
+                            return
+                        if (self.chunk_duration_seconds > 0 and
+                                frames_in_chunk >= endpoint.sample_rate * self.chunk_duration_seconds):
+                            chunk_number += 1
+                            break
         except BaseException as exc:
+            capture_error = exc
             self.errors.append(exc)
             self.stop_event.set()
         finally:
             if stream is not None:
-                stream.stop_stream()
-                stream.close()
+                cleanup_error: BaseException | None = None
+                try:
+                    stream.stop_stream()
+                except BaseException as exc:
+                    cleanup_error = exc
+                try:
+                    stream.close()
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+                if capture_error is None and cleanup_error is not None:
+                    self.errors.append(cleanup_error)
+                    self.stop_event.set()

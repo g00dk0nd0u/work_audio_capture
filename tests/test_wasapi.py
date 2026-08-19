@@ -5,7 +5,8 @@ import pytest
 
 from audio_capture.wasapi import (
     AudioFormat, GUID, HResultError, WAVEFORMATEX, check_hresult,
-    interpret_format, pcm16,
+    WAVEFORMATEXTENSIBLE, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
+    KSDATAFORMAT_SUBTYPE_PCM, WAVE_FORMAT_EXTENSIBLE, interpret_format, pcm16,
 )
 
 
@@ -80,3 +81,29 @@ def test_pcm32_container_24_valid_uses_left_aligned_valid_bits():
 def test_float64_is_converted_to_pcm16():
     fmt = AudioFormat(1, 48000, 64, 64, "float", 8)
     assert struct.unpack("<hhh", pcm16(struct.pack("<ddd", -1.0, 0.0, 1.0), fmt, 3)) == (-32767, 0, 32767)
+
+
+def _extensible(subformat, bits=32, valid_bits=32):
+    return WAVEFORMATEXTENSIBLE(
+        WAVEFORMATEX(WAVE_FORMAT_EXTENSIBLE, 2, 48000, 384000, 8, bits, 22),
+        valid_bits, 3, subformat,
+    )
+
+
+def test_extensible_pcm32_is_interpreted():
+    assert interpret_format(_extensible(KSDATAFORMAT_SUBTYPE_PCM)) == AudioFormat(
+        2, 48000, 32, 32, "pcm", 8)
+
+
+def test_extensible_pcm32_container_with_24_valid_bits_is_interpreted():
+    assert interpret_format(_extensible(KSDATAFORMAT_SUBTYPE_PCM, valid_bits=24)).valid_bits == 24
+
+
+def test_extensible_float32_is_interpreted():
+    assert interpret_format(_extensible(KSDATAFORMAT_SUBTYPE_IEEE_FLOAT)) == AudioFormat(
+        2, 48000, 32, 32, "float", 8)
+
+
+def test_extensible_unknown_subformat_fails_clearly():
+    with pytest.raises(ValueError, match="WAVEFORMATEXTENSIBLE SubFormat"):
+        interpret_format(_extensible(GUID.from_string("12345678-1234-1234-1234-123456789abc")))

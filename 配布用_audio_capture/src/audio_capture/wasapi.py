@@ -167,7 +167,8 @@ class AudioFormat:
 
 def interpret_format(fmt: Any) -> AudioFormat:
     raw = fmt if hasattr(fmt, "contents") else ctypes.pointer(fmt)
-    fmt = raw.contents
+    base = ctypes.cast(raw, ctypes.POINTER(WAVEFORMATEX))
+    fmt = base.contents
     kind = "pcm" if fmt.wFormatTag == WAVE_FORMAT_PCM else "float" if fmt.wFormatTag == WAVE_FORMAT_IEEE_FLOAT else None
     valid = fmt.wBitsPerSample
     if fmt.wFormatTag == WAVE_FORMAT_EXTENSIBLE:
@@ -176,6 +177,8 @@ def interpret_format(fmt: Any) -> AudioFormat:
         ext = ctypes.cast(raw, ctypes.POINTER(WAVEFORMATEXTENSIBLE)).contents
         kind = "pcm" if ext.SubFormat == KSDATAFORMAT_SUBTYPE_PCM else "float" if ext.SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT else None
         valid = ext.wValidBitsPerSample or fmt.wBitsPerSample
+        if kind is None:
+            raise ValueError("unsupported WAVEFORMATEXTENSIBLE SubFormat")
     if kind is None or (kind == "float" and fmt.wBitsPerSample not in (32, 64)) or (kind == "pcm" and fmt.wBitsPerSample not in (16, 24, 32)):
         raise ValueError(f"unsupported WASAPI format tag={fmt.wFormatTag} bits={fmt.wBitsPerSample}")
     if kind == "pcm" and not 16 <= valid <= fmt.wBitsPerSample:

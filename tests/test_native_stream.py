@@ -3,7 +3,7 @@ import ctypes
 import pytest
 
 import audio_capture.native_backend as native
-from audio_capture.wasapi import AudioFormat, LPVOID, WAIT_TIMEOUT
+from audio_capture.wasapi import AudioFormat, LPVOID, WAIT_TIMEOUT, eRender
 
 
 class TimeoutKernel:
@@ -63,3 +63,31 @@ def test_getbuffer_releasebuffer_pair_is_protected_by_finally():
     finally_clause = source.index("finally:", get_buffer)
     release_buffer = source.index('"IAudioCaptureClient.ReleaseBuffer"', finally_clause)
     assert get_buffer < finally_clause < release_buffer
+
+
+def test_default_endpoint_failure_does_not_abort_endpoint_enumeration(monkeypatch):
+    enumerator = LPVOID(1)
+    collection = LPVOID(2)
+    device = LPVOID(3)
+
+    def fake_method(pointer, index, restype, *argtypes):
+        if pointer.value == 1 and index == 3:
+            return lambda _pointer, _flow, _state, result: setattr(result._obj, "value", 2)
+        if pointer.value == 2 and index == 3:
+            return lambda _pointer, count: setattr(count._obj, "value", 1)
+        if pointer.value == 2 and index == 4:
+            return lambda _pointer, _index, result: setattr(result._obj, "value", 3)
+        raise AssertionError((pointer.value, index))
+
+    monkeypatch.setattr(native, "_create_enumerator", lambda: enumerator)
+    monkeypatch.setattr(native, "_default_device_id", lambda _enumerator, _flow: (_ for _ in ()).throw(OSError("default unavailable")))
+    monkeypatch.setattr(native, "_method", fake_method)
+    monkeypatch.setattr(native, "_mix_format", lambda _device: AudioFormat(2, 48000, 16, 16, "pcm", 4))
+    monkeypatch.setattr(native, "_device_id", lambda _device: "endpoint-id")
+    monkeypatch.setattr(native, "_friendly_name", lambda _device: "Speakers")
+    monkeypatch.setattr(native, "release", lambda _pointer: None)
+
+    endpoints = native.enumerate_endpoints(eRender)
+
+    assert len(endpoints) == 1
+    assert endpoints[0].endpoint.is_default is False
