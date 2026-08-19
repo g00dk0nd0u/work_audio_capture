@@ -24,7 +24,7 @@ python run.py record --render "{endpoint-id}" --microphone "{endpoint-id}" --out
 
 ### ワンクリック録音
 
-`python run.py list` で確認した ID を `record_one_click.py` の `RENDER_ENDPOINT_ID` と `MICROPHONE_ENDPOINT_ID` に貼り付けてから、ファイルをダブルクリックします。録音終了後、2つの音声をミックスした `recording.wav` だけが `recordings\YYYY-MM-DD_HH-MM-SS` に保存されます。停止は Ctrl+C です。
+ファイルをダブルクリックすると、Windows の既定の再生デバイスとマイクを自動選択します。録音終了後、2つの音声をミックスした `recording.wav` だけが `recordings\YYYY-MM-DD_HH-MM-SS` に保存されます。停止は Ctrl+C です。既定以外の endpoint を使う場合は、通常の `record` コマンドで明示指定してください。
 
 比較時のみ `--backend pyaudio` を付けます。この fallback の ID は PortAudio の数値 index です。
 
