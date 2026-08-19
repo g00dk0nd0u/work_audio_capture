@@ -1,50 +1,289 @@
-# work_audio_capture
+# Work Audio Capture
 
-Windows の再生エンドポイント・ループバックとマイクを、別々の PCM16 WAV に記録する小さなツールです。
+Windows PCで、**PCから聞こえる音（Teams / Zoom / YouTube など）とマイク音声を同時に録音**するための軽量ツールです。
 
-## 配置方針
+- Windows専用
+- Python 3.10以上
+- pip install不要
+- NumPy / ffmpeg / 追加DLL不要
+- PC再生音とマイク音声を1つのWAVにまとめて保存
 
-**PRIMARY: CPython + Windows のみ。** 通常経路は標準ライブラリ `ctypes` から Windows MMDevice / WASAPI を直接使用します。venv、pip、NumPy、ffmpeg、追加 DLL、コンパイルは不要です。
+> **English instructions are below.**
 
-**OPTIONAL FALLBACK: PyAudioWPatch.** 初期検証で使った実装を比較・障害切り分け用に残していますが、`--backend pyaudio` を明示した場合だけ遅延 import されます。必要なら開発者が `python -m pip install '.[pyaudio]'` で追加します。標準経路には第三者 runtime dependency はありません。
+---
 
-PyAudioWPatch-first から移行した理由は、管理 PC で wheel、PYD、同梱 PortAudio DLL の承認・配布を不要にするためです。
+# 日本語
 
-## 実行
+## いちばん簡単な使い方
 
-リポジトリ直下で、プロジェクト自体を install せず実行します。
+### 1. Pythonをインストール
+
+Windowsに **Python 3.10以上** が必要です。
+
+Pythonをすでに使っている場合は、そのままで構いません。
+
+### 2. 配布用ZIPをダウンロード
+
+このリポジトリにある **`配布用_audio_capture.zip`** をダウンロードして解凍します。
+
+### 3. 録音開始
+
+解凍したフォルダ内の
+
+```text
+start_recording.bat
+```
+
+をダブルクリックします。
+
+黒いコマンド画面が開き、そのまま録音が始まります。
+
+このツールは自動的に、Windowsで現在「既定」になっている
+
+- 再生デバイス（スピーカー / ヘッドホン）
+- マイク
+
+を使用します。
+
+### 4. 録音停止
+
+録音を止めるときは、黒い画面を選択して
+
+```text
+Ctrl + C
+```
+
+を押してください。
+
+**録音中に黒い画面を×ボタンで閉じないでください。** WAVファイルが正常に終了処理されない場合があります。
+
+### 5. 録音ファイルを確認
+
+録音終了後、次の場所に保存されます。
+
+```text
+recordings\YYYY-MM-DD_HH-MM-SS\recording_0001.wav
+```
+
+長時間録音などで複数ファイルに分割された場合は、
+
+```text
+recording_0001.wav
+recording_0002.wav
+recording_0003.wav
+...
+```
+
+のように保存されます。
+
+各ファイルには、**PC再生音 + マイク音声** がミックスされています。
+
+## Teams / Zoomで使う場合
+
+録音開始前に、Windows・Teams・Zoom側で実際に使用したい
+
+- スピーカー / ヘッドホン
+- マイク
+
+を「既定」または使用中のデバイスとして設定してください。
+
+このツールはPC全体の再生音を録音するため、会議相手の音声だけでなく、同時に再生した通知音やYouTubeなども録音されます。
+
+## マイクが録音されない場合
+
+Windowsの
+
+**設定 → プライバシーとセキュリティ → マイク**
+
+で、Pythonからマイクを使用できる状態になっていることを確認してください。
+
+## エラーが出た場合
+
+同じフォルダに
+
+```text
+audio_capture.log
+```
+
+が作成されます。録音履歴やエラー内容が記録されています。
+
+---
+
+## 詳細操作（必要な場合のみ）
+
+通常は `start_recording.bat` だけで使用できます。
+
+特定の再生デバイスやマイクを手動指定したい場合は、リポジトリ直下で以下を実行します。
+
+### 動作確認
 
 ```powershell
 python run.py doctor
+```
+
+### 使用可能な音声デバイス一覧
+
+```powershell
 python run.py list
+```
+
+### デバイスを指定して録音
+
+```powershell
 python run.py record --render "{endpoint-id}" --microphone "{endpoint-id}" --output recordings
 ```
 
-`list` が表示する安定した Windows endpoint ID を明示してください。Teams が Windows の既定出力を使うとは限らないため、自動的に既定 endpoint へフォールバックしません。選択した render endpoint から実際に聞こえる音の mix を loopback capture し、プロセス別 capture は行いません。標準の `record` コマンドは render と microphone を別々の WAV に保存します。停止は Ctrl+C です。
+停止は `Ctrl+C` です。
 
-### ワンクリック録音
+`record` コマンドではPC再生音とマイク音声を別々のWAVとして記録します。
 
-ファイルをダブルクリックすると、Windows の既定の再生デバイスとマイクを自動選択します。録音終了後、2つの音声をミックスした `recording.wav` だけが `recordings\YYYY-MM-DD_HH-MM-SS` に保存されます。停止は Ctrl+C です。既定以外の endpoint を使う場合は、通常の `record` コマンドで明示指定してください。
+---
 
-比較時のみ `--backend pyaudio` を付けます。この fallback の ID は PortAudio の数値 index です。
+# English
 
-## 実装と制限
+## What this tool does
 
-各 capture thread は COM を初期化し、`IMMDevice` → `IAudioClient` → `IAudioCaptureClient` を開きます。render は shared mode + `AUDCLNT_STREAMFLAGS_LOOPBACK`、microphone は shared capture です。event callback で packet を待ち、silent flag はゼロ PCM として扱います。mix format の PCM16/24/32 と IEEE float32/64 を標準ライブラリだけで PCM16 に変換します。未知の format は破損 WAV を作らず明示的に失敗します。
+Work Audio Capture records both:
 
-この縦切り実装には endpoint 自動再接続、source mixing、drift 補正、chunk rotation、process loopback、GUI、転記はありません。200 ms の有限 event wait は shutdown 確認のためだけに制御を返し、synthetic silence は生成しません。記録時間は WASAPI packet（silent packet を含む）の frame 数だけに基づき、開始時に無音でも後から始まる再生を待てます。device invalidation は現在の recording をエラー終了させます。
+- **audio played by your Windows PC** (Teams, Zoom, YouTube, etc.)
+- **your microphone**
 
-## 必須の実機 acceptance
+at the same time.
 
-Hosted Windows CI は import、構造・変換 unit test、COM/MMDevice smoke までで、音声 hardware や Teams loopback を証明しません。Issue #2 は次を管理 Windows PC で完了するまで閉じません。
+The one-click version combines both sources into WAV files automatically.
 
-1. `python run.py doctor` が render/capture を各 1 件以上検出することを確認。
-2. `python run.py list` で YouTube/Windows 音声が実際に聞こえる render と使用する microphone の ID を確認。
-3. 上記 `record` を実行し、発話と再生後 Ctrl+C。`render.wav` に再生音、`microphone.wav` にローカル発話があり、双方が再生可能か確認。
-4. Teams で remote speech が聞こえる同じ endpoint を明示して繰り返す。
-5. 5 分、その後 60 分で CPU/メモリ、clean shutdown を確認。切断時は readable な部分 WAV を残して明示的に終了し、再接続後は `list` し直して新規 recording を確認。
+Requirements:
 
-## 開発テスト
+- Windows
+- Python 3.10 or later
+- No `pip install` required
+- No NumPy
+- No ffmpeg
+- No additional DLLs
+
+## Quick start
+
+### 1. Install Python
+
+Install **Python 3.10 or later** on Windows.
+
+If Python is already installed, you can use your existing installation.
+
+### 2. Download the distribution ZIP
+
+Download **`配布用_audio_capture.zip`** from this repository and extract it.
+
+### 3. Start recording
+
+Open the extracted folder and double-click:
+
+```text
+start_recording.bat
+```
+
+A Command Prompt window will open and recording will start automatically.
+
+The tool uses your current Windows default:
+
+- playback device (speakers / headphones)
+- microphone
+
+### 4. Stop recording
+
+Select the Command Prompt window and press:
+
+```text
+Ctrl + C
+```
+
+**Do not close the window with the X button while recording.** The WAV file may not be finalized correctly.
+
+### 5. Find your recording
+
+Recordings are saved under:
+
+```text
+recordings\YYYY-MM-DD_HH-MM-SS\recording_0001.wav
+```
+
+For longer recordings, multiple files may be created:
+
+```text
+recording_0001.wav
+recording_0002.wav
+recording_0003.wav
+...
+```
+
+Each file contains the combined **PC playback audio + microphone audio**.
+
+## Using it with Teams or Zoom
+
+Before starting the recorder, make sure Windows, Teams, or Zoom is using the playback device and microphone you want to capture.
+
+This tool records the audio mix heard from the selected Windows playback device. Therefore, notification sounds, YouTube audio, and other system playback may also be recorded.
+
+## If the microphone is not recorded
+
+Open:
+
+**Windows Settings → Privacy & security → Microphone**
+
+and make sure microphone access is allowed for Python / desktop applications.
+
+## Troubleshooting
+
+A log file is created in the same folder:
+
+```text
+audio_capture.log
+```
+
+It contains recording history and error details.
+
+---
+
+## Advanced command-line usage
+
+Most users only need `start_recording.bat`.
+
+If you need to select specific Windows audio endpoints manually, run the following commands from the repository root.
+
+### Check the system
+
+```powershell
+python run.py doctor
+```
+
+### List available audio devices
+
+```powershell
+python run.py list
+```
+
+### Record selected devices
+
+```powershell
+python run.py record --render "{endpoint-id}" --microphone "{endpoint-id}" --output recordings
+```
+
+Press `Ctrl+C` to stop.
+
+The standard `record` command stores playback audio and microphone audio as separate WAV files.
+
+---
+
+## Technical notes
+
+The default backend uses Windows MMDevice / WASAPI directly through Python's standard-library `ctypes`.
+
+Playback audio is captured using WASAPI loopback, while the microphone is captured separately in shared mode. PCM and IEEE float Windows mix formats are converted to PCM16 WAV without third-party runtime dependencies.
+
+An optional PyAudioWPatch backend remains available for development and troubleshooting, but it is **not required for normal use**.
+
+This project currently does not provide process-specific audio capture, automatic device reconnection, transcription, or a GUI.
+
+### Developer tests
 
 ```bash
 python -m pip install pytest
@@ -53,4 +292,9 @@ python run.py --help
 python -m compileall -q run.py src tests
 ```
 
-参考にした Microsoft の契約: [Loopback Recording](https://learn.microsoft.com/windows/win32/coreaudio/loopback-recording), [IAudioClient::Initialize](https://learn.microsoft.com/windows/win32/api/audioclient/nf-audioclient-iaudioclient-initialize), [IAudioCaptureClient::GetBuffer](https://learn.microsoft.com/windows/win32/api/audioclient/nf-audioclient-iaudiocaptureclient-getbuffer), [MMDevice API](https://learn.microsoft.com/windows/win32/coreaudio/mmdevice-api)。
+Microsoft references:
+
+- [Loopback Recording](https://learn.microsoft.com/windows/win32/coreaudio/loopback-recording)
+- [IAudioClient::Initialize](https://learn.microsoft.com/windows/win32/api/audioclient/nf-audioclient-iaudioclient-initialize)
+- [IAudioCaptureClient::GetBuffer](https://learn.microsoft.com/windows/win32/api/audioclient/nf-audiocaptureclient-getbuffer)
+- [MMDevice API](https://learn.microsoft.com/windows/win32/coreaudio/mmdevice-api)
