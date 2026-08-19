@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -67,7 +68,7 @@ def _mix_format(device: LPVOID) -> AudioFormat:
     raw = ctypes.POINTER(WAVEFORMATEX)()
     try:
         check_hresult(_method(client, 8, HRESULT, ctypes.POINTER(ctypes.POINTER(WAVEFORMATEX)))(client, ctypes.byref(raw)), "IAudioClient.GetMixFormat")
-        return interpret_format(raw.contents)
+        return interpret_format(raw)
     finally:
         if raw:
             ctypes.windll.ole32.CoTaskMemFree(raw)
@@ -88,7 +89,11 @@ def enumerate_endpoints(flow: int) -> list[NativeEndpointInfo]:
             device = LPVOID()
             try:
                 check_hresult(_method(collection, 4, HRESULT, UINT32, ctypes.POINTER(LPVOID))(collection, index, ctypes.byref(device)), "IMMDeviceCollection.Item")
-                fmt = _mix_format(device)
+                try:
+                    fmt = _mix_format(device)
+                except ValueError as exc:
+                    print(f"Skipping endpoint {index}: {exc}", file=sys.stderr)
+                    continue
                 endpoint = Endpoint(_device_id(device), _friendly_name(device), fmt.channels, fmt.sample_rate,
                                     "render-loopback" if flow == eRender else "microphone")
                 results.append(NativeEndpointInfo(endpoint, flow))
@@ -117,7 +122,7 @@ class NativeWasapiStream:
             raw = ctypes.POINTER(WAVEFORMATEX)()
             check_hresult(_method(self.client, 8, HRESULT, ctypes.POINTER(ctypes.POINTER(WAVEFORMATEX)))(self.client, ctypes.byref(raw)), "IAudioClient.GetMixFormat")
             try:
-                self.format = interpret_format(raw.contents)
+                self.format = interpret_format(raw)
                 flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK | (AUDCLNT_STREAMFLAGS_LOOPBACK if flow == eRender else 0)
                 check_hresult(_method(self.client, 3, HRESULT, ctypes.c_int, DWORD, ctypes.c_longlong, ctypes.c_longlong,
                                       ctypes.POINTER(WAVEFORMATEX), LPVOID)(

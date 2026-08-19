@@ -66,6 +66,7 @@ class GUID(ctypes.Structure):
 
 
 class WAVEFORMATEX(ctypes.Structure):
+    _pack_ = 2
     _fields_ = [("wFormatTag", ctypes.c_ushort), ("nChannels", ctypes.c_ushort),
                 ("nSamplesPerSec", DWORD), ("nAvgBytesPerSec", DWORD),
                 ("nBlockAlign", ctypes.c_ushort), ("wBitsPerSample", ctypes.c_ushort),
@@ -73,6 +74,7 @@ class WAVEFORMATEX(ctypes.Structure):
 
 
 class WAVEFORMATEXTENSIBLE(ctypes.Structure):
+    _pack_ = 2
     _fields_ = [("Format", WAVEFORMATEX), ("wValidBitsPerSample", ctypes.c_ushort),
                 ("dwChannelMask", DWORD), ("SubFormat", GUID)]
 
@@ -162,13 +164,15 @@ class AudioFormat:
     block_align: int
 
 
-def interpret_format(fmt: WAVEFORMATEX) -> AudioFormat:
+def interpret_format(fmt: Any) -> AudioFormat:
+    raw = fmt if hasattr(fmt, "contents") else ctypes.pointer(fmt)
+    fmt = raw.contents
     kind = "pcm" if fmt.wFormatTag == WAVE_FORMAT_PCM else "float" if fmt.wFormatTag == WAVE_FORMAT_IEEE_FLOAT else None
     valid = fmt.wBitsPerSample
     if fmt.wFormatTag == WAVE_FORMAT_EXTENSIBLE:
         if fmt.cbSize < 22:
             raise ValueError("invalid WAVEFORMATEXTENSIBLE size")
-        ext = ctypes.cast(ctypes.pointer(fmt), ctypes.POINTER(WAVEFORMATEXTENSIBLE)).contents
+        ext = ctypes.cast(raw, ctypes.POINTER(WAVEFORMATEXTENSIBLE)).contents
         kind = "pcm" if ext.SubFormat == KSDATAFORMAT_SUBTYPE_PCM else "float" if ext.SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT else None
         valid = ext.wValidBitsPerSample or fmt.wBitsPerSample
     if kind is None or (kind == "float" and fmt.wBitsPerSample not in (32, 64)) or (kind == "pcm" and fmt.wBitsPerSample not in (16, 24, 32)):

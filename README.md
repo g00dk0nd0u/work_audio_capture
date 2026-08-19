@@ -20,7 +20,11 @@ python run.py list
 python run.py record --render "{endpoint-id}" --microphone "{endpoint-id}" --output recordings
 ```
 
-`list` が表示する安定した Windows endpoint ID を明示してください。Teams が Windows の既定出力を使うとは限らないため、自動的に既定 endpoint へフォールバックしません。選択した render endpoint から実際に聞こえる音の mix を loopback capture し、プロセス別 capture は行いません。停止は Ctrl+C です。
+`list` が表示する安定した Windows endpoint ID を明示してください。Teams が Windows の既定出力を使うとは限らないため、自動的に既定 endpoint へフォールバックしません。選択した render endpoint から実際に聞こえる音の mix を loopback capture し、プロセス別 capture は行いません。標準の `record` コマンドは render と microphone を別々の WAV に保存します。停止は Ctrl+C です。
+
+### ワンクリック録音
+
+`python run.py list` で確認した ID を `record_one_click.py` の `RENDER_ENDPOINT_ID` と `MICROPHONE_ENDPOINT_ID` に貼り付けてから、ファイルをダブルクリックします。録音終了後、2つの音声をミックスした `recording.wav` だけが `recordings\YYYY-MM-DD_HH-MM-SS` に保存されます。停止は Ctrl+C です。
 
 比較時のみ `--backend pyaudio` を付けます。この fallback の ID は PortAudio の数値 index です。
 
