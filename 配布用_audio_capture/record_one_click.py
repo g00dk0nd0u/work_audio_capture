@@ -93,9 +93,38 @@ def _mix_recordings(render_path: Path, microphone_path: Path, output_path: Path)
                 output_file.writeframesraw(mixed_samples.tobytes())
 
 
-def _recording_chunks(directory: Path, stem: str) -> list[Path]:
-    chunks = sorted(directory.glob(f"{stem}_[0-9][0-9][0-9][0-9].wav"))
-    return chunks or [directory / f"{stem}.wav"]
+def _recording_chunks(directory: Path, stem: str) -> dict[int, Path]:
+    chunks = {
+        int(path.stem.rsplit("_", 1)[1]): path
+        for path in directory.glob(f"{stem}_[0-9][0-9][0-9][0-9].wav")
+    }
+    if not chunks:
+        legacy_path = directory / f"{stem}.wav"
+        if legacy_path.exists():
+            chunks[1] = legacy_path
+    return chunks
+
+
+def _mix_available_chunks(output: Path, logger: logging.Logger) -> None:
+    render_chunks = _recording_chunks(output, "render")
+    microphone_chunks = _recording_chunks(output, "microphone")
+    common_chunks = sorted(render_chunks.keys() & microphone_chunks.keys())
+    missing_render = sorted(microphone_chunks.keys() - render_chunks.keys())
+    missing_microphone = sorted(render_chunks.keys() - microphone_chunks.keys())
+    if missing_render or missing_microphone:
+        logger.warning(
+            "Unpaired recording chunks kept: missing_render=%s missing_microphone=%s",
+            missing_render, missing_microphone,
+        )
+    if not common_chunks:
+        raise ValueError("no matching render/microphone chunks were found; source WAVs were kept")
+    for chunk_number in common_chunks:
+        _mix_recordings(
+            render_chunks[chunk_number], microphone_chunks[chunk_number],
+            output / f"recording_{chunk_number:04d}.wav",
+        )
+        render_chunks[chunk_number].unlink()
+        microphone_chunks[chunk_number].unlink()
 
 
 def run() -> int:
@@ -135,14 +164,7 @@ def run() -> int:
         return result
 
     try:
-        render_chunks = _recording_chunks(output, "render")
-        microphone_chunks = _recording_chunks(output, "microphone")
-        if len(render_chunks) != len(microphone_chunks):
-            raise ValueError("render and microphone chunk counts do not match; source WAVs were kept")
-        for chunk_number, (render_path, microphone_path) in enumerate(zip(render_chunks, microphone_chunks), 1):
-            _mix_recordings(render_path, microphone_path, output / f"recording_{chunk_number:04d}.wav")
-        for source_path in (*render_chunks, *microphone_chunks):
-            source_path.unlink()
+        _mix_available_chunks(output, logger)
         print(f"Saved combined recording chunks to {output}")
         logger.info("Combined recording chunks saved to %s", output)
     except (OSError, ValueError) as exc:

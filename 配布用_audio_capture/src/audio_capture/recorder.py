@@ -7,6 +7,8 @@ from typing import Protocol
 
 from .model import Endpoint
 
+MAX_PCM_DATA_BYTES = (7 * 1024**3) // 2
+
 
 class InputStream(Protocol):
     def read(self, frames: int, exception_on_overflow: bool = ...) -> bytes: ...
@@ -59,6 +61,8 @@ class ConcurrentRecorder:
         try:
             stream = self.backend.open_input(endpoint, self.frames)
             sample_width = self.backend.sample_width()
+            block_align = endpoint.channels * sample_width
+            max_chunk_frames = MAX_PCM_DATA_BYTES // block_align
             frames_in_chunk = 0
             chunk_number = 1
             while True:
@@ -73,13 +77,21 @@ class ConcurrentRecorder:
                     output.setframerate(endpoint.sample_rate)
                     frames_in_chunk = 0
                     while True:
-                        data = stream.read(self.frames, exception_on_overflow=False)
+                        remaining_frames = max_chunk_frames - frames_in_chunk
+                        read_frames = min(self.frames, remaining_frames)
+                        data = stream.read(read_frames, exception_on_overflow=False)
+                        if len(data) % block_align:
+                            raise ValueError("audio stream returned a partial frame")
+                        if len(data) > remaining_frames * block_align:
+                            raise ValueError("audio stream returned more than the WAV chunk limit")
                         output.writeframesraw(data)
-                        frames_in_chunk += len(data) // (endpoint.channels * sample_width)
+                        frames_in_chunk += len(data) // block_align
                         if self.stop_event.is_set():
                             return
-                        if (self.chunk_duration_seconds > 0 and
-                                frames_in_chunk >= endpoint.sample_rate * self.chunk_duration_seconds):
+                        time_limit = (self.chunk_duration_seconds > 0 and
+                                  frames_in_chunk >= endpoint.sample_rate * self.chunk_duration_seconds)
+                        size_limit = frames_in_chunk >= max_chunk_frames
+                        if time_limit or size_limit:
                             chunk_number += 1
                             break
         except BaseException as exc:

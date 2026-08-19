@@ -1,3 +1,4 @@
+import logging
 import sys
 import wave
 from array import array
@@ -45,3 +46,19 @@ def test_mix_keeps_sources_when_sample_rates_differ(tmp_path):
         record_one_click._mix_recordings(render, microphone, tmp_path / "recording.wav")
     assert render.exists()
     assert microphone.exists()
+
+
+def test_mix_common_chunks_and_keeps_unpaired_final_chunk(tmp_path, caplog):
+    caplog.set_level(logging.WARNING)
+    render = tmp_path / "render_0001.wav"
+    microphone = tmp_path / "microphone_0001.wav"
+    unpaired = tmp_path / "render_0002.wav"
+    _write(render, 2, 48000, [1, 2])
+    _write(microphone, 1, 48000, [3])
+    _write(unpaired, 2, 48000, [4, 5])
+
+    record_one_click._mix_available_chunks(tmp_path, record_one_click.logging.getLogger("test-mix"))
+
+    assert (tmp_path / "recording_0001.wav").exists()
+    assert unpaired.exists()
+    assert "Unpaired recording chunks kept" in caplog.text

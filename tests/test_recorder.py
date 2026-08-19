@@ -1,4 +1,5 @@
 import threading
+import time
 import wave
 
 from audio_capture.model import Endpoint
@@ -45,8 +46,10 @@ def test_concurrent_capture_writes_valid_wavs_and_closes_streams(tmp_path):
     worker = threading.Thread(target=recorder.record, args=(render, microphone, tmp_path / "render.wav", tmp_path / "mic.wav"))
 
     worker.start()
-    while len(backend.streams) < 2:
+    deadline = time.monotonic() + 2
+    while len(backend.streams) < 2 and time.monotonic() < deadline:
         worker.join(0.01)
+    assert len(backend.streams) == 2
     recorder.stop()
     worker.join(2)
 
@@ -67,12 +70,31 @@ def test_chunk_rotation_keeps_capture_files_bounded(tmp_path):
     worker = threading.Thread(target=recorder.record, args=(
         render, microphone, tmp_path / "render_0001.wav", tmp_path / "microphone_0001.wav"))
     worker.start()
-    while not (tmp_path / "render_0002.wav").exists():
-        pass
+    deadline = time.monotonic() + 2
+    while not (tmp_path / "render_0002.wav").exists() and time.monotonic() < deadline:
+        worker.join(0.01)
+    assert (tmp_path / "render_0002.wav").exists()
     recorder.stop()
     worker.join(2)
     assert not worker.is_alive()
     assert (tmp_path / "microphone_0002.wav").exists()
+
+
+def test_chunk_rotation_also_obeys_pcm_data_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr("audio_capture.recorder.MAX_PCM_DATA_BYTES", 16)
+    backend = FakeBackend()
+    recorder = ConcurrentRecorder(backend, frames_per_buffer=8, chunk_duration_seconds=0)
+    endpoint = Endpoint(2, "microphone", 1, 8000, "microphone")
+    worker = threading.Thread(target=recorder._capture, args=(endpoint, tmp_path / "microphone_0001.wav"))
+    worker.start()
+    deadline = time.monotonic() + 2
+    while not (tmp_path / "microphone_0002.wav").exists() and time.monotonic() < deadline:
+        worker.join(0.01)
+    recorder.stop()
+    worker.join(2)
+    assert (tmp_path / "microphone_0002.wav").exists()
+    with wave.open(str(tmp_path / "microphone_0001.wav"), "rb") as recording:
+        assert recording.getnframes() * recording.getnchannels() * recording.getsampwidth() <= 16
 
 
 def test_close_runs_when_stop_stream_fails(tmp_path):
