@@ -62,6 +62,15 @@ def downmix_pcm16_mono(data: bytes, channels: int) -> bytes:
     return mono.tobytes()
 
 
+def _endpoint_error(endpoint: Endpoint, stage: str, error: BaseException) -> RuntimeError:
+    wrapped = RuntimeError(
+        f"{endpoint.kind} {stage} failed for {endpoint.name} "
+        f"({endpoint.channels}ch, {endpoint.sample_rate}Hz): {error}"
+    )
+    wrapped.__cause__ = error
+    return wrapped
+
+
 class ConcurrentRecorder:
     def __init__(self, backend: Backend, frames_per_buffer: int = 1024,
                  chunk_duration_seconds: int = 3600, mono_output: bool = False) -> None:
@@ -154,7 +163,7 @@ class ConcurrentRecorder:
                             break
         except BaseException as exc:
             capture_error = exc
-            self.errors.append(exc)
+            self.errors.append(_endpoint_error(endpoint, "capture", exc))
             self.stop_event.set()
         finally:
             if stream is not None:
@@ -169,5 +178,5 @@ class ConcurrentRecorder:
                     if cleanup_error is None:
                         cleanup_error = exc
                 if capture_error is None and cleanup_error is not None:
-                    self.errors.append(cleanup_error)
+                    self.errors.append(_endpoint_error(endpoint, "cleanup", cleanup_error))
                     self.stop_event.set()
