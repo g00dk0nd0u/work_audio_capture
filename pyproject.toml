@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "work-audio-capture"
 version = "0.1.0"
-description = "Minimal concurrent WASAPI loopback and microphone recorder"
+description = "Dependency-free native WASAPI playback and microphone recorder with one-click MP3 output"
 requires-python = ">=3.10"
 dependencies = []
 
