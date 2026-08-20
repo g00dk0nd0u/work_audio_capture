@@ -27,6 +27,10 @@ MP3が正常にFinalizeした場合だけ元WAVを削除します。MP3変換に
 エラー時は `audio_capture.log` を送ってください。OS / Python / device名 / channel数 / sample rate / output directory / exception traceが記録されます。
 通常は失敗PCで別途device-listやdoctorコマンドを実行する必要はありません。
 
+必要な場合だけ、この配布フォルダ内の `run.py` で高度な確認もできます。
+- `python run.py doctor`
+- `python run.py list`
+
 現在の主な制約
 - renderとmicrophoneのsample rateが異なる場合、MP3化せずWAVを保持します。
 - MP3は32 kHz / 44.1 kHz / 48 kHz対応で、resamplingは未実装です。
@@ -68,6 +72,10 @@ Temporary PCM16 WAV files are kept during recording and are deleted only after t
 
 Diagnostics
 If an error occurs, send `audio_capture.log`. It records OS/Python information, endpoint names, channel counts, sample rates, output directory, and exception details. A separate device-list or doctor command should normally not be required for first-line diagnosis.
+
+For advanced checks only, this distribution also includes `run.py`:
+- `python run.py doctor`
+- `python run.py list`
 
 Current limitations
 - Render and microphone sample rates must match for MP3 creation.
