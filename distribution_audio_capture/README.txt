@@ -24,7 +24,7 @@ Temporary WAV files are deleted only after the MP3 has been finalized successful
 If MP3 conversion fails, the source WAV files are kept so the recording is not lost.
 
 Diagnostics
-If an error occurs, send `audio_capture.log`. It includes the selected playback and microphone device names, channel counts, sample rates, and exception details.
+If an error occurs, send `audio_capture.log`. It records the Windows/OS description, Python version and architecture, selected playback and microphone device names, channel counts, sample rates, output directory, and exception details. A separate device-list or doctor command should normally not be required just to diagnose a failed one-click recording.
 
 Requirements
 - Windows
