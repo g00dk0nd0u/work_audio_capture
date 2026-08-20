@@ -104,7 +104,7 @@ The same folder will contain:
 audio_capture.log
 ```
 
-This file contains recording history and error details. One-click recording also records the selected playback and microphone device names, channel counts, and sample rates so another PC can usually be diagnosed from the log alone.
+This file is designed to be sufficient for remote diagnosis in most cases. One-click recording records the Windows/OS description, Python version and architecture, selected playback and microphone device names, channel counts, sample rates, output directory, and exception trace. A separate `run.py list` or `doctor` command should normally not be required just to diagnose a failed one-click recording.
 
 ---
 
@@ -177,7 +177,7 @@ The final MP3 is mono at 80 kbps, typically about **36 MB per hour**.
 
 During capture, temporary PCM16 WAV files are kept for data safety. In one-click mode they are stored as mono to reduce temporary disk usage, including when the Windows endpoint exposes more than two channels. Source WAV files are deleted only after the MP3 has been finalized successfully. If MP3 conversion fails, the WAV sources are kept.
 
-If a recording fails, `audio_capture.log` includes the selected endpoint names, channel counts, and sample rates in addition to the exception trace.
+If a recording fails, `audio_capture.log` records the Windows/OS description, Python version and architecture, selected endpoint names, channel counts, sample rates, output directory, and exception trace. In most cases the log can be sent for diagnosis without first running a separate device-list or doctor command.
 
 ## Advanced command-line usage
 
