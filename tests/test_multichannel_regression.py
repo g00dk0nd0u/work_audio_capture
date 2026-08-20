@@ -72,7 +72,7 @@ class _BarrierFailingStream:
         self.label = label
 
     def read(self, frames, exception_on_overflow=False):
-        self.barrier.wait(timeout=2)
+        self.barrier.wait(timeout=5)
         raise OSError(f"{self.label} simulated read failure")
 
     def stop_stream(self):
