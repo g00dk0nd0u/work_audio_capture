@@ -1,3 +1,4 @@
+import json
 import logging
 import sys
 import wave
@@ -81,9 +82,71 @@ def test_encode_stereo_render_and_mono_microphone_to_mono_mp3(tmp_path, monkeypa
     assert output.exists()
 
 
+def test_encode_four_channel_render_and_microphone_to_mono_mp3(tmp_path):
+    render = tmp_path / "render.wav"
+    microphone = tmp_path / "microphone.wav"
+    output = tmp_path / "recording.part.mp3"
+    _write(render, 4, 48000, [100, 200, 300, 400])
+    _write(microphone, 4, 48000, [10, 20, 30, 40])
+
+    record_one_click._encode_recordings_mp3(render, microphone, output)
+
+    encoder = _FakeEncoder.instances[-1]
+    assert _samples(bytes(encoder.data)) == [275]
+    assert output.exists()
+
+
+def test_encode_stereo_render_and_eight_channel_microphone(tmp_path):
+    render = tmp_path / "render.wav"
+    microphone = tmp_path / "microphone.wav"
+    output = tmp_path / "recording.part.mp3"
+    _write(render, 2, 48000, [100, 300])
+    _write(microphone, 8, 48000, [80, 80, 80, 80, 80, 80, 80, 80])
+
+    record_one_click._encode_recordings_mp3(render, microphone, output)
+
+    assert _samples(bytes(_FakeEncoder.instances[-1].data)) == [280]
+    assert output.exists()
+
+
 def test_mix_clamps_pcm16_overflow():
     mixed = record_one_click._mix_mono(array("h", [30000, -30000]), array("h", [10000, -10000]))
     assert mixed.tolist() == [32767, -32768]
+
+
+def test_json_formatter_preserves_endpoint_and_runtime_diagnostics():
+    record = logging.LogRecord("work_audio_capture", logging.INFO, __file__, 1, "Selected audio endpoints", (), None)
+    record.python_version = "3.13.0"
+    record.python_implementation = "CPython"
+    record.python_architecture = "64bit"
+    record.os_version = "Windows-11-test"
+    record.render_name = "Display Audio"
+    record.render_channels = 2
+    record.render_sample_rate = 48000
+    record.microphone_name = "Microphone Array"
+    record.microphone_channels = 4
+    record.microphone_sample_rate = 48000
+
+    payload = json.loads(record_one_click._JsonFormatter().format(record))
+
+    assert payload["event"] == "Selected audio endpoints"
+    assert payload["python_version"] == "3.13.0"
+    assert payload["python_implementation"] == "CPython"
+    assert payload["python_architecture"] == "64bit"
+    assert payload["os_version"] == "Windows-11-test"
+    assert payload["render_channels"] == 2
+    assert payload["render_sample_rate"] == 48000
+    assert payload["microphone_channels"] == 4
+    assert payload["microphone_sample_rate"] == 48000
+
+
+def test_runtime_environment_contains_log_only_diagnostics():
+    payload = record_one_click._runtime_environment()
+
+    assert payload["python_version"]
+    assert payload["python_implementation"]
+    assert payload["python_architecture"] in ("32bit", "64bit")
+    assert payload["os_version"]
 
 
 def test_encode_keeps_sources_when_sample_rates_differ(tmp_path):

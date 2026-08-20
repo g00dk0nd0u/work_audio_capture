@@ -5,6 +5,7 @@ from array import array
 import json
 import logging
 from pathlib import Path
+import platform
 import sys
 import wave
 
@@ -19,6 +20,7 @@ from audio_capture.media_foundation import (  # noqa: E402
     SUPPORTED_MP3_SAMPLE_RATES,
     Mp3Encoder,
 )
+from audio_capture.recorder import downmix_pcm16_mono  # noqa: E402
 
 
 BACKEND = "native"
@@ -27,6 +29,19 @@ LOG_PATH = PROJECT_ROOT / "audio_capture.log"
 MIX_FRAMES = 16384
 MP3_BITRATE_BPS = DEFAULT_MP3_BITRATE_BPS
 MP3_ENCODER_FACTORY = Mp3Encoder
+_LOG_EXTRA_FIELDS = (
+    "python_version",
+    "python_implementation",
+    "python_architecture",
+    "os_version",
+    "render_name",
+    "render_channels",
+    "render_sample_rate",
+    "microphone_name",
+    "microphone_channels",
+    "microphone_sample_rate",
+    "output_directory",
+)
 
 
 class _JsonFormatter(logging.Formatter):
@@ -36,6 +51,9 @@ class _JsonFormatter(logging.Formatter):
             "level": record.levelname,
             "event": record.getMessage(),
         }
+        for field in _LOG_EXTRA_FIELDS:
+            if hasattr(record, field):
+                entry[field] = getattr(record, field)
         if record.exc_info:
             entry["exception"] = self.formatException(record.exc_info)
         return json.dumps(entry, ensure_ascii=False)
@@ -54,6 +72,15 @@ def _configure_logging() -> logging.Logger:
     return logger
 
 
+def _runtime_environment() -> dict[str, str]:
+    return {
+        "python_version": platform.python_version(),
+        "python_implementation": platform.python_implementation(),
+        "python_architecture": "64bit" if sys.maxsize > 2**32 else "32bit",
+        "os_version": platform.platform(),
+    }
+
+
 def _pcm16_samples(data: bytes) -> array:
     samples = array("h")
     samples.frombytes(data)
@@ -63,18 +90,7 @@ def _pcm16_samples(data: bytes) -> array:
 
 
 def _mono_samples(data: bytes, channels: int) -> array:
-    if channels not in (1, 2):
-        raise ValueError("mix supports mono or stereo PCM16 WAVs")
-    frame_bytes = channels * 2
-    if len(data) % frame_bytes:
-        raise ValueError("source WAV returned a partial PCM16 frame")
-    samples = _pcm16_samples(data)
-    if channels == 1:
-        return samples
-    mono = array("h")
-    for index in range(0, len(samples), 2):
-        mono.append(int((samples[index] + samples[index + 1]) / 2))
-    return mono
+    return _pcm16_samples(downmix_pcm16_mono(data, channels))
 
 
 def _mix_mono(render_samples: array, microphone_samples: array) -> array:
@@ -111,8 +127,8 @@ def _encode_recordings_mp3(render_path: Path, microphone_path: Path, output_path
             )
         if render_params.sampwidth != 2 or microphone_params.sampwidth != 2:
             raise ValueError("render and microphone WAVs must be PCM16; source WAVs were kept")
-        if render_params.nchannels not in (1, 2) or microphone_params.nchannels not in (1, 2):
-            raise ValueError("mix supports mono or stereo PCM16 WAVs; source WAVs were kept")
+        if render_params.nchannels < 1 or microphone_params.nchannels < 1:
+            raise ValueError("render and microphone WAVs must contain at least one channel; source WAVs were kept")
 
         with MP3_ENCODER_FACTORY(
             output_path,
@@ -180,23 +196,46 @@ def _mix_available_chunks(output: Path, logger: logging.Logger) -> None:
 
 def run() -> int:
     logger = _configure_logging()
-    logger.info("Recording request started")
-    from audio_capture.native_backend import NativeWasapiBackend
+    environment_log = _runtime_environment()
+    logger.info("Recording request started", extra=environment_log)
+    logger.info("Runtime environment", extra=environment_log)
 
-    backend = NativeWasapiBackend()
     try:
-        render_endpoints, microphone_endpoints = backend.endpoints()
-    finally:
-        backend.close()
+        from audio_capture.native_backend import NativeWasapiBackend
+
+        backend = NativeWasapiBackend()
+        try:
+            render_endpoints, microphone_endpoints = backend.endpoints()
+        finally:
+            backend.close()
+    except Exception as exc:
+        print(f"Could not enumerate Windows audio endpoints: {exc}", file=sys.stderr)
+        logger.exception("Could not enumerate Windows audio endpoints", extra=environment_log)
+        return 1
+
     render = next((endpoint for endpoint in render_endpoints if endpoint.is_default), None)
     microphone = next((endpoint for endpoint in microphone_endpoints if endpoint.is_default), None)
     if render is None or microphone is None:
         print("Could not find the Windows default playback and microphone devices.")
-        logger.error("Could not find both default playback and microphone devices")
+        logger.error("Could not find both default playback and microphone devices", extra=environment_log)
         return 1
-    logger.info("Using render=%s microphone=%s", render.name, microphone.name)
+
+    endpoint_log = {
+        "render_name": render.name,
+        "render_channels": render.channels,
+        "render_sample_rate": render.sample_rate,
+        "microphone_name": microphone.name,
+        "microphone_channels": microphone.channels,
+        "microphone_sample_rate": microphone.sample_rate,
+    }
+    diagnostic_log = {**environment_log, **endpoint_log}
+    logger.info("Selected audio endpoints", extra=diagnostic_log)
 
     output = OUTPUT_ROOT / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    logger.info(
+        "Recording output directory selected",
+        extra={**diagnostic_log, "output_directory": str(output)},
+    )
     sys.argv = [
         str(Path(__file__)),
         "record",
@@ -210,20 +249,41 @@ def run() -> int:
         str(output),
         "--mono-wav",
     ]
-    result = main()
+    try:
+        result = main()
+    except Exception as exc:
+        print(f"Recording command failed unexpectedly: {exc}", file=sys.stderr)
+        logger.exception(
+            "Recording command raised an unexpected exception",
+            extra={**diagnostic_log, "output_directory": str(output)},
+        )
+        return 1
     if result != 0:
-        logger.error("Recording command failed with exit code %s", result)
+        logger.error(
+            "Recording command failed with exit code %s",
+            result,
+            extra={**diagnostic_log, "output_directory": str(output)},
+        )
         return result
 
     try:
         _mix_available_chunks(output, logger)
         print(f"Saved combined MP3 recording chunks to {output}")
-        logger.info("Combined MP3 recording chunks saved to %s", output)
-    except (OSError, RuntimeError, ValueError) as exc:
+        logger.info(
+            "Combined MP3 recording chunks saved",
+            extra={**diagnostic_log, "output_directory": str(output)},
+        )
+    except Exception as exc:
         print(f"Could not create MP3; source WAV recordings were kept: {exc}")
-        logger.exception("Could not create MP3; source WAV recordings were kept")
+        logger.exception(
+            "Could not create MP3; source WAV recordings were kept",
+            extra={**diagnostic_log, "output_directory": str(output)},
+        )
         return 1
-    logger.info("Recording request finished")
+    logger.info(
+        "Recording request finished",
+        extra={**diagnostic_log, "output_directory": str(output)},
+    )
     return 0
 
 

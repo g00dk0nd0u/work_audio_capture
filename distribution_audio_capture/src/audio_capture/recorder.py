@@ -23,24 +23,52 @@ class Backend(Protocol):
     def sample_width(self) -> int: ...
 
 
+def _truncating_average(total: int, count: int) -> int:
+    """Return total / count truncated toward zero without using float arithmetic."""
+    if total >= 0:
+        return total // count
+    return -((-total) // count)
+
+
 def downmix_pcm16_mono(data: bytes, channels: int) -> bytes:
-    """Downmix complete PCM16 frames to mono without changing frame count."""
+    """Downmix complete interleaved PCM16 frames to mono without changing frame count."""
+    if channels < 1:
+        raise ValueError("PCM16 downmix requires at least one input channel")
+    frame_bytes = channels * 2
+    if len(data) % frame_bytes:
+        raise ValueError(f"{channels}-channel PCM16 stream returned a partial frame")
     if channels == 1:
         return data
-    if channels != 2:
-        raise ValueError("mono WAV capture supports only mono or stereo PCM16 input")
-    if len(data) % 4:
-        raise ValueError("stereo PCM16 stream returned a partial frame")
+
     samples = array("h")
     samples.frombytes(data)
     if sys.byteorder != "little":
         samples.byteswap()
+
     mono = array("h")
-    for index in range(0, len(samples), 2):
-        mono.append(int((samples[index] + samples[index + 1]) / 2))
+    if channels == 2:
+        for index in range(0, len(samples), 2):
+            mono.append(_truncating_average(samples[index] + samples[index + 1], 2))
+    else:
+        for index in range(0, len(samples), channels):
+            total = 0
+            frame_end = index + channels
+            for sample_index in range(index, frame_end):
+                total += samples[sample_index]
+            mono.append(_truncating_average(total, channels))
+
     if sys.byteorder != "little":
         mono.byteswap()
     return mono.tobytes()
+
+
+def _endpoint_error(endpoint: Endpoint, stage: str, error: BaseException) -> RuntimeError:
+    wrapped = RuntimeError(
+        f"{endpoint.kind} {stage} failed for {endpoint.name} "
+        f"({endpoint.channels}ch, {endpoint.sample_rate}Hz): {error}"
+    )
+    wrapped.__cause__ = error
+    return wrapped
 
 
 class ConcurrentRecorder:
@@ -73,7 +101,8 @@ class ConcurrentRecorder:
             for thread in threads:
                 thread.join()
         if self.errors:
-            raise RuntimeError("audio capture failed") from self.errors[0]
+            details = " | ".join(str(error) for error in self.errors)
+            raise RuntimeError(f"audio capture failed: {details}") from self.errors[0]
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -86,8 +115,8 @@ class ConcurrentRecorder:
             sample_width = self.backend.sample_width()
             if self.mono_output and sample_width != 2:
                 raise ValueError("mono WAV capture requires PCM16 input")
-            if self.mono_output and endpoint.channels not in (1, 2):
-                raise ValueError("mono WAV capture supports only mono or stereo input")
+            if endpoint.channels < 1:
+                raise ValueError("audio endpoint reported no input channels")
 
             input_block_align = endpoint.channels * sample_width
             output_channels = 1 if self.mono_output else endpoint.channels
@@ -135,7 +164,7 @@ class ConcurrentRecorder:
                             break
         except BaseException as exc:
             capture_error = exc
-            self.errors.append(exc)
+            self.errors.append(_endpoint_error(endpoint, "capture", exc))
             self.stop_event.set()
         finally:
             if stream is not None:
@@ -150,5 +179,5 @@ class ConcurrentRecorder:
                     if cleanup_error is None:
                         cleanup_error = exc
                 if capture_error is None and cleanup_error is not None:
-                    self.errors.append(cleanup_error)
+                    self.errors.append(_endpoint_error(endpoint, "cleanup", cleanup_error))
                     self.stop_event.set()
