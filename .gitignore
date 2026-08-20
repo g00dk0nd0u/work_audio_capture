@@ -5,4 +5,4 @@ __pycache__/
 *.wav
 *.log
 /recordings/
-/配布用_audio_capture/recordings/
+/distribution_audio_capture/recordings/

@@ -1,69 +1,61 @@
 # Work Audio Capture
 
-Windows PCで、**PCから聞こえる音（Teams / Zoom / YouTube など）とマイク音声を同時に録音**するための軽量ツールです。
+This lightweight tool records **audio played by a Windows PC (Teams / Zoom / YouTube, etc.) and microphone audio at the same time**.
 
-- Windows専用
-- Python 3.10以上
-- pip install不要
-- NumPy / ffmpeg / 追加DLL不要
-- ワンクリック録音の最終出力は **MP3 / mono / 80 kbps**
-- PC再生音 + マイク音声を1本のMP3へまとめて保存
-- Gemini / Whisperなどへの文字起こしを想定
-
-> **English instructions are below.**
+- Windows only
+- Python 3.10 or later
+- No pip install required
+- No NumPy, ffmpeg, or additional DLLs
+- One-click recording produces **mono MP3 at 80 kbps**
+- PC playback and microphone audio are combined into one MP3
+- Intended for transcription with Gemini, Whisper, or similar tools
 
 ---
 
-# 日本語
+# Quick Start
 
-## いちばん簡単な使い方
+## The simplest workflow
 
-### 1. Pythonをインストール
+### 1. Install Python
 
-Windowsに **Python 3.10以上** が必要です。
+You need **Python 3.10 or later** on Windows.
 
-Pythonをすでに使っている場合は、そのままで構いません。
+If Python is already installed, no additional setup is required.
 
-### 2. 録音開始
+### 2. Start recording
 
-リポジトリ直下、または配布用フォルダ内の
+From the repository root or the distribution folder, run:
 
-```text
-start_recording.bat
+```powershell
+python record_one_click.py
 ```
 
-をダブルクリックします。
+Recording starts in the command window.
 
-黒いコマンド画面が開き、そのまま録音が始まります。
+The tool automatically uses the Windows default:
 
-このツールは自動的に、Windowsで現在「既定」になっている
+- playback device (speakers / headphones)
+- microphone
 
-- 再生デバイス（スピーカー / ヘッドホン）
-- マイク
+### 3. Stop recording
 
-を使用します。
-
-### 3. 録音停止
-
-録音を止めるときは、黒い画面を選択して
+Select the command window and press:
 
 ```text
 Ctrl + C
 ```
 
-を押してください。
+**Do not close the command window with the X button while recording.** The recording may not be finalized correctly.
 
-**録音中に黒い画面を×ボタンで閉じないでください。** 録音ファイルが正常に終了処理されない場合があります。
+### 4. Check the recording
 
-### 4. 録音ファイルを確認
-
-録音終了後、次の場所に保存されます。
+After recording stops, files are saved under:
 
 ```text
 recordings\YYYY-MM-DD_HH-MM-SS\recording_0001.mp3
 ```
 
-長時間録音などで複数ファイルに分割された場合は、
+For long recordings split into multiple files:
 
 ```text
 recording_0001.mp3
@@ -72,78 +64,74 @@ recording_0003.mp3
 ...
 ```
 
-のように保存されます。
+Each MP3 contains PC playback and microphone audio mixed to mono.
 
-各MP3には、**PC再生音 + マイク音声** がmonoでミックスされています。
+The output is normally **80 kbps**, or approximately **36 MB per hour**.
 
-通常は **80 kbps** で、容量はおおむね **約36 MB/時間** が目安です。
+## Temporary files during recording
 
-## 録音中の一時ファイル
+To protect recorded data, PCM16 WAV files are stored temporarily during recording.
 
-録音を失わないことを優先するため、録音中は内部的にPCM16 WAVを一時保存します。
+One-click recording stores temporary WAV files as mono to reduce disk usage. For stereo input, temporary usage is roughly half that of a stereo WAV.
 
-ワンクリック録音では、一時WAVもmonoで保存してディスク使用量を抑えます。入力がstereoの場合、従来のstereo WAVより一時容量は概ね半分になります。
+Temporary WAV files are deleted only after the MP3 has been finalized successfully.
 
-録音停止後にMP3が正常に完成したことを確認してから、一時WAVを削除します。
+If MP3 conversion fails, the **source WAV files are kept** so the recording is not lost.
 
-MP3変換に失敗した場合は、**元のWAVを削除しません**。録音データを失わないための安全設計です。
+## Using Teams or Zoom
 
-## Teams / Zoomで使う場合
+Before recording, set the devices you want to use in Windows, Teams, or Zoom:
 
-録音開始前に、Windows・Teams・Zoom側で実際に使用したい
+- speakers / headphones
+- microphone
 
-- スピーカー / ヘッドホン
-- マイク
+Set them as the default or active devices. This tool records all PC playback audio, including notifications and other media played during a meeting.
 
-を「既定」または使用中のデバイスとして設定してください。
+## If the microphone is not recorded
 
-このツールはPC全体の再生音を録音するため、会議相手の音声だけでなく、同時に再生した通知音やYouTubeなども録音されます。
+In Windows, open:
 
-## マイクが録音されない場合
+**Settings -> Privacy & security -> Microphone**
 
-Windowsの
+and verify that Python is allowed to use the microphone.
 
-**設定 → プライバシーとセキュリティ → マイク**
+## If an error occurs
 
-で、Pythonからマイクを使用できる状態になっていることを確認してください。
-
-## エラーが出た場合
-
-同じフォルダに
+The same folder will contain:
 
 ```text
 audio_capture.log
 ```
 
-が作成されます。録音履歴やエラー内容が記録されています。
+This file contains recording history and error details.
 
 ---
 
-## 詳細操作（必要な場合のみ）
+## Advanced usage (optional)
 
-### 動作確認
+### Check the setup
 
 ```powershell
 python run.py doctor
 ```
 
-### 使用可能な音声デバイス一覧
+### List available audio devices
 
 ```powershell
 python run.py list
 ```
 
-### デバイスを指定して録音
+### Record using specific devices
 
 ```powershell
 python run.py record --render "{endpoint-id}" --microphone "{endpoint-id}" --output recordings
 ```
 
-停止は `Ctrl+C` です。
+Press `Ctrl+C` to stop.
 
-`record` コマンドは互換性のため、PC再生音とマイク音声を別々のWAVとして記録します。
+For compatibility, the `record` command saves PC playback and microphone audio as separate WAV files.
 
-ワンクリック版だけが、停止後に1本の80 kbps MP3へまとめます。
+Only the one-click workflow combines them into one 80 kbps MP3 after recording stops.
 
 ---
 
@@ -170,10 +158,10 @@ Requirements:
 
 ## Quick start
 
-Run:
+From the repository root or the distribution folder, run:
 
-```text
-start_recording.bat
+```powershell
+python record_one_click.py
 ```
 
 Press `Ctrl+C` to stop.
