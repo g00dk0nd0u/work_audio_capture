@@ -15,10 +15,16 @@ Final output
 - Approximately 36 MB per hour
 - Intended for transcription with Gemini / Whisper or similar tools
 
+Multichannel compatibility
+One-click recording automatically downmixes mono, stereo, and multichannel PCM16 Windows endpoints to mono. No device-list command is required before recording.
+
 Data safety
-Temporary PCM16 WAV files are stored during recording. One-click recording stores temporary WAV files as mono to reduce disk usage.
+Temporary PCM16 WAV files are stored during recording. One-click recording stores temporary WAV files as mono to reduce disk usage, including when an endpoint exposes more than two channels.
 Temporary WAV files are deleted only after the MP3 has been finalized successfully.
 If MP3 conversion fails, the source WAV files are kept so the recording is not lost.
+
+Diagnostics
+If an error occurs, send `audio_capture.log`. It includes the selected playback and microphone device names, channel counts, sample rates, and exception details.
 
 Requirements
 - Windows
