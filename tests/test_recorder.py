@@ -4,6 +4,8 @@ import time
 import wave
 from array import array
 
+import pytest
+
 from audio_capture.model import Endpoint
 from audio_capture.recorder import ConcurrentRecorder, downmix_pcm16_mono
 
@@ -30,6 +32,14 @@ class StereoStream(FakeStream):
         return samples.tobytes()
 
 
+class FourChannelStream(FakeStream):
+    def read(self, frames, exception_on_overflow=False):
+        samples = array("h", [100, 200, 300, 400] * frames)
+        if sys.byteorder != "little":
+            samples.byteswap()
+        return samples.tobytes()
+
+
 class StopFailureStream(FakeStream):
     def stop_stream(self):
         raise RuntimeError("stop failed")
@@ -46,6 +56,21 @@ class FakeBackend:
 
     def sample_width(self):
         return 2
+
+
+def _pcm16(values):
+    samples = array("h", values)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    return samples.tobytes()
+
+
+def _samples(data):
+    values = array("h")
+    values.frombytes(data)
+    if sys.byteorder != "little":
+        values.byteswap()
+    return values.tolist()
 
 
 def test_concurrent_capture_writes_valid_wavs_and_closes_streams(tmp_path):
@@ -72,15 +97,33 @@ def test_concurrent_capture_writes_valid_wavs_and_closes_streams(tmp_path):
             assert recording.getnframes() > 0
 
 
-def test_downmix_pcm16_stereo_to_mono():
-    samples = array("h", [100, 300, -100, -300])
-    if sys.byteorder != "little":
-        samples.byteswap()
-    result = array("h")
-    result.frombytes(downmix_pcm16_mono(samples.tobytes(), 2))
-    if sys.byteorder != "little":
-        result.byteswap()
-    assert result.tolist() == [200, -200]
+@pytest.mark.parametrize(
+    ("channels", "source", "expected"),
+    [
+        (1, [123], [123]),
+        (2, [100, 300], [200]),
+        (3, [-100, 0, 100], [0]),
+        (4, [100, 200, 300, 400], [250]),
+        (6, [60, 60, 60, 60, 60, 60], [60]),
+        (8, [-80, -80, -80, -80, -80, -80, -80, -80], [-80]),
+    ],
+)
+def test_downmix_pcm16_supports_common_channel_counts(channels, source, expected):
+    assert _samples(downmix_pcm16_mono(_pcm16(source), channels)) == expected
+
+
+def test_downmix_pcm16_stereo_to_mono_preserves_existing_result():
+    assert _samples(downmix_pcm16_mono(_pcm16([100, 300, -100, -300]), 2)) == [200, -200]
+
+
+def test_downmix_pcm16_rejects_partial_multichannel_frame():
+    with pytest.raises(ValueError, match="partial frame"):
+        downmix_pcm16_mono(_pcm16([100, 200, 300]), 4)
+
+
+def test_downmix_pcm16_rejects_zero_channels():
+    with pytest.raises(ValueError, match="at least one input channel"):
+        downmix_pcm16_mono(b"", 0)
 
 
 def test_mono_output_reduces_stereo_capture_before_wav_write(tmp_path):
@@ -106,6 +149,28 @@ def test_mono_output_reduces_stereo_capture_before_wav_write(tmp_path):
         if sys.byteorder != "little":
             values.byteswap()
         assert values.tolist() == [200, 200, 200, 200]
+
+
+def test_mono_output_reduces_four_channel_capture_before_wav_write(tmp_path):
+    class FourChannelBackend(FakeBackend):
+        def open_input(self, endpoint, frames_per_buffer):
+            stream = FourChannelStream()
+            self.streams.append(stream)
+            return stream
+
+    backend = FourChannelBackend()
+    recorder = ConcurrentRecorder(backend, frames_per_buffer=4, mono_output=True)
+    recorder.stop_event.set()
+    endpoint = Endpoint(2, "microphone array", 4, 48000, "microphone")
+    output = tmp_path / "microphone.wav"
+
+    recorder._capture(endpoint, output)
+
+    with wave.open(str(output), "rb") as recording:
+        assert recording.getnchannels() == 1
+        assert recording.getframerate() == 48000
+        assert recording.getnframes() == 4
+        assert _samples(recording.readframes(4)) == [250, 250, 250, 250]
 
 
 def test_default_output_preserves_stereo_capture(tmp_path):
