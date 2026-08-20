@@ -33,6 +33,8 @@ def test_doctor_reports_native_readiness(monkeypatch, capsys):
     assert "Active render endpoints: 1" in output
     assert "Active capture endpoints: 2" in output
     assert "Ready for real recording test: YES" in output
+    assert "Optional PyAudioWPatch backend:" in output
+    assert "fallback" not in output.lower()
     assert backend.closed
 
 
