@@ -23,6 +23,7 @@ def _write(path: Path, channels: int, rate: int, samples: list[int]) -> None:
 class _FakeEncoder:
     instances = []
     fail = False
+    fail_on_exit = False
 
     def __init__(self, path: Path, sample_rate: int, bitrate_bps: int) -> None:
         self.path = Path(path)
@@ -41,7 +42,9 @@ class _FakeEncoder:
 
     def __exit__(self, exc_type, exc, tb):
         if exc_type is None:
-            self.path.write_bytes(b"fake-mp3")
+            self.path.write_bytes(b"partial-or-fake-mp3")
+            if type(self).fail_on_exit:
+                raise RuntimeError("finalize failed")
         return False
 
 
@@ -49,6 +52,7 @@ class _FakeEncoder:
 def _fake_encoder(monkeypatch):
     _FakeEncoder.instances = []
     _FakeEncoder.fail = False
+    _FakeEncoder.fail_on_exit = False
     monkeypatch.setattr(record_one_click, "MP3_ENCODER_FACTORY", _FakeEncoder)
 
 
@@ -124,6 +128,22 @@ def test_encoder_failure_keeps_source_wavs_and_removes_partial_output(tmp_path):
 
     with pytest.raises(RuntimeError, match="encoder unavailable"):
         record_one_click._mix_available_chunks(tmp_path, logging.getLogger("test-failure"))
+
+    assert render.exists()
+    assert microphone.exists()
+    assert not (tmp_path / "recording_0001.mp3").exists()
+    assert not (tmp_path / "recording_0001.part.mp3").exists()
+
+
+def test_finalize_failure_keeps_source_wavs_and_removes_partial_output(tmp_path):
+    render = tmp_path / "render_0001.wav"
+    microphone = tmp_path / "microphone_0001.wav"
+    _write(render, 2, 48000, [1, 2])
+    _write(microphone, 1, 48000, [3])
+    _FakeEncoder.fail_on_exit = True
+
+    with pytest.raises(RuntimeError, match="finalize failed"):
+        record_one_click._mix_available_chunks(tmp_path, logging.getLogger("test-finalize"))
 
     assert render.exists()
     assert microphone.exists()
