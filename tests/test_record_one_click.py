@@ -114,8 +114,12 @@ def test_mix_clamps_pcm16_overflow():
     assert mixed.tolist() == [32767, -32768]
 
 
-def test_json_formatter_preserves_endpoint_diagnostics():
+def test_json_formatter_preserves_endpoint_and_runtime_diagnostics():
     record = logging.LogRecord("work_audio_capture", logging.INFO, __file__, 1, "Selected audio endpoints", (), None)
+    record.python_version = "3.13.0"
+    record.python_implementation = "CPython"
+    record.python_architecture = "64bit"
+    record.os_version = "Windows-11-test"
     record.render_name = "Display Audio"
     record.render_channels = 2
     record.render_sample_rate = 48000
@@ -126,10 +130,23 @@ def test_json_formatter_preserves_endpoint_diagnostics():
     payload = json.loads(record_one_click._JsonFormatter().format(record))
 
     assert payload["event"] == "Selected audio endpoints"
+    assert payload["python_version"] == "3.13.0"
+    assert payload["python_implementation"] == "CPython"
+    assert payload["python_architecture"] == "64bit"
+    assert payload["os_version"] == "Windows-11-test"
     assert payload["render_channels"] == 2
     assert payload["render_sample_rate"] == 48000
     assert payload["microphone_channels"] == 4
     assert payload["microphone_sample_rate"] == 48000
+
+
+def test_runtime_environment_contains_log_only_diagnostics():
+    payload = record_one_click._runtime_environment()
+
+    assert payload["python_version"]
+    assert payload["python_implementation"]
+    assert payload["python_architecture"] in ("32bit", "64bit")
+    assert payload["os_version"]
 
 
 def test_encode_keeps_sources_when_sample_rates_differ(tmp_path):
