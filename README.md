@@ -8,6 +8,7 @@ This lightweight tool records **audio played by a Windows PC (Teams / Zoom / You
 - No NumPy, ffmpeg, or additional DLLs
 - One-click recording produces **mono MP3 at 80 kbps**
 - PC playback and microphone audio are combined into one MP3
+- One-click mode automatically downmixes mono, stereo, and multichannel PCM16 endpoints to mono
 - Intended for transcription with Gemini, Whisper, or similar tools
 
 ---
@@ -72,7 +73,7 @@ The output is normally **80 kbps**, or approximately **36 MB per hour**.
 
 To protect recorded data, PCM16 WAV files are stored temporarily during recording.
 
-One-click recording stores temporary WAV files as mono to reduce disk usage. For stereo input, temporary usage is roughly half that of a stereo WAV.
+One-click recording stores temporary WAV files as mono to reduce disk usage. Mono, stereo, and multichannel PCM16 endpoints are downmixed automatically without changing the frame count.
 
 Temporary WAV files are deleted only after the MP3 has been finalized successfully.
 
@@ -103,7 +104,7 @@ The same folder will contain:
 audio_capture.log
 ```
 
-This file contains recording history and error details.
+This file contains recording history and error details. One-click recording also records the selected playback and microphone device names, channel counts, and sample rates so another PC can usually be diagnosed from the log alone.
 
 ---
 
@@ -129,7 +130,7 @@ python run.py record --render "{endpoint-id}" --microphone "{endpoint-id}" --out
 
 Press `Ctrl+C` to stop.
 
-For compatibility, the `record` command saves PC playback and microphone audio as separate WAV files.
+For compatibility, the `record` command saves PC playback and microphone audio as separate WAV files and preserves their endpoint channel count unless `--mono-wav` is explicitly used.
 
 Only the one-click workflow combines them into one 80 kbps MP3 after recording stops.
 
@@ -144,7 +145,7 @@ Work Audio Capture records both:
 - audio played by your Windows PC (Teams, Zoom, YouTube, etc.)
 - your microphone
 
-The one-click workflow combines both sources into a **mono 80 kbps MP3** after recording.
+The one-click workflow combines both sources into a **mono 80 kbps MP3** after recording. Mono, stereo, and multichannel PCM16 Windows endpoints are automatically downmixed to mono in one-click mode.
 
 Requirements:
 
@@ -174,7 +175,9 @@ recordings\YYYY-MM-DD_HH-MM-SS\recording_0001.mp3
 
 The final MP3 is mono at 80 kbps, typically about **36 MB per hour**.
 
-During capture, temporary PCM16 WAV files are kept for data safety. In one-click mode they are stored as mono to reduce temporary disk usage. Source WAV files are deleted only after the MP3 has been finalized successfully. If MP3 conversion fails, the WAV sources are kept.
+During capture, temporary PCM16 WAV files are kept for data safety. In one-click mode they are stored as mono to reduce temporary disk usage, including when the Windows endpoint exposes more than two channels. Source WAV files are deleted only after the MP3 has been finalized successfully. If MP3 conversion fails, the WAV sources are kept.
+
+If a recording fails, `audio_capture.log` includes the selected endpoint names, channel counts, and sample rates in addition to the exception trace.
 
 ## Advanced command-line usage
 
