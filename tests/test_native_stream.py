@@ -70,13 +70,21 @@ def test_default_endpoint_failure_does_not_abort_endpoint_enumeration(monkeypatc
     collection = LPVOID(2)
     device = LPVOID(3)
 
+    def set_pointer_and_succeed(result, value):
+        result._obj.value = value
+        return 0
+
+    def set_count_and_succeed(count, value):
+        count._obj.value = value
+        return 0
+
     def fake_method(pointer, index, restype, *argtypes):
         if pointer.value == 1 and index == 3:
-            return lambda _pointer, _flow, _state, result: setattr(result._obj, "value", 2)
+            return lambda _pointer, _flow, _state, result: set_pointer_and_succeed(result, 2)
         if pointer.value == 2 and index == 3:
-            return lambda _pointer, count: setattr(count._obj, "value", 1)
+            return lambda _pointer, count: set_count_and_succeed(count, 1)
         if pointer.value == 2 and index == 4:
-            return lambda _pointer, _index, result: setattr(result._obj, "value", 3)
+            return lambda _pointer, _index, result: set_pointer_and_succeed(result, 3)
         raise AssertionError((pointer.value, index))
 
     monkeypatch.setattr(native, "_create_enumerator", lambda: enumerator)

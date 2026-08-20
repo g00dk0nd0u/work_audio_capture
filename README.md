@@ -6,7 +6,9 @@ Windows PCで、**PCから聞こえる音（Teams / Zoom / YouTube など）と�
 - Python 3.10以上
 - pip install不要
 - NumPy / ffmpeg / 追加DLL不要
-- PC再生音とマイク音声を1つのWAVにまとめて保存
+- ワンクリック録音の最終出力は **MP3 / mono / 80 kbps**
+- PC再生音 + マイク音声を1本のMP3へまとめて保存
+- Gemini / Whisperなどへの文字起こしを想定
 
 > **English instructions are below.**
 
@@ -22,13 +24,9 @@ Windowsに **Python 3.10以上** が必要です。
 
 Pythonをすでに使っている場合は、そのままで構いません。
 
-### 2. 配布用ZIPをダウンロード
+### 2. 録音開始
 
-このリポジトリにある **`配布用_audio_capture.zip`** をダウンロードして解凍します。
-
-### 3. 録音開始
-
-解凍したフォルダ内の
+リポジトリ直下、または配布用フォルダ内の
 
 ```text
 start_recording.bat
@@ -45,7 +43,7 @@ start_recording.bat
 
 を使用します。
 
-### 4. 録音停止
+### 3. 録音停止
 
 録音を止めるときは、黒い画面を選択して
 
@@ -55,28 +53,40 @@ Ctrl + C
 
 を押してください。
 
-**録音中に黒い画面を×ボタンで閉じないでください。** WAVファイルが正常に終了処理されない場合があります。
+**録音中に黒い画面を×ボタンで閉じないでください。** 録音ファイルが正常に終了処理されない場合があります。
 
-### 5. 録音ファイルを確認
+### 4. 録音ファイルを確認
 
 録音終了後、次の場所に保存されます。
 
 ```text
-recordings\YYYY-MM-DD_HH-MM-SS\recording_0001.wav
+recordings\YYYY-MM-DD_HH-MM-SS\recording_0001.mp3
 ```
 
 長時間録音などで複数ファイルに分割された場合は、
 
 ```text
-recording_0001.wav
-recording_0002.wav
-recording_0003.wav
+recording_0001.mp3
+recording_0002.mp3
+recording_0003.mp3
 ...
 ```
 
 のように保存されます。
 
-各ファイルには、**PC再生音 + マイク音声** がミックスされています。
+各MP3には、**PC再生音 + マイク音声** がmonoでミックスされています。
+
+通常は **80 kbps** で、容量はおおむね **約36 MB/時間** が目安です。
+
+## 録音中の一時ファイル
+
+録音を失わないことを優先するため、録音中は内部的にPCM16 WAVを一時保存します。
+
+ワンクリック録音では、一時WAVもmonoで保存してディスク使用量を抑えます。入力がstereoの場合、従来のstereo WAVより一時容量は概ね半分になります。
+
+録音停止後にMP3が正常に完成したことを確認してから、一時WAVを削除します。
+
+MP3変換に失敗した場合は、**元のWAVを削除しません**。録音データを失わないための安全設計です。
 
 ## Teams / Zoomで使う場合
 
@@ -111,10 +121,6 @@ audio_capture.log
 
 ## 詳細操作（必要な場合のみ）
 
-通常は `start_recording.bat` だけで使用できます。
-
-特定の再生デバイスやマイクを手動指定したい場合は、リポジトリ直下で以下を実行します。
-
 ### 動作確認
 
 ```powershell
@@ -135,7 +141,9 @@ python run.py record --render "{endpoint-id}" --microphone "{endpoint-id}" --out
 
 停止は `Ctrl+C` です。
 
-`record` コマンドではPC再生音とマイク音声を別々のWAVとして記録します。
+`record` コマンドは互換性のため、PC再生音とマイク音声を別々のWAVとして記録します。
+
+ワンクリック版だけが、停止後に1本の80 kbps MP3へまとめます。
 
 ---
 
@@ -145,12 +153,10 @@ python run.py record --render "{endpoint-id}" --microphone "{endpoint-id}" --out
 
 Work Audio Capture records both:
 
-- **audio played by your Windows PC** (Teams, Zoom, YouTube, etc.)
-- **your microphone**
+- audio played by your Windows PC (Teams, Zoom, YouTube, etc.)
+- your microphone
 
-at the same time.
-
-The one-click version combines both sources into WAV files automatically.
+The one-click workflow combines both sources into a **mono 80 kbps MP3** after recording.
 
 Requirements:
 
@@ -160,128 +166,37 @@ Requirements:
 - No NumPy
 - No ffmpeg
 - No additional DLLs
+- Uses Windows Media Foundation for MP3 encoding
 
 ## Quick start
 
-### 1. Install Python
-
-Install **Python 3.10 or later** on Windows.
-
-If Python is already installed, you can use your existing installation.
-
-### 2. Download the distribution ZIP
-
-Download **`配布用_audio_capture.zip`** from this repository and extract it.
-
-### 3. Start recording
-
-Open the extracted folder and double-click:
+Run:
 
 ```text
 start_recording.bat
 ```
 
-A Command Prompt window will open and recording will start automatically.
+Press `Ctrl+C` to stop.
 
-The tool uses your current Windows default:
-
-- playback device (speakers / headphones)
-- microphone
-
-### 4. Stop recording
-
-Select the Command Prompt window and press:
+Final recordings are saved under:
 
 ```text
-Ctrl + C
+recordings\YYYY-MM-DD_HH-MM-SS\recording_0001.mp3
 ```
 
-**Do not close the window with the X button while recording.** The WAV file may not be finalized correctly.
+The final MP3 is mono at 80 kbps, typically about **36 MB per hour**.
 
-### 5. Find your recording
-
-Recordings are saved under:
-
-```text
-recordings\YYYY-MM-DD_HH-MM-SS\recording_0001.wav
-```
-
-For longer recordings, multiple files may be created:
-
-```text
-recording_0001.wav
-recording_0002.wav
-recording_0003.wav
-...
-```
-
-Each file contains the combined **PC playback audio + microphone audio**.
-
-## Using it with Teams or Zoom
-
-Before starting the recorder, make sure Windows, Teams, or Zoom is using the playback device and microphone you want to capture.
-
-This tool records the audio mix heard from the selected Windows playback device. Therefore, notification sounds, YouTube audio, and other system playback may also be recorded.
-
-## If the microphone is not recorded
-
-Open:
-
-**Windows Settings → Privacy & security → Microphone**
-
-and make sure microphone access is allowed for Python / desktop applications.
-
-## Troubleshooting
-
-A log file is created in the same folder:
-
-```text
-audio_capture.log
-```
-
-It contains recording history and error details.
-
----
+During capture, temporary PCM16 WAV files are kept for data safety. In one-click mode they are stored as mono to reduce temporary disk usage. Source WAV files are deleted only after the MP3 has been finalized successfully. If MP3 conversion fails, the WAV sources are kept.
 
 ## Advanced command-line usage
 
-Most users only need `start_recording.bat`.
-
-If you need to select specific Windows audio endpoints manually, run the following commands from the repository root.
-
-### Check the system
-
-```powershell
-python run.py doctor
-```
-
-### List available audio devices
-
-```powershell
-python run.py list
-```
-
-### Record selected devices
+The standard `record` command remains WAV-based for compatibility:
 
 ```powershell
 python run.py record --render "{endpoint-id}" --microphone "{endpoint-id}" --output recordings
 ```
 
-Press `Ctrl+C` to stop.
-
-The standard `record` command stores playback audio and microphone audio as separate WAV files.
-
----
-
-## Technical notes
-
-The default backend uses Windows MMDevice / WASAPI directly through Python's standard-library `ctypes`.
-
-Playback audio is captured using WASAPI loopback, while the microphone is captured separately in shared mode. PCM and IEEE float Windows mix formats are converted to PCM16 WAV without third-party runtime dependencies.
-
-An optional PyAudioWPatch backend remains available for development and troubleshooting, but it is **not required for normal use**.
-
-This project currently does not provide process-specific audio capture, automatic device reconnection, transcription, or a GUI.
+The default backend uses Windows MMDevice / WASAPI directly through Python's standard-library `ctypes`. Playback audio is captured using WASAPI loopback, while the microphone is captured separately in shared mode. PCM and IEEE float Windows mix formats are converted to PCM16 without third-party runtime dependencies.
 
 ### Developer tests
 
@@ -294,7 +209,6 @@ python -m compileall -q run.py src tests
 
 Microsoft references:
 
-- [Loopback Recording](https://learn.microsoft.com/windows/win32/coreaudio/loopback-recording)
-- [IAudioClient::Initialize](https://learn.microsoft.com/windows/win32/api/audioclient/nf-audioclient-iaudioclient-initialize)
-- [IAudioCaptureClient::GetBuffer](https://learn.microsoft.com/windows/win32/api/audioclient/nf-audiocaptureclient-getbuffer)
-- [MMDevice API](https://learn.microsoft.com/windows/win32/coreaudio/mmdevice-api)
+- Loopback Recording: https://learn.microsoft.com/windows/win32/coreaudio/loopback-recording
+- Media Foundation MP3 Encoder: https://learn.microsoft.com/windows/win32/medfound/mp3-audio-encoder
+- Sink Writer: https://learn.microsoft.com/windows/win32/api/mfreadwrite/nn-mfreadwrite-imfsinkwriter
