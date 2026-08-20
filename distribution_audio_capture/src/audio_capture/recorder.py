@@ -23,6 +23,13 @@ class Backend(Protocol):
     def sample_width(self) -> int: ...
 
 
+def _truncating_average(total: int, count: int) -> int:
+    """Return total / count truncated toward zero without using float arithmetic."""
+    if total >= 0:
+        return total // count
+    return -((-total) // count)
+
+
 def downmix_pcm16_mono(data: bytes, channels: int) -> bytes:
     """Downmix complete interleaved PCM16 frames to mono without changing frame count."""
     if channels < 1:
@@ -39,9 +46,16 @@ def downmix_pcm16_mono(data: bytes, channels: int) -> bytes:
         samples.byteswap()
 
     mono = array("h")
-    for index in range(0, len(samples), channels):
-        total = sum(samples[index:index + channels])
-        mono.append(int(total / channels))
+    if channels == 2:
+        for index in range(0, len(samples), 2):
+            mono.append(_truncating_average(samples[index] + samples[index + 1], 2))
+    else:
+        for index in range(0, len(samples), channels):
+            total = 0
+            frame_end = index + channels
+            for sample_index in range(index, frame_end):
+                total += samples[sample_index]
+            mono.append(_truncating_average(total, channels))
 
     if sys.byteorder != "little":
         mono.byteswap()
