@@ -68,7 +68,7 @@ def _friendly_name(device: LPVOID) -> str:
     try:
         check_hresult(_method(store, 5, HRESULT, ctypes.POINTER(type(PKEY_Device_FriendlyName)), ctypes.POINTER(PROPVARIANT))(
             store, ctypes.byref(PKEY_Device_FriendlyName), ctypes.byref(prop)), "IPropertyStore.GetValue")
-        return prop.pwszVal if prop.vt == VT_LPWSTR and prop.pwszVal else "Unnamed endpoint"
+        return ctypes.wstring_at(prop.pwszVal) if prop.vt == VT_LPWSTR and prop.pwszVal else "Unnamed endpoint"
     finally:
         ctypes.windll.ole32.PropVariantClear(ctypes.byref(prop))
         release(store)

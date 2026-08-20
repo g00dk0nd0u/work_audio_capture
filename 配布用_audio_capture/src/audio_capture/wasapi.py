@@ -84,9 +84,16 @@ class PROPERTYKEY(ctypes.Structure):
     _fields_ = [("fmtid", GUID), ("pid", DWORD)]
 
 
+class _PROPVARIANT_BLOB(ctypes.Structure):
+    """A size/alignment member from the SDK PROPVARIANT value union."""
+    _fields_ = [("cbSize", DWORD), ("pBlobData", LPVOID)]
+
+
 class PROPVARIANT_UNION(ctypes.Union):
-    _fields_ = [("pwszVal", ctypes.c_wchar_p), ("ullVal", ctypes.c_ulonglong),
-                ("punkVal", LPVOID)]
+    # Keep storage large enough for the SDK value union, not just one pointer.
+    _fields_ = [("pwszVal", LPVOID), ("ullVal", ctypes.c_ulonglong),
+                ("punkVal", LPVOID), ("blob", _PROPVARIANT_BLOB),
+                ("decimalStorage", ctypes.c_ubyte * 16)]
 
 
 class PROPVARIANT(ctypes.Structure):
@@ -165,33 +172,64 @@ class AudioFormat:
     block_align: int
 
 
-def interpret_format(fmt: Any) -> AudioFormat:
-    raw = fmt if hasattr(fmt, "contents") else ctypes.pointer(fmt)
-    base = ctypes.cast(raw, ctypes.POINTER(WAVEFORMATEX))
-    fmt = base.contents
-    kind = "pcm" if fmt.wFormatTag == WAVE_FORMAT_PCM else "float" if fmt.wFormatTag == WAVE_FORMAT_IEEE_FLOAT else None
-    valid = fmt.wBitsPerSample
-    if fmt.wFormatTag == WAVE_FORMAT_EXTENSIBLE:
-        if fmt.cbSize < 22:
-            raise ValueError("invalid WAVEFORMATEXTENSIBLE size")
-        ext = ctypes.cast(raw, ctypes.POINTER(WAVEFORMATEXTENSIBLE)).contents
-        kind = "pcm" if ext.SubFormat == KSDATAFORMAT_SUBTYPE_PCM else "float" if ext.SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT else None
-        valid = ext.wValidBitsPerSample or fmt.wBitsPerSample
-        if kind is None:
-            raise ValueError("unsupported WAVEFORMATEXTENSIBLE SubFormat")
-    if kind is None or (kind == "float" and fmt.wBitsPerSample not in (32, 64)) or (kind == "pcm" and fmt.wBitsPerSample not in (16, 24, 32)):
-        raise ValueError(f"unsupported WASAPI format tag={fmt.wFormatTag} bits={fmt.wBitsPerSample}")
-    if kind == "pcm" and not 16 <= valid <= fmt.wBitsPerSample:
+_WAVEFORMATEX_SIZE = 18
+_WAVEFORMATEXTENSIBLE_SIZE = 40
+_WAVEFORMATEX_STRUCT = struct.Struct("<HHIIHHH")
+
+
+def _format_bytes(source: Any) -> bytes:
+    """Copy the serialized Windows format block without relying on ctypes casts."""
+    if isinstance(source, (bytes, bytearray, memoryview)):
+        return bytes(source)
+    if isinstance(source, WAVEFORMATEXTENSIBLE):
+        return ctypes.string_at(ctypes.byref(source), _WAVEFORMATEXTENSIBLE_SIZE)
+    if isinstance(source, WAVEFORMATEX):
+        # A standalone header cannot provide extension bytes safely.
+        return ctypes.string_at(ctypes.byref(source), _WAVEFORMATEX_SIZE)
+    header = ctypes.string_at(source, _WAVEFORMATEX_SIZE)
+    cb_size = struct.unpack_from("<H", header, 16)[0]
+    return ctypes.string_at(source, _WAVEFORMATEX_SIZE + cb_size)
+
+
+def interpret_format(source: Any) -> AudioFormat:
+    """Interpret a GetMixFormat allocation using documented serialized offsets."""
+    raw = _format_bytes(source)
+    if len(raw) < _WAVEFORMATEX_SIZE:
+        raise ValueError(f"truncated WASAPI format: {len(raw)} bytes (need 18)")
+    tag, channels, rate, _avg, block_align, bits, cb_size = _WAVEFORMATEX_STRUCT.unpack_from(raw)
+    details = (f"tag=0x{tag:04X} channels={channels} rate={rate} "
+               f"blockAlign={block_align} bits={bits} cbSize={cb_size}")
+    kind = "pcm" if tag == WAVE_FORMAT_PCM else "float" if tag == WAVE_FORMAT_IEEE_FLOAT else None
+    valid = bits
+    extensible_details = ""
+    if tag == WAVE_FORMAT_EXTENSIBLE:
+        if cb_size < 22:
+            raise ValueError(f"invalid WAVEFORMATEXTENSIBLE size: {details}")
+        if len(raw) < _WAVEFORMATEXTENSIBLE_SIZE:
+            raise ValueError(
+                f"truncated WAVEFORMATEXTENSIBLE: {details} available={len(raw)}")
+        valid, channel_mask = struct.unpack_from("<HI", raw, 18)
+        subformat = uuid.UUID(bytes_le=raw[24:40])
+        extensible_details = (f" validBits={valid} channelMask=0x{channel_mask:X} "
+                              f"subFormat={subformat}")
+        pcm_uuid = uuid.UUID(bytes_le=bytes(KSDATAFORMAT_SUBTYPE_PCM))
+        float_uuid = uuid.UUID(bytes_le=bytes(KSDATAFORMAT_SUBTYPE_IEEE_FLOAT))
+        kind = "pcm" if subformat == pcm_uuid else "float" if subformat == float_uuid else None
+        valid = valid or bits
+    if kind is None or (kind == "float" and bits not in (32, 64)) or (kind == "pcm" and bits not in (16, 24, 32)):
+        label = " extensible" if tag == WAVE_FORMAT_EXTENSIBLE else ""
+        raise ValueError(f"unsupported WASAPI{label} format: {details}{extensible_details}")
+    if kind == "pcm" and not 16 <= valid <= bits:
         raise ValueError(
             f"unsupported PCM valid-bits layout: {valid} valid bits in "
-            f"{fmt.wBitsPerSample}-bit container"
+            f"{bits}-bit container ({details}{extensible_details})"
         )
-    if kind == "float" and valid != fmt.wBitsPerSample:
-        raise ValueError("unsupported extensible float valid-bits layout")
-    expected = fmt.nChannels * ((fmt.wBitsPerSample + 7) // 8)
-    if not fmt.nChannels or fmt.nBlockAlign != expected:
-        raise ValueError("invalid WASAPI channel/block alignment")
-    return AudioFormat(fmt.nChannels, fmt.nSamplesPerSec, fmt.wBitsPerSample, valid, kind, fmt.nBlockAlign)
+    if kind == "float" and valid != bits:
+        raise ValueError(f"unsupported extensible float valid-bits layout ({details}{extensible_details})")
+    expected = channels * ((bits + 7) // 8)
+    if not channels or block_align != expected:
+        raise ValueError(f"invalid WASAPI channel/block alignment ({details}{extensible_details})")
+    return AudioFormat(channels, rate, bits, valid, kind, block_align)
 
 
 def pcm16(data: bytes, fmt: AudioFormat, frames: int, silent: bool = False) -> bytes:

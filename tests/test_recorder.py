@@ -1,9 +1,11 @@
+import sys
 import threading
 import time
 import wave
+from array import array
 
 from audio_capture.model import Endpoint
-from audio_capture.recorder import ConcurrentRecorder
+from audio_capture.recorder import ConcurrentRecorder, downmix_pcm16_mono
 
 
 class FakeStream:
@@ -18,6 +20,14 @@ class FakeStream:
 
     def close(self):
         self.closed = True
+
+
+class StereoStream(FakeStream):
+    def read(self, frames, exception_on_overflow=False):
+        samples = array("h", [100, 300] * frames)
+        if sys.byteorder != "little":
+            samples.byteswap()
+        return samples.tobytes()
 
 
 class StopFailureStream(FakeStream):
@@ -60,6 +70,62 @@ def test_concurrent_capture_writes_valid_wavs_and_closes_streams(tmp_path):
             assert recording.getnchannels() == 1
             assert recording.getframerate() == 8000
             assert recording.getnframes() > 0
+
+
+def test_downmix_pcm16_stereo_to_mono():
+    samples = array("h", [100, 300, -100, -300])
+    if sys.byteorder != "little":
+        samples.byteswap()
+    result = array("h")
+    result.frombytes(downmix_pcm16_mono(samples.tobytes(), 2))
+    if sys.byteorder != "little":
+        result.byteswap()
+    assert result.tolist() == [200, -200]
+
+
+def test_mono_output_reduces_stereo_capture_before_wav_write(tmp_path):
+    class StereoBackend(FakeBackend):
+        def open_input(self, endpoint, frames_per_buffer):
+            stream = StereoStream()
+            self.streams.append(stream)
+            return stream
+
+    backend = StereoBackend()
+    recorder = ConcurrentRecorder(backend, frames_per_buffer=4, mono_output=True)
+    recorder.stop_event.set()
+    endpoint = Endpoint(2, "headset loopback", 2, 48000, "render-loopback")
+    output = tmp_path / "render.wav"
+
+    recorder._capture(endpoint, output)
+
+    with wave.open(str(output), "rb") as recording:
+        assert recording.getnchannels() == 1
+        assert recording.getframerate() == 48000
+        assert recording.getnframes() == 4
+        values = array("h", recording.readframes(4))
+        if sys.byteorder != "little":
+            values.byteswap()
+        assert values.tolist() == [200, 200, 200, 200]
+
+
+def test_default_output_preserves_stereo_capture(tmp_path):
+    class StereoBackend(FakeBackend):
+        def open_input(self, endpoint, frames_per_buffer):
+            stream = StereoStream()
+            self.streams.append(stream)
+            return stream
+
+    backend = StereoBackend()
+    recorder = ConcurrentRecorder(backend, frames_per_buffer=4)
+    recorder.stop_event.set()
+    endpoint = Endpoint(2, "headset loopback", 2, 48000, "render-loopback")
+    output = tmp_path / "render.wav"
+
+    recorder._capture(endpoint, output)
+
+    with wave.open(str(output), "rb") as recording:
+        assert recording.getnchannels() == 2
+        assert recording.getnframes() == 4
 
 
 def test_chunk_rotation_keeps_capture_files_bounded(tmp_path):

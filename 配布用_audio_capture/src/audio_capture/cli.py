@@ -35,6 +35,11 @@ def main() -> int:
     parser.add_argument("--render", help="explicit render endpoint ID (required for record)")
     parser.add_argument("--microphone", help="explicit capture endpoint ID (required for record)")
     parser.add_argument("--output", type=Path, help="output directory; defaults to a temporary directory")
+    parser.add_argument(
+        "--mono-wav",
+        action="store_true",
+        help="store intermediate record WAVs as mono PCM16 (used by one-click MP3 mode)",
+    )
     args = parser.parse_args()
     if args.command == "doctor" and args.backend == "native":
         return 0 if run_doctor() else 1
@@ -56,7 +61,7 @@ def main() -> int:
         directory = args.output or Path(tempfile.mkdtemp(prefix="audio-capture-"))
         directory.mkdir(parents=True, exist_ok=True)
         print(f"Recording to {directory}; press Ctrl+C to stop")
-        ConcurrentRecorder(backend).record(
+        ConcurrentRecorder(backend, mono_output=args.mono_wav).record(
             choose(render, args.render), choose(capture, args.microphone),
             directory / "render_0001.wav", directory / "microphone_0001.wav")
         return 0

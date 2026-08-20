@@ -208,6 +208,7 @@ def run() -> int:
         str(microphone.index),
         "--output",
         str(output),
+        "--mono-wav",
     ]
     result = main()
     if result != 0:
