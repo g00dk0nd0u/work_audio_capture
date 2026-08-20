@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 *.wav
 *.log
+/recordings/
+/配布用_audio_capture/recordings/
