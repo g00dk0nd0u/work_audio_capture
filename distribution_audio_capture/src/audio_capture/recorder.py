@@ -101,7 +101,8 @@ class ConcurrentRecorder:
             for thread in threads:
                 thread.join()
         if self.errors:
-            raise RuntimeError("audio capture failed") from self.errors[0]
+            details = " | ".join(str(error) for error in self.errors)
+            raise RuntimeError(f"audio capture failed: {details}") from self.errors[0]
 
     def stop(self) -> None:
         self.stop_event.set()
