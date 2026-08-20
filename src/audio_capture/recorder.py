@@ -24,20 +24,25 @@ class Backend(Protocol):
 
 
 def downmix_pcm16_mono(data: bytes, channels: int) -> bytes:
-    """Downmix complete PCM16 frames to mono without changing frame count."""
+    """Downmix complete interleaved PCM16 frames to mono without changing frame count."""
+    if channels < 1:
+        raise ValueError("PCM16 downmix requires at least one input channel")
+    frame_bytes = channels * 2
+    if len(data) % frame_bytes:
+        raise ValueError(f"{channels}-channel PCM16 stream returned a partial frame")
     if channels == 1:
         return data
-    if channels != 2:
-        raise ValueError("mono WAV capture supports only mono or stereo PCM16 input")
-    if len(data) % 4:
-        raise ValueError("stereo PCM16 stream returned a partial frame")
+
     samples = array("h")
     samples.frombytes(data)
     if sys.byteorder != "little":
         samples.byteswap()
+
     mono = array("h")
-    for index in range(0, len(samples), 2):
-        mono.append(int((samples[index] + samples[index + 1]) / 2))
+    for index in range(0, len(samples), channels):
+        total = sum(samples[index:index + channels])
+        mono.append(int(total / channels))
+
     if sys.byteorder != "little":
         mono.byteswap()
     return mono.tobytes()
@@ -86,8 +91,8 @@ class ConcurrentRecorder:
             sample_width = self.backend.sample_width()
             if self.mono_output and sample_width != 2:
                 raise ValueError("mono WAV capture requires PCM16 input")
-            if self.mono_output and endpoint.channels not in (1, 2):
-                raise ValueError("mono WAV capture supports only mono or stereo input")
+            if endpoint.channels < 1:
+                raise ValueError("audio endpoint reported no input channels")
 
             input_block_align = endpoint.channels * sample_width
             output_channels = 1 if self.mono_output else endpoint.channels
