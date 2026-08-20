@@ -1,6 +1,9 @@
 import sys
+import threading
 from array import array
 from pathlib import Path
+
+import pytest
 
 from audio_capture.model import Endpoint
 from audio_capture.recorder import ConcurrentRecorder, downmix_pcm16_mono
@@ -63,21 +66,76 @@ def test_capture_error_includes_endpoint_context(tmp_path):
     assert "simulated read failure" in message
 
 
-def test_distribution_runtime_files_match_repository_runtime():
-    mirrored_paths = [
-        Path("record_one_click.py"),
-        Path("src/audio_capture/__init__.py"),
-        Path("src/audio_capture/backend.py"),
-        Path("src/audio_capture/cli.py"),
-        Path("src/audio_capture/doctor.py"),
-        Path("src/audio_capture/media_foundation.py"),
-        Path("src/audio_capture/model.py"),
-        Path("src/audio_capture/native_backend.py"),
-        Path("src/audio_capture/recorder.py"),
-        Path("src/audio_capture/wasapi.py"),
-    ]
+class _BarrierFailingStream:
+    def __init__(self, barrier: threading.Barrier, label: str):
+        self.barrier = barrier
+        self.label = label
 
-    for relative_path in mirrored_paths:
-        repository_file = PROJECT_ROOT / relative_path
-        distribution_file = DISTRIBUTION_ROOT / relative_path
-        assert distribution_file.read_bytes() == repository_file.read_bytes(), relative_path
+    def read(self, frames, exception_on_overflow=False):
+        self.barrier.wait(timeout=2)
+        raise OSError(f"{self.label} simulated read failure")
+
+    def stop_stream(self):
+        pass
+
+    def close(self):
+        pass
+
+
+class _DualFailingBackend:
+    def __init__(self):
+        self.barrier = threading.Barrier(2)
+
+    def open_input(self, endpoint, frames_per_buffer):
+        return _BarrierFailingStream(self.barrier, endpoint.name)
+
+    def sample_width(self):
+        return 2
+
+
+def test_record_error_aggregates_render_and_microphone_failures(tmp_path):
+    recorder = ConcurrentRecorder(_DualFailingBackend(), mono_output=True)
+    render = Endpoint("render-id", "Display Audio", 2, 48000, "render-loopback")
+    microphone = Endpoint("mic-id", "Microphone Array", 4, 48000, "microphone")
+
+    with pytest.raises(RuntimeError, match="audio capture failed") as captured:
+        recorder.record(
+            render,
+            microphone,
+            tmp_path / "render.wav",
+            tmp_path / "microphone.wav",
+        )
+
+    message = str(captured.value)
+    assert "Display Audio" in message
+    assert "Microphone Array" in message
+    assert "2ch" in message
+    assert "4ch" in message
+
+
+def test_distribution_runtime_files_match_repository_runtime():
+    repository_package = PROJECT_ROOT / "src" / "audio_capture"
+    distribution_package = DISTRIBUTION_ROOT / "src" / "audio_capture"
+
+    repository_paths = {
+        path.relative_to(repository_package)
+        for path in repository_package.rglob("*.py")
+    }
+    distribution_paths = {
+        path.relative_to(distribution_package)
+        for path in distribution_package.rglob("*.py")
+    }
+
+    assert distribution_paths == repository_paths
+    for relative_path in sorted(repository_paths):
+        assert (
+            distribution_package / relative_path
+        ).read_bytes() == (
+            repository_package / relative_path
+        ).read_bytes(), relative_path
+
+    assert (
+        DISTRIBUTION_ROOT / "record_one_click.py"
+    ).read_bytes() == (
+        PROJECT_ROOT / "record_one_click.py"
+    ).read_bytes()
