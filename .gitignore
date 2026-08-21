@@ -4,5 +4,6 @@ __pycache__/
 .venv/
 *.wav
 *.log
+*.lnk
 /recordings/
 /distribution_audio_capture/recordings/

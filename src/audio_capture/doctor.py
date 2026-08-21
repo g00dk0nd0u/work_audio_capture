@@ -46,6 +46,6 @@ def run_doctor(backend_factory: Callable[[], Any] = NativeWasapiBackend) -> bool
             backend.close()
         try:
             version = importlib.metadata.version("PyAudioWPatch")
-            print(f"Optional PyAudioWPatch fallback: installed ({version})")
+            print(f"Optional PyAudioWPatch backend: installed ({version}); selected only with --backend pyaudio")
         except importlib.metadata.PackageNotFoundError:
-            print("Optional PyAudioWPatch fallback: not installed (not required)")
+            print("Optional PyAudioWPatch backend: not installed (not required for the native path)")

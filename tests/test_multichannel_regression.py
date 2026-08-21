@@ -134,8 +134,9 @@ def test_distribution_runtime_files_match_repository_runtime():
             repository_package / relative_path
         ).read_bytes(), relative_path
 
-    assert (
-        DISTRIBUTION_ROOT / "record_one_click.py"
-    ).read_bytes() == (
-        PROJECT_ROOT / "record_one_click.py"
-    ).read_bytes()
+    for launcher in ("record_one_click.py", "run.py"):
+        assert (
+            DISTRIBUTION_ROOT / launcher
+        ).read_bytes() == (
+            PROJECT_ROOT / launcher
+        ).read_bytes(), launcher

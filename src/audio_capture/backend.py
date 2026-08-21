@@ -7,7 +7,7 @@ from .model import Endpoint
 
 
 class PyAudioWPatchBackend:
-    """Small adapter that keeps the native dependency outside orchestration code."""
+    """Explicitly selected optional PyAudioWPatch backend; never an automatic fallback."""
 
     def __init__(self) -> None:
         try:
