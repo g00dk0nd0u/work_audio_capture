@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 import wave
 from array import array
@@ -113,3 +114,36 @@ def test_mix_available_chunks_keeps_wavs_when_postprocess_is_interrupted(tmp_pat
     assert microphone.exists()
     assert not (tmp_path / "recording_0001.part.mp3").exists()
     assert not (tmp_path / "recording_0001.mp3").exists()
+
+
+def test_open_output_folder_uses_windows_startfile(tmp_path, monkeypatch, capsys, caplog):
+    opened = []
+    monkeypatch.setattr(os, "startfile", lambda path: opened.append(path), raising=False)
+    caplog.set_level(logging.INFO)
+
+    record_one_click._open_output_folder(
+        tmp_path,
+        logging.getLogger("test-open-folder"),
+        {"render_name": "Speakers", "microphone_name": "Microphone"},
+    )
+
+    assert opened == [str(tmp_path)]
+    assert f"Opened recording folder: {tmp_path}" in capsys.readouterr().out
+    assert "Recording output folder opened" in caplog.text
+
+
+def test_open_output_folder_failure_does_not_raise(tmp_path, monkeypatch, capsys, caplog):
+    def fail(_path):
+        raise OSError("simulated Explorer failure")
+
+    monkeypatch.setattr(os, "startfile", fail, raising=False)
+    caplog.set_level(logging.WARNING)
+
+    record_one_click._open_output_folder(
+        tmp_path,
+        logging.getLogger("test-open-folder-failure"),
+        {},
+    )
+
+    assert "Recording saved, but could not open output folder" in capsys.readouterr().out
+    assert "output folder could not be opened" in caplog.text
