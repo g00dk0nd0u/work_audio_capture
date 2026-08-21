@@ -14,11 +14,15 @@ The current default path is dependency-free CPython plus Windows system APIs:
 - Mono, stereo, and multichannel PCM16 endpoints downmixed to mono without changing frame count
 - Bounded WAV chunk rotation by duration and PCM size
 - Render and microphone chunks combined to mono MP3 at 80 kbps through Windows Media Foundation
-- Source WAVs retained whenever MP3 encoding/finalization fails
-- JSONL diagnostics containing OS, Python, endpoint names, channel counts, sample rates, output directory, and exception traces
+- Explicit post-recording transition to MP3 generation with terminal progress (`Creating MP3 chunk X/Y: N%`)
+- Second Ctrl+C during MP3 post-processing cancels conversion without a traceback, removes partial `.part.mp3`, and keeps source WAVs
+- Source WAVs retained whenever MP3 encoding/finalization fails or post-processing is cancelled
+- JSONL diagnostics containing OS, Python, endpoint names, channel counts, sample rates, output directory, exception traces, and post-processing start/progress/cancel/completion events
 - Repository/distribution runtime synchronization covered by tests
 
 `PyAudioWPatch` remains an optional explicitly selected backend. It is not an automatic fallback and is not required for the default native path.
+
+See `POSTPROCESSING.md` for the current MP3 post-processing state model.
 
 ## Known current limitations
 
@@ -27,6 +31,7 @@ The current default path is dependency-free CPython plus Windows system APIs:
 - There is no clock-drift correction or resampling between the independent render and microphone streams.
 - Multichannel downmixing currently uses an arithmetic average; it is not channel-mask-aware and may not be ideal for every microphone array or surround layout.
 - Render + microphone mixing clamps PCM16 overflow but has no adaptive gain, limiter, or loudness normalization.
+- MP3 encoding remains a post-capture step rather than live encoding, so post-processing time increases with recording length even though progress is visible.
 - Endpoint removal/default changes, suspend/resume, and device invalidation do not yet have automatic teardown/re-enumeration/recovery.
 - Tray UI is intentionally deferred until capture compatibility and long-session reliability are proven on representative managed PCs.
 
@@ -41,7 +46,9 @@ Acceptance should cover:
 - A representative multichannel microphone-array laptop
 - USB/Bluetooth/headset endpoint combinations where used in practice
 - Advanced explicit-endpoint CLI recording for non-default endpoint selection
-- Five-minute and 60-minute captures with CPU, memory, disk usage, and resulting file integrity recorded
+- Five-minute and 60-minute captures with CPU, memory, disk usage, post-processing duration, and resulting file integrity recorded
+- Confirmation that MP3 progress is visibly updated after recording stops
+- Confirmation that cancelling MP3 post-processing keeps source WAVs and removes partial output
 - Failure diagnostics captured from `audio_capture.log` without requiring users to run extra discovery commands
 
 ## #3 — P0: corporate deployment review
@@ -63,10 +70,10 @@ After the P0 multi-PC hardware gate, harden lifecycle behavior as one coherent s
 - Explicit teardown, bounded retry, re-enumeration, and restart policy using stable endpoint IDs
 - Readable partial files on Ctrl+C, stream failure, permission loss, and disk-full conditions where practical
 - No deadlocks or indefinite shutdown hangs
-- Useful long-session diagnostics for bytes/frames written, gaps, CPU, memory, and disk use
+- Useful long-session diagnostics for bytes/frames written, gaps, CPU, memory, disk use, and post-processing duration
 - Eight-hour soak test
 
-Existing chunk rotation and WAV-preservation behavior should remain invariants.
+Existing chunk rotation, visible post-processing progress, and WAV-preservation behavior should remain invariants.
 
 ## #5 — P1: timing, resampling, and mix policy
 
@@ -77,6 +84,7 @@ Quantify the two independent audio clocks and define the next format policy arou
 - Keep resampling/conversion outside time-critical capture callbacks where possible
 - Evaluate channel-mask-aware or microphone-array-aware downmix only if real hardware demonstrates a quality problem with arithmetic averaging
 - Define gain/limiting policy if clipping proves material in real recordings
+- Measure real-machine MP3 post-processing duration for representative 5/30/60-minute recordings and optimize only where it materially improves user experience
 - Preserve transcription-friendly output and failure-safe WAV retention
 
 ## Later / intentionally deferred
