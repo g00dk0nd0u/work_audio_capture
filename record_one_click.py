@@ -26,7 +26,7 @@ from audio_capture.recorder import downmix_pcm16_mono  # noqa: E402
 BACKEND = "native"
 OUTPUT_ROOT = PROJECT_ROOT / "recordings"
 LOG_PATH = PROJECT_ROOT / "audio_capture.log"
-MIX_FRAMES = 16384
+MIX_FRAMES = 262144
 MP3_BITRATE_BPS = DEFAULT_MP3_BITRATE_BPS
 MP3_ENCODER_FACTORY = Mp3Encoder
 _LOG_EXTRA_FIELDS = (
@@ -41,6 +41,9 @@ _LOG_EXTRA_FIELDS = (
     "microphone_channels",
     "microphone_sample_rate",
     "output_directory",
+    "postprocess_chunk",
+    "postprocess_chunks",
+    "postprocess_percent",
 )
 
 
@@ -94,12 +97,22 @@ def _mono_samples(data: bytes, channels: int) -> array:
 
 
 def _mix_mono(render_samples: array, microphone_samples: array) -> array:
-    sample_count = max(len(render_samples), len(microphone_samples))
-    mixed = array("h", [0]) * sample_count
-    for index in range(sample_count):
-        value = render_samples[index] if index < len(render_samples) else 0
-        value += microphone_samples[index] if index < len(microphone_samples) else 0
-        mixed[index] = max(-32768, min(32767, value))
+    common_count = min(len(render_samples), len(microphone_samples))
+    mixed = array("h")
+    append = mixed.append
+
+    for index in range(common_count):
+        value = render_samples[index] + microphone_samples[index]
+        if value > 32767:
+            value = 32767
+        elif value < -32768:
+            value = -32768
+        append(value)
+
+    if len(render_samples) > common_count:
+        mixed.extend(render_samples[common_count:])
+    elif len(microphone_samples) > common_count:
+        mixed.extend(microphone_samples[common_count:])
     return mixed
 
 
@@ -111,7 +124,12 @@ def _pcm16_bytes(samples: array) -> bytes:
     return copied.tobytes()
 
 
-def _encode_recordings_mp3(render_path: Path, microphone_path: Path, output_path: Path) -> None:
+def _encode_recordings_mp3(
+    render_path: Path,
+    microphone_path: Path,
+    output_path: Path,
+    progress=None,
+) -> None:
     with wave.open(str(render_path), "rb") as render_file, wave.open(str(microphone_path), "rb") as microphone_file:
         render_params = render_file.getparams()
         microphone_params = microphone_file.getparams()
@@ -130,6 +148,11 @@ def _encode_recordings_mp3(render_path: Path, microphone_path: Path, output_path
         if render_params.nchannels < 1 or microphone_params.nchannels < 1:
             raise ValueError("render and microphone WAVs must contain at least one channel; source WAVs were kept")
 
+        total_frames = max(render_params.nframes, microphone_params.nframes)
+        processed_frames = 0
+        if progress is not None:
+            progress(0, total_frames)
+
         with MP3_ENCODER_FACTORY(
             output_path,
             sample_rate=render_params.framerate,
@@ -145,6 +168,9 @@ def _encode_recordings_mp3(render_path: Path, microphone_path: Path, output_path
                 if not render_samples and not microphone_samples:
                     break
                 encoder.write_pcm(_pcm16_bytes(_mix_mono(render_samples, microphone_samples)))
+                processed_frames += max(len(render_samples), len(microphone_samples))
+                if progress is not None:
+                    progress(min(processed_frames, total_frames), total_frames)
 
 
 def _recording_chunks(directory: Path, stem: str) -> dict[int, Path]:
@@ -173,25 +199,89 @@ def _mix_available_chunks(output: Path, logger: logging.Logger) -> None:
     if not common_chunks:
         raise ValueError("no matching render/microphone chunks were found; source WAVs were kept")
 
-    for chunk_number in common_chunks:
+    chunk_count = len(common_chunks)
+    for chunk_position, chunk_number in enumerate(common_chunks, start=1):
         final_path = output / f"recording_{chunk_number:04d}.mp3"
         temp_path = output / f"recording_{chunk_number:04d}.part.mp3"
         if temp_path.exists():
             temp_path.unlink()
+
+        last_logged_percent = -10
+
+        def report_progress(done_frames: int, total_frames: int) -> None:
+            nonlocal last_logged_percent
+            percent = 100 if total_frames <= 0 else min(100, int(done_frames * 100 / total_frames))
+            print(
+                f"\rCreating MP3 chunk {chunk_position}/{chunk_count}: {percent:3d}%",
+                end="",
+                flush=True,
+            )
+            log_percent = (percent // 10) * 10
+            if log_percent > last_logged_percent or percent == 100:
+                last_logged_percent = log_percent
+                logger.info(
+                    "MP3 post-processing progress",
+                    extra={
+                        "postprocess_chunk": chunk_position,
+                        "postprocess_chunks": chunk_count,
+                        "postprocess_percent": percent,
+                    },
+                )
+
         try:
             _encode_recordings_mp3(
-                render_chunks[chunk_number], microphone_chunks[chunk_number], temp_path
+                render_chunks[chunk_number],
+                microphone_chunks[chunk_number],
+                temp_path,
+                progress=report_progress,
             )
+            print()
             if not temp_path.exists() or temp_path.stat().st_size <= 0:
                 raise ValueError("MP3 encoder did not produce a non-empty output; source WAVs were kept")
             temp_path.replace(final_path)
         except BaseException:
+            print()
             if temp_path.exists():
                 temp_path.unlink()
             raise
 
         render_chunks[chunk_number].unlink()
         microphone_chunks[chunk_number].unlink()
+
+
+def _finish_mp3(
+    output: Path,
+    logger: logging.Logger,
+    diagnostic_log: dict[str, object],
+) -> int:
+    postprocess_log = {**diagnostic_log, "output_directory": str(output)}
+    print(
+        "Recording stopped. Creating MP3 now. "
+        "Source WAV files are already safe; please wait."
+    )
+    print("Press Ctrl+C again only if you want to cancel MP3 creation.")
+    logger.info("MP3 post-processing started", extra=postprocess_log)
+
+    try:
+        _mix_available_chunks(output, logger)
+    except KeyboardInterrupt:
+        print("MP3 creation cancelled. Source WAV recordings were kept.")
+        logger.warning(
+            "MP3 post-processing cancelled; source WAV recordings were kept",
+            extra=postprocess_log,
+        )
+        return 130
+    except Exception as exc:
+        print(f"Could not create MP3; source WAV recordings were kept: {exc}")
+        logger.exception(
+            "Could not create MP3; source WAV recordings were kept",
+            extra=postprocess_log,
+        )
+        return 1
+
+    print(f"Saved combined MP3 recording chunks to {output}")
+    logger.info("Combined MP3 recording chunks saved", extra=postprocess_log)
+    return 0
 
 
 def run() -> int:
@@ -266,20 +356,9 @@ def run() -> int:
         )
         return result
 
-    try:
-        _mix_available_chunks(output, logger)
-        print(f"Saved combined MP3 recording chunks to {output}")
-        logger.info(
-            "Combined MP3 recording chunks saved",
-            extra={**diagnostic_log, "output_directory": str(output)},
-        )
-    except Exception as exc:
-        print(f"Could not create MP3; source WAV recordings were kept: {exc}")
-        logger.exception(
-            "Could not create MP3; source WAV recordings were kept",
-            extra={**diagnostic_log, "output_directory": str(output)},
-        )
-        return 1
+    postprocess_result = _finish_mp3(output, logger, diagnostic_log)
+    if postprocess_result != 0:
+        return postprocess_result
     logger.info(
         "Recording request finished",
         extra={**diagnostic_log, "output_directory": str(output)},
