@@ -4,6 +4,7 @@ from datetime import datetime
 from array import array
 import json
 import logging
+import os
 from pathlib import Path
 import platform
 import sys
@@ -284,6 +285,27 @@ def _finish_mp3(
     return 0
 
 
+def _open_output_folder(
+    output: Path,
+    logger: logging.Logger,
+    diagnostic_log: dict[str, object],
+) -> None:
+    folder_log = {**diagnostic_log, "output_directory": str(output)}
+    try:
+        startfile = getattr(os, "startfile")
+        startfile(str(output))
+    except (AttributeError, OSError) as exc:
+        print(f"Recording saved, but could not open output folder: {exc}")
+        logger.warning(
+            "Recording saved but output folder could not be opened: %s",
+            exc,
+            extra=folder_log,
+        )
+        return
+    print(f"Opened recording folder: {output}")
+    logger.info("Recording output folder opened", extra=folder_log)
+
+
 def run() -> int:
     logger = _configure_logging()
     environment_log = _runtime_environment()
@@ -359,6 +381,7 @@ def run() -> int:
     postprocess_result = _finish_mp3(output, logger, diagnostic_log)
     if postprocess_result != 0:
         return postprocess_result
+    _open_output_folder(output, logger, diagnostic_log)
     logger.info(
         "Recording request finished",
         extra={**diagnostic_log, "output_directory": str(output)},
