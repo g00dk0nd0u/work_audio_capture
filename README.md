@@ -9,6 +9,7 @@ Windows PCで再生されている音声（Teams / Zoom / YouTube など）と�
 - Windows MMDevice / WASAPIを標準ライブラリ `ctypes` から直接利用
 - Windows Media Foundationで **mono / 80 kbps MP3** を生成
 - mono / stereo / multichannel PCM16 endpointをone-click時に自動でmono化
+- 録音停止後のMP3生成状態と進捗をターミナルに表示
 - Gemini / Whisperなどへの文字起こし入力を想定
 
 ---
@@ -40,11 +41,25 @@ Windowsの既定の
 Ctrl + C
 ```
 
-を押してください。
+を1回押してください。
 
 **録音中にウィンドウ右上の X で閉じないでください。** 正常にファイルを確定できない可能性があります。
 
-### 3. 録音結果
+### 3. MP3生成を待つ
+
+録音停止後はWAV録音が確定し、その後にMP3生成へ移ります。ターミナルには次のように状態が表示されます。
+
+```text
+Recording stopped. Creating MP3 now. Source WAV files are already safe; please wait.
+Press Ctrl+C again only if you want to cancel MP3 creation.
+Creating MP3 chunk 1/1: 37%
+```
+
+この表示中はクラッシュではなく、保存済みWAVからMP3を生成中です。長時間録音では数十秒以上かかる場合があります。
+
+MP3生成中にもう一度 `Ctrl+C` を押すと、MP3生成だけをキャンセルします。途中の `.part.mp3` は削除され、元のWAVは保持されます。
+
+### 4. 録音結果
 
 通常は次の場所に保存されます。
 
@@ -88,7 +103,11 @@ one-click録音では、Windows endpointが
 
 - MP3が正常に確定した場合だけ、対応する一時WAVを削除します。
 - MP3変換またはFinalizeに失敗した場合は、元WAVを残します。
+- MP3生成中にCtrl+Cでキャンセルした場合も、元WAVを残します。
+- キャンセルや失敗時の途中 `.part.mp3` は削除します。
 - ペアにならなかった最終chunkも削除しません。
+
+MP3後処理の状態モデルは [`docs/POSTPROCESSING.md`](docs/POSTPROCESSING.md) に整理しています。
 
 ## エラーが出た場合
 
@@ -109,8 +128,9 @@ one-clickログには、診断に必要な次の情報を自動記録します�
 - sample rate
 - 出力先
 - exception trace
+- MP3 post-processing開始 / 進捗 / cancel / 完了状態
 
-通常は、失敗PCで別途 `python run.py list` や `doctor` を実行しなくても、**`audio_capture.log`だけで一次診断できる**設計です。
+通常は、失敗PCで別途 `python run.py list` や `doctor` を実行しなくても、**`audio_capture.log`だけで一次診断できる**設計です。録音失敗なのか、MP3生成中なのか、MP3生成がキャンセルされたのかもログから区別できます。
 
 ## 現在の既知制約
 
@@ -120,6 +140,7 @@ one-clickログには、診断に必要な次の情報を自動記録します�
 - multichannel downmixは算術平均で、channel-mask-awareではありません。
 - render + microphone加算時はPCM16範囲へclampしますが、自動gain / limiter / loudness normalizationはありません。
 - endpoint切断、device invalidation、default-device変更、suspend/resumeの自動復旧は今後の課題です。
+- 長時間録音後のMP3生成は録音時間に応じて処理時間が増えます。進捗は表示されますが、リアルタイムencodeではありません。
 - Tray UIは録音互換性と長時間安定性の確認後に実装予定です。
 
 詳細は [`docs/BACKLOG.md`](docs/BACKLOG.md) を参照してください。
@@ -160,7 +181,7 @@ python run.py list --backend pyaudio
 
 # English
 
-Work Audio Capture records both Windows playback audio (Teams / Zoom / YouTube, etc.) and microphone audio, then combines them into **one mono MP3**.
+Work Audio Capture records both Windows playback audio (Teams, Zoom, YouTube, etc.) and microphone audio, then combines them into **one mono MP3**.
 
 - Windows only
 - Python 3.10+
@@ -169,6 +190,7 @@ Work Audio Capture records both Windows playback audio (Teams / Zoom / YouTube, 
 - Uses Windows MMDevice / WASAPI directly through standard-library `ctypes`
 - Uses Windows Media Foundation for **mono 80 kbps MP3** output
 - One-click mode automatically downmixes mono, stereo, and multichannel PCM16 endpoints to mono
+- Shows explicit MP3 post-processing state and progress after recording stops
 
 ## Quick start
 
@@ -178,7 +200,17 @@ From the repository root or `distribution_audio_capture` folder:
 python record_one_click.py
 ```
 
-Press `Ctrl+C` to stop.
+Press `Ctrl+C` once to stop recording.
+
+After the WAV capture is safely finalized, the tool explicitly enters MP3 post-processing and shows progress such as:
+
+```text
+Recording stopped. Creating MP3 now. Source WAV files are already safe; please wait.
+Press Ctrl+C again only if you want to cancel MP3 creation.
+Creating MP3 chunk 1/1: 37%
+```
+
+This means the process is still working, not crashed. Pressing `Ctrl+C` a second time during this stage cancels MP3 creation only; the partial `.part.mp3` is removed and the source WAV files are kept.
 
 Final recordings are saved under:
 
@@ -192,7 +224,9 @@ Long recordings may produce multiple numbered MP3 chunks. Output is normally **m
 
 Temporary PCM16 WAV files are kept during capture. In one-click mode they are downmixed to mono to reduce temporary disk usage.
 
-Source WAVs are deleted only after the corresponding MP3 has finalized successfully. If MP3 conversion or finalization fails, the WAV sources are retained.
+Source WAVs are deleted only after the corresponding MP3 has finalized successfully. If MP3 conversion/finalization fails or post-processing is cancelled, the WAV sources are retained and partial `.part.mp3` output is removed.
+
+See [`docs/POSTPROCESSING.md`](docs/POSTPROCESSING.md) for the post-processing state model.
 
 ## Multichannel compatibility
 
@@ -206,7 +240,7 @@ If recording fails, send or inspect:
 audio_capture.log
 ```
 
-It records OS/Python information, selected endpoint names, channel counts, sample rates, output directory, and exception details. A separate `run.py list` or `doctor` command should normally not be required just to diagnose a failed one-click recording.
+It records OS/Python information, selected endpoint names, channel counts, sample rates, output directory, exception details, and MP3 post-processing start/progress/cancel/completion events. A collected log can therefore distinguish capture failure from active or cancelled MP3 post-processing. A separate `run.py list` or `doctor` command should normally not be required just to diagnose a failed one-click recording.
 
 ## Current limitations
 
@@ -216,6 +250,7 @@ It records OS/Python information, selected endpoint names, channel counts, sampl
 - Multichannel downmix is arithmetic rather than channel-mask-aware.
 - Mixing clamps PCM16 overflow but does not apply adaptive gain, limiting, or loudness normalization.
 - Automatic recovery from endpoint removal/device invalidation/default-device changes/suspend-resume is not implemented yet.
+- MP3 post-processing time increases with recording length; it is a post-capture step rather than live encoding.
 - Tray UI is intentionally deferred until multi-PC compatibility and long-session reliability are proven.
 
 See [`docs/BACKLOG.md`](docs/BACKLOG.md) for the current roadmap.
