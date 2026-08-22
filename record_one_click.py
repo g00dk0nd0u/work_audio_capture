@@ -26,6 +26,7 @@ from audio_capture.recorder import downmix_pcm16_mono  # noqa: E402
 
 BACKEND = "native"
 OUTPUT_ROOT = PROJECT_ROOT / "recordings"
+RECOVERY_ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "WorkAudioCapture"
 LOG_PATH = PROJECT_ROOT / "audio_capture.log"
 MIX_FRAMES = 262144
 MP3_BITRATE_BPS = DEFAULT_MP3_BITRATE_BPS
@@ -131,6 +132,28 @@ def _encode_recordings_mp3(
     output_path: Path,
     progress=None,
 ) -> None:
+    _encode_chunk_pairs_mp3([(render_path, microphone_path)], output_path, progress)
+
+
+def _encode_chunk_pairs_mp3(pairs, output_path: Path, progress=None) -> None:
+    """Encode ordered recovery pairs through one bounded-memory MP3 writer."""
+    if not pairs:
+        raise ValueError("no recording chunks were supplied")
+    with wave.open(str(pairs[0][0]), "rb") as first:
+        sample_rate = first.getframerate()
+    if sample_rate not in SUPPORTED_MP3_SAMPLE_RATES:
+        raise ValueError(
+            f"MP3 encoder does not support {sample_rate}Hz without resampling; source WAVs were kept"
+        )
+    with MP3_ENCODER_FACTORY(
+        output_path, sample_rate=sample_rate, bitrate_bps=MP3_BITRATE_BPS
+    ) as encoder:
+        for render_path, microphone_path in pairs:
+            _write_recording_pair(encoder, render_path, microphone_path, sample_rate, progress)
+
+
+def _write_recording_pair(encoder, render_path: Path, microphone_path: Path,
+                          sample_rate: int, progress=None) -> None:
     with wave.open(str(render_path), "rb") as render_file, wave.open(str(microphone_path), "rb") as microphone_file:
         render_params = render_file.getparams()
         microphone_params = microphone_file.getparams()
@@ -139,6 +162,8 @@ def _encode_recordings_mp3(
                 f"sample rate mismatch: render={render_params.framerate}Hz, "
                 f"microphone={microphone_params.framerate}Hz; source WAVs were kept"
             )
+        if render_params.framerate != sample_rate:
+            raise ValueError("sample rate changed between recovery chunks; source WAVs were kept")
         if render_params.framerate not in SUPPORTED_MP3_SAMPLE_RATES:
             raise ValueError(
                 f"MP3 encoder does not support {render_params.framerate}Hz without resampling; "
@@ -154,24 +179,19 @@ def _encode_recordings_mp3(
         if progress is not None:
             progress(0, total_frames)
 
-        with MP3_ENCODER_FACTORY(
-            output_path,
-            sample_rate=render_params.framerate,
-            bitrate_bps=MP3_BITRATE_BPS,
-        ) as encoder:
-            while True:
-                render_samples = _mono_samples(
-                    render_file.readframes(MIX_FRAMES), render_params.nchannels
-                )
-                microphone_samples = _mono_samples(
-                    microphone_file.readframes(MIX_FRAMES), microphone_params.nchannels
-                )
-                if not render_samples and not microphone_samples:
-                    break
-                encoder.write_pcm(_pcm16_bytes(_mix_mono(render_samples, microphone_samples)))
-                processed_frames += max(len(render_samples), len(microphone_samples))
-                if progress is not None:
-                    progress(min(processed_frames, total_frames), total_frames)
+        while True:
+            render_samples = _mono_samples(
+                render_file.readframes(MIX_FRAMES), render_params.nchannels
+            )
+            microphone_samples = _mono_samples(
+                microphone_file.readframes(MIX_FRAMES), microphone_params.nchannels
+            )
+            if not render_samples and not microphone_samples:
+                break
+            encoder.write_pcm(_pcm16_bytes(_mix_mono(render_samples, microphone_samples)))
+            processed_frames += max(len(render_samples), len(microphone_samples))
+            if progress is not None:
+                progress(min(processed_frames, total_frames), total_frames)
 
 
 def _recording_chunks(directory: Path, stem: str) -> dict[int, Path]:
@@ -186,7 +206,8 @@ def _recording_chunks(directory: Path, stem: str) -> dict[int, Path]:
     return chunks
 
 
-def _mix_available_chunks(output: Path, logger: logging.Logger) -> None:
+def _mix_available_chunks(output: Path, logger: logging.Logger,
+                          final_path: Path | None = None) -> Path:
     render_chunks = _recording_chunks(output, "render")
     microphone_chunks = _recording_chunks(output, "microphone")
     common_chunks = sorted(render_chunks.keys() & microphone_chunks.keys())
@@ -200,60 +221,52 @@ def _mix_available_chunks(output: Path, logger: logging.Logger) -> None:
     if not common_chunks:
         raise ValueError("no matching render/microphone chunks were found; source WAVs were kept")
 
-    chunk_count = len(common_chunks)
-    for chunk_position, chunk_number in enumerate(common_chunks, start=1):
-        final_path = output / f"recording_{chunk_number:04d}.mp3"
-        temp_path = output / f"recording_{chunk_number:04d}.part.mp3"
+    final_path = final_path or output / "recording_0001.mp3"
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = final_path.with_name(final_path.name + ".part")
+    if temp_path.exists():
+        temp_path.unlink()
+
+    last_logged_percent = -10
+
+    def report_progress(done_frames: int, total_frames: int) -> None:
+        nonlocal last_logged_percent
+        percent = 100 if total_frames <= 0 else min(100, int(done_frames * 100 / total_frames))
+        print(f"\rCreating final MP3: {percent:3d}%", end="", flush=True)
+        if percent // 10 > last_logged_percent // 10 or percent == 100:
+            log_percent = (percent // 10) * 10
+            last_logged_percent = log_percent
+            logger.info("MP3 post-processing progress", extra={
+                "postprocess_chunks": len(common_chunks), "postprocess_percent": percent})
+
+    try:
+        pairs = [(render_chunks[number], microphone_chunks[number]) for number in common_chunks]
+        if len(pairs) == 1:
+            _encode_recordings_mp3(*pairs[0], temp_path, report_progress)
+        else:
+            _encode_chunk_pairs_mp3(pairs, temp_path, report_progress)
+        print()
+        if not temp_path.exists() or temp_path.stat().st_size <= 0:
+            raise ValueError("MP3 encoder did not produce a non-empty output; source WAVs were kept")
+        temp_path.replace(final_path)
+    except BaseException:
+        print()
         if temp_path.exists():
             temp_path.unlink()
+        raise
 
-        last_logged_percent = -10
-
-        def report_progress(done_frames: int, total_frames: int) -> None:
-            nonlocal last_logged_percent
-            percent = 100 if total_frames <= 0 else min(100, int(done_frames * 100 / total_frames))
-            print(
-                f"\rCreating MP3 chunk {chunk_position}/{chunk_count}: {percent:3d}%",
-                end="",
-                flush=True,
-            )
-            log_percent = (percent // 10) * 10
-            if log_percent > last_logged_percent or percent == 100:
-                last_logged_percent = log_percent
-                logger.info(
-                    "MP3 post-processing progress",
-                    extra={
-                        "postprocess_chunk": chunk_position,
-                        "postprocess_chunks": chunk_count,
-                        "postprocess_percent": percent,
-                    },
-                )
-
-        try:
-            _encode_recordings_mp3(
-                render_chunks[chunk_number],
-                microphone_chunks[chunk_number],
-                temp_path,
-                progress=report_progress,
-            )
-            print()
-            if not temp_path.exists() or temp_path.stat().st_size <= 0:
-                raise ValueError("MP3 encoder did not produce a non-empty output; source WAVs were kept")
-            temp_path.replace(final_path)
-        except BaseException:
-            print()
-            if temp_path.exists():
-                temp_path.unlink()
-            raise
-
-        render_chunks[chunk_number].unlink()
-        microphone_chunks[chunk_number].unlink()
+    # Transaction boundary: sources survive until the complete MP3 is finalized
+    # and atomically published.
+    for path in (path for pair in pairs for path in pair):
+        path.unlink()
+    return final_path
 
 
 def _finish_mp3(
     output: Path,
     logger: logging.Logger,
     diagnostic_log: dict[str, object],
+    final_path: Path | None = None,
 ) -> int:
     postprocess_log = {**diagnostic_log, "output_directory": str(output)}
     print(
@@ -264,7 +277,7 @@ def _finish_mp3(
     logger.info("MP3 post-processing started", extra=postprocess_log)
 
     try:
-        _mix_available_chunks(output, logger)
+        published = _mix_available_chunks(output, logger, final_path)
     except KeyboardInterrupt:
         print("MP3 creation cancelled. Source WAV recordings were kept.")
         logger.warning(
@@ -280,8 +293,8 @@ def _finish_mp3(
         )
         return 1
 
-    print(f"Saved combined MP3 recording chunks to {output}")
-    logger.info("Combined MP3 recording chunks saved", extra=postprocess_log)
+    print(f"Saved combined MP3 recording to {published}")
+    logger.info("Combined MP3 recording saved", extra=postprocess_log)
     return 0
 
 
@@ -343,7 +356,9 @@ def run() -> int:
     diagnostic_log = {**environment_log, **endpoint_log}
     logger.info("Selected audio endpoints", extra=diagnostic_log)
 
-    output = OUTPUT_ROOT / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    session_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    output = RECOVERY_ROOT / session_name
+    final_path = OUTPUT_ROOT / f"{session_name}.mp3"
     logger.info(
         "Recording output directory selected",
         extra={**diagnostic_log, "output_directory": str(output)},
@@ -359,7 +374,6 @@ def run() -> int:
         str(microphone.index),
         "--output",
         str(output),
-        "--mono-wav",
     ]
     try:
         result = main()
@@ -378,10 +392,18 @@ def run() -> int:
         )
         return result
 
-    postprocess_result = _finish_mp3(output, logger, diagnostic_log)
+    postprocess_result = _finish_mp3(output, logger, diagnostic_log, final_path)
     if postprocess_result != 0:
+        print(f"Recovery recordings kept in: {output}")
+        logger.warning("Recovery recordings retained", extra={
+            **diagnostic_log, "output_directory": str(output)})
         return postprocess_result
-    _open_output_folder(output, logger, diagnostic_log)
+    try:
+        output.rmdir()
+    except OSError:
+        # Unpaired or unrelated recovery files intentionally keep the session.
+        pass
+    _open_output_folder(OUTPUT_ROOT, logger, diagnostic_log)
     logger.info(
         "Recording request finished",
         extra={**diagnostic_log, "output_directory": str(output)},

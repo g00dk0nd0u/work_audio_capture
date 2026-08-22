@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 import wave
 from array import array
 from pathlib import Path
@@ -73,17 +74,23 @@ def _endpoint_error(endpoint: Endpoint, stage: str, error: BaseException) -> Run
 
 class ConcurrentRecorder:
     def __init__(self, backend: Backend, frames_per_buffer: int = 1024,
-                 chunk_duration_seconds: int = 3600, mono_output: bool = False) -> None:
+                 chunk_duration_seconds: int = 600, mono_output: bool = False) -> None:
         self.backend = backend
         self.frames = frames_per_buffer
         self.chunk_duration_seconds = chunk_duration_seconds
         self.mono_output = mono_output
         self.stop_event = threading.Event()
         self.errors: list[BaseException] = []
+        self._chunk_lock = threading.Lock()
+        self._chunk_number = 1
+        self._chunk_deadline = 0.0
 
     def record(self, render: Endpoint, microphone: Endpoint, render_path: Path, microphone_path: Path) -> None:
         self.stop_event.clear()
         self.errors.clear()
+        self._chunk_number = 1
+        self._chunk_deadline = (time.monotonic() + self.chunk_duration_seconds
+                                if self.chunk_duration_seconds > 0 else float("inf"))
         threads = [
             threading.Thread(target=self._capture, args=(render, render_path), name="render-loopback"),
             threading.Thread(target=self._capture, args=(microphone, microphone_path), name="microphone"),
@@ -106,6 +113,14 @@ class ConcurrentRecorder:
 
     def stop(self) -> None:
         self.stop_event.set()
+
+    def _session_chunk_number(self) -> int:
+        """Return one wall-clock chunk number shared by both independent clocks."""
+        with self._chunk_lock:
+            if time.monotonic() >= self._chunk_deadline:
+                self._chunk_number += 1
+                self._chunk_deadline += self.chunk_duration_seconds
+            return self._chunk_number
 
     def _capture(self, endpoint: Endpoint, path: Path) -> None:
         stream = None
@@ -156,11 +171,11 @@ class ConcurrentRecorder:
                         frames_in_chunk += input_frames
                         if self.stop_event.is_set():
                             return
-                        time_limit = (self.chunk_duration_seconds > 0 and
-                                      frames_in_chunk >= endpoint.sample_rate * self.chunk_duration_seconds)
+                        session_chunk = self._session_chunk_number()
+                        time_limit = session_chunk > chunk_number
                         size_limit = frames_in_chunk >= max_chunk_frames
                         if time_limit or size_limit:
-                            chunk_number += 1
+                            chunk_number = max(chunk_number + 1, session_chunk)
                             break
         except BaseException as exc:
             capture_error = exc
