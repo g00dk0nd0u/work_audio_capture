@@ -3,6 +3,7 @@ import logging
 import sys
 import wave
 from array import array
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -325,6 +326,126 @@ def test_active_session_is_not_returned_by_recovery_detection(tmp_path):
     finally:
         lock.release()
     assert record_one_click._pending_sessions(tmp_path) == [session]
+
+
+def test_permission_error_opening_locked_session_is_treated_as_active(
+        tmp_path, monkeypatch):
+    session = _pending_session(tmp_path, "windows-locked")
+    original_open = Path.open
+
+    def permission_denied_for_lock(path, *args, **kwargs):
+        if path == session / record_one_click.SESSION_LOCK_FILE:
+            raise PermissionError("sharing violation")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", permission_denied_for_lock)
+
+    assert record_one_click._pending_sessions(tmp_path) == []
+
+
+def test_lock_release_suppresses_unlock_and_close_cleanup_errors(tmp_path):
+    class BrokenLockFile:
+        def seek(self, _offset):
+            raise OSError("unlock failed")
+
+        def fileno(self):
+            raise OSError("unlock failed")
+
+        def close(self):
+            raise RuntimeError("close failed")
+
+    lock = record_one_click._SessionLock(tmp_path)
+    lock.file = BrokenLockFile()
+
+    lock.release()
+
+    assert lock.file is None
+
+
+class _Endpoint:
+    is_default = True
+    index = 1
+    name = "test"
+    channels = 1
+    sample_rate = 48000
+
+
+class _Backend:
+    def endpoints(self):
+        return [_Endpoint()], [_Endpoint()]
+
+    def close(self):
+        pass
+
+
+class _FixedDatetime:
+    @staticmethod
+    def now():
+        return datetime(2026, 1, 2, 3, 4, 5)
+
+
+def _prepare_recording_start(monkeypatch, tmp_path):
+    import audio_capture.native_backend
+
+    monkeypatch.setattr(record_one_click, "_configure_logging",
+                        lambda: logging.getLogger("recording-start"))
+    monkeypatch.setattr(record_one_click, "_pending_sessions", lambda: [])
+    monkeypatch.setattr(record_one_click, "RECOVERY_ROOT", tmp_path)
+    monkeypatch.setattr(record_one_click, "datetime", _FixedDatetime)
+    monkeypatch.setattr(audio_capture.native_backend, "NativeWasapiBackend", _Backend)
+    return tmp_path / "2026-01-02_03-04-05"
+
+
+def test_session_marker_is_written_only_after_recording_lock(monkeypatch, tmp_path):
+    output = _prepare_recording_start(monkeypatch, tmp_path)
+    events = []
+
+    class Lock:
+        def __init__(self, directory):
+            assert directory == output
+
+        def acquire(self):
+            assert output.is_dir()
+            assert not (output / record_one_click.SESSION_FILE).exists()
+            events.append("lock")
+            return True
+
+        def release(self):
+            events.append("release")
+
+    def recording_main():
+        state = json.loads((output / record_one_click.SESSION_FILE).read_text())
+        assert state["status"] == record_one_click.RECOVERY_PENDING
+        events.append("record")
+        return 1
+
+    monkeypatch.setattr(record_one_click, "_SessionLock", Lock)
+    monkeypatch.setattr(record_one_click, "main", recording_main)
+
+    assert record_one_click.run() == 1
+    assert events == ["lock", "record", "release"]
+
+
+def test_failed_recording_lock_does_not_overwrite_recovery_metadata(
+        monkeypatch, tmp_path):
+    output = _prepare_recording_start(monkeypatch, tmp_path)
+    output.mkdir()
+    marker = output / record_one_click.SESSION_FILE
+    marker.write_text('{"status": "recovery_failed", "reason": "keep me"}\n')
+
+    class Lock:
+        def __init__(self, directory):
+            assert directory == output
+
+        def acquire(self):
+            return False
+
+    monkeypatch.setattr(record_one_click, "_SessionLock", Lock)
+    monkeypatch.setattr(record_one_click, "main",
+                        lambda: pytest.fail("recording must not start"))
+
+    assert record_one_click.run() == 1
+    assert marker.read_text() == '{"status": "recovery_failed", "reason": "keep me"}\n'
 
 
 def test_wav_validation_uses_multiple_bounded_reads(tmp_path, monkeypatch):
