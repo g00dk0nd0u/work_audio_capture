@@ -67,6 +67,7 @@ class GUID(ctypes.Structure):
 
 
 class WAVEFORMATEX(ctypes.Structure):
+    _layout_ = "ms"
     _pack_ = 2
     _fields_ = [("wFormatTag", ctypes.c_ushort), ("nChannels", ctypes.c_ushort),
                 ("nSamplesPerSec", DWORD), ("nAvgBytesPerSec", DWORD),
@@ -75,6 +76,7 @@ class WAVEFORMATEX(ctypes.Structure):
 
 
 class WAVEFORMATEXTENSIBLE(ctypes.Structure):
+    _layout_ = "ms"
     _pack_ = 2
     _fields_ = [("Format", WAVEFORMATEX), ("wValidBitsPerSample", ctypes.c_ushort),
                 ("dwChannelMask", DWORD), ("SubFormat", GUID)]
