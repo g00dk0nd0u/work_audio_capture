@@ -304,3 +304,16 @@ def test_shared_chunk_clock_tolerates_slight_boundary_timing_difference():
     assert recorder._session_chunk_number() == 1
     assert recorder._session_chunk_number() == 2
     assert recorder._session_chunk_number() == 2
+
+
+def test_shared_chunk_clock_catches_up_multiple_intervals_at_once():
+    values = iter((1900.0, 1900.001))
+    recorder = ConcurrentRecorder(FakeBackend(), clock=lambda: next(values))
+    recorder._chunk_number = 1
+    recorder._chunk_deadline = 600.0
+
+    # 1900s belongs to chunk 4. A second stream sees the same generation
+    # instead of causing tiny chunk 3 and 4 catch-up files on later reads.
+    assert recorder._session_chunk_number() == 4
+    assert recorder._chunk_deadline == 2400.0
+    assert recorder._session_chunk_number() == 4

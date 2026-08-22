@@ -146,9 +146,13 @@ class ConcurrentRecorder:
         if self.chunk_duration_seconds <= 0:
             return self._chunk_number
         with self._chunk_lock:
-            if self.clock() >= self._chunk_deadline:
-                self._chunk_number += 1
-                self._chunk_deadline += self.chunk_duration_seconds
+            now = self.clock()
+            if now >= self._chunk_deadline:
+                elapsed_chunks = int(
+                    (now - self._chunk_deadline) // self.chunk_duration_seconds
+                ) + 1
+                self._chunk_number += elapsed_chunks
+                self._chunk_deadline += elapsed_chunks * self.chunk_duration_seconds
             return self._chunk_number
 
     def _capture(self, endpoint: Endpoint, path: Path) -> None:
