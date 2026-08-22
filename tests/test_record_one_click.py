@@ -242,3 +242,137 @@ def test_unsupported_sample_rate_keeps_source_wavs(tmp_path):
 
     assert render.exists()
     assert microphone.exists()
+
+
+def _pending_session(root: Path, name: str) -> Path:
+    session = root / name
+    record_one_click._write_session_state(session, record_one_click.RECOVERY_PENDING)
+    return session
+
+
+def test_pending_detection_ignores_failed_and_reads_only_metadata(tmp_path):
+    pending = _pending_session(tmp_path, "pending")
+    failed = tmp_path / "failed"
+    record_one_click._write_session_state(failed, record_one_click.RECOVERY_FAILED, "bad tail")
+    (pending / "render_0001.wav").write_bytes(b"not inspected during startup")
+
+    assert record_one_click._pending_sessions(tmp_path) == [pending]
+
+
+def test_startup_default_does_not_repair(monkeypatch, tmp_path):
+    pending = _pending_session(tmp_path, "old")
+    monkeypatch.setattr("builtins.input", lambda _prompt: "")
+
+    assert record_one_click._choose_startup_action([pending]) == "record"
+    assert (pending / record_one_click.SESSION_FILE).exists()
+
+
+def test_no_pending_session_starts_without_prompt(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _prompt: pytest.fail("unexpected prompt"))
+    assert record_one_click._choose_startup_action([]) == "record"
+
+
+def test_repair_batch_continues_after_failure(monkeypatch, tmp_path):
+    sessions = [_pending_session(tmp_path, name) for name in ("one", "two", "three")]
+    attempted = []
+    def repair(session, _logger):
+        attempted.append(session.name)
+        return (record_one_click.REPAIR_FAILED if session.name == "two"
+                else record_one_click.REPAIR_FULL)
+    monkeypatch.setattr(record_one_click, "_repair_session", repair)
+
+    assert record_one_click._repair_all(sessions, logging.getLogger("batch")) == 1
+    assert attempted == ["one", "two", "three"]
+
+
+def test_repair_recovers_valid_chunk_and_preserves_unreadable_tail(tmp_path, monkeypatch):
+    session = _pending_session(tmp_path, "crashed")
+    _write(session / "render_0001.wav", 1, 48000, [10])
+    _write(session / "microphone_0001.wav", 1, 48000, [1])
+    bad_render = session / "render_0002.wav"
+    bad_microphone = session / "microphone_0002.wav"
+    bad_render.write_bytes(b"broken")
+    _write(bad_microphone, 1, 48000, [2])
+    monkeypatch.setattr(record_one_click, "OUTPUT_ROOT", tmp_path / "recordings")
+
+    assert record_one_click._repair_session(session, logging.getLogger("repair")) == record_one_click.REPAIR_PARTIAL
+    assert (tmp_path / "recordings" / "recovered_crashed.mp3").exists()
+    assert bad_render.exists() and bad_microphone.exists()
+    state = json.loads((session / record_one_click.SESSION_FILE).read_text())
+    assert state["status"] == record_one_click.RECOVERY_FAILED
+    assert not record_one_click._pending_sessions(tmp_path)
+
+
+def test_successful_repair_publishes_one_mp3_and_removes_session(tmp_path, monkeypatch):
+    session = _pending_session(tmp_path, "complete")
+    _write(session / "render_0001.wav", 1, 48000, [10])
+    _write(session / "microphone_0001.wav", 1, 48000, [1])
+    monkeypatch.setattr(record_one_click, "OUTPUT_ROOT", tmp_path / "recordings")
+
+    assert record_one_click._repair_session(session, logging.getLogger("repair")) == record_one_click.REPAIR_FULL
+    assert list((tmp_path / "recordings").glob("*.mp3")) == [
+        tmp_path / "recordings" / "recovered_complete.mp3"
+    ]
+    assert not session.exists()
+
+
+def test_active_session_is_not_returned_by_recovery_detection(tmp_path):
+    session = _pending_session(tmp_path, "active")
+    lock = record_one_click._SessionLock(session)
+    assert lock.acquire()
+    try:
+        assert record_one_click._pending_sessions(tmp_path) == []
+    finally:
+        lock.release()
+    assert record_one_click._pending_sessions(tmp_path) == [session]
+
+
+def test_wav_validation_uses_multiple_bounded_reads(tmp_path, monkeypatch):
+    render = tmp_path / "render.wav"
+    microphone = tmp_path / "microphone.wav"
+    frame_count = record_one_click.VALIDATION_FRAMES * 2 + 1
+    _write(render, 1, 48000, [1] * frame_count)
+    _write(microphone, 1, 48000, [1] * frame_count)
+    calls = []
+    original = wave.Wave_read.readframes
+    def tracked_readframes(self, frames):
+        calls.append(frames)
+        assert frames <= record_one_click.VALIDATION_FRAMES
+        return original(self, frames)
+    monkeypatch.setattr(wave.Wave_read, "readframes", tracked_readframes)
+
+    record_one_click._readable_pair(render, microphone)
+
+    assert len([frames for frames in calls if frames]) >= 6
+
+
+def test_repair_ctrl_c_leaves_current_and_unattempted_sessions_pending(
+        tmp_path, monkeypatch):
+    sessions = [_pending_session(tmp_path, name) for name in ("current", "later")]
+    attempted = []
+    def cancel(session, _logger):
+        attempted.append(session)
+        raise KeyboardInterrupt
+    monkeypatch.setattr(record_one_click, "_repair_session", cancel)
+
+    assert record_one_click._repair_all(sessions, logging.getLogger("cancel")) == 130
+    assert attempted == [sessions[0]]
+    assert record_one_click._pending_sessions(tmp_path) == sessions
+
+
+def test_successful_encoding_with_unexpected_file_retains_failed_metadata(
+        tmp_path, monkeypatch):
+    session = _pending_session(tmp_path, "extra")
+    _write(session / "render_0001.wav", 1, 48000, [10])
+    _write(session / "microphone_0001.wav", 1, 48000, [1])
+    unexpected = session / "notes.txt"
+    unexpected.write_text("preserve me")
+    monkeypatch.setattr(record_one_click, "OUTPUT_ROOT", tmp_path / "recordings")
+
+    result = record_one_click._repair_session(session, logging.getLogger("repair"))
+
+    assert result == record_one_click.REPAIR_PARTIAL
+    assert unexpected.exists()
+    state = json.loads((session / record_one_click.SESSION_FILE).read_text())
+    assert state["status"] == record_one_click.RECOVERY_FAILED
+    assert record_one_click._pending_sessions(tmp_path) == []
