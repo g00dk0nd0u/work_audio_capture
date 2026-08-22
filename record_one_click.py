@@ -32,8 +32,13 @@ MIX_FRAMES = 262144
 MP3_BITRATE_BPS = DEFAULT_MP3_BITRATE_BPS
 MP3_ENCODER_FACTORY = Mp3Encoder
 SESSION_FILE = "session.json"
+SESSION_LOCK_FILE = "session.lock"
 RECOVERY_PENDING = "recovery_pending"
 RECOVERY_FAILED = "recovery_failed"
+VALIDATION_FRAMES = 65536
+REPAIR_FULL = "full"
+REPAIR_PARTIAL = "partial"
+REPAIR_FAILED = "failed"
 _LOG_EXTRA_FIELDS = (
     "python_version",
     "python_implementation",
@@ -101,6 +106,59 @@ def _write_session_state(directory: Path, status: str, reason: str | None = None
     temporary.replace(path)
 
 
+class _SessionLock:
+    """A process-owned lock which the OS releases automatically after a crash."""
+    def __init__(self, directory: Path) -> None:
+        self.path = directory / SESSION_LOCK_FILE
+        self.file = None
+
+    def acquire(self) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock_file = self.path.open("a+b")
+        lock_file.seek(0)
+        if lock_file.read(1) == b"":
+            lock_file.write(b"\0")
+            lock_file.flush()
+        lock_file.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            lock_file.close()
+            return False
+        self.file = lock_file
+        return True
+
+    def release(self) -> None:
+        if self.file is None:
+            return
+        if os.name == "nt":
+            import msvcrt
+            self.file.seek(0)
+            msvcrt.locking(self.file.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(self.file.fileno(), fcntl.LOCK_UN)
+        self.file.close()
+        self.file = None
+
+
+class _ActiveSessionError(RuntimeError):
+    pass
+
+
+def _session_is_unlocked(directory: Path) -> bool:
+    lock = _SessionLock(directory)
+    if not lock.acquire():
+        return False
+    lock.release()
+    return True
+
+
 def _pending_sessions(root: Path = RECOVERY_ROOT) -> list[Path]:
     """Inspect only session metadata; WAV files are deliberately not opened here."""
     if not root.is_dir():
@@ -114,7 +172,7 @@ def _pending_sessions(root: Path = RECOVERY_ROOT) -> list[Path]:
             state = json.loads(marker.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
             continue
-        if state.get("status") == RECOVERY_PENDING:
+        if state.get("status") == RECOVERY_PENDING and _session_is_unlocked(directory):
             pending.append(directory)
     return sorted(pending, key=lambda path: path.name)
 
@@ -257,9 +315,16 @@ def _readable_pair(render_path: Path, microphone_path: Path) -> None:
     for path in (render_path, microphone_path):
         with wave.open(str(path), "rb") as source:
             frame_bytes = source.getnchannels() * source.getsampwidth()
-            expected = source.getnframes() * frame_bytes
-            actual = len(source.readframes(source.getnframes()))
-            if frame_bytes <= 0 or actual != expected:
+            remaining = source.getnframes()
+            if frame_bytes <= 0:
+                raise ValueError(f"invalid WAV chunk: {path.name}")
+            while remaining:
+                requested = min(remaining, VALIDATION_FRAMES)
+                data = source.readframes(requested)
+                if len(data) != requested * frame_bytes:
+                    raise ValueError(f"incomplete WAV chunk: {path.name}")
+                remaining -= requested
+            if source.readframes(1):
                 raise ValueError(f"incomplete WAV chunk: {path.name}")
 
 
@@ -274,7 +339,34 @@ def _unique_recovered_path(session: Path) -> Path:
     return candidate
 
 
-def _repair_session(session: Path, logger: logging.Logger) -> bool:
+def _repair_session(session: Path, logger: logging.Logger) -> str:
+    session_lock = _SessionLock(session)
+    if not session_lock.acquire():
+        raise _ActiveSessionError(f"recording session is active: {session}")
+    try:
+        result = _repair_locked_session(session, logger)
+    finally:
+        session_lock.release()
+    if result == REPAIR_FULL:
+        (session / SESSION_LOCK_FILE).unlink(missing_ok=True)
+        remaining = [path.name for path in session.iterdir()
+                     if path.name != SESSION_FILE]
+        if remaining:
+            _write_session_state(
+                session, RECOVERY_FAILED,
+                "unconsumed recovery files remain: " + ", ".join(sorted(remaining)),
+            )
+            return REPAIR_PARTIAL
+        (session / SESSION_FILE).unlink(missing_ok=True)
+        try:
+            session.rmdir()
+        except OSError:
+            _write_session_state(session, RECOVERY_FAILED, "recovery directory cleanup failed")
+            return REPAIR_PARTIAL
+    return result
+
+
+def _repair_locked_session(session: Path, logger: logging.Logger) -> str:
     render = _recording_chunks(session, "render")
     microphone = _recording_chunks(session, "microphone")
     common = sorted(render.keys() & microphone.keys())
@@ -301,38 +393,40 @@ def _repair_session(session: Path, logger: logging.Logger) -> bool:
         reason = problem or str(exc)
         _write_session_state(session, RECOVERY_FAILED, reason)
         logger.exception("Interrupted recording repair failed: %s", session)
-        return False
+        return REPAIR_FAILED
 
     if problem:
         _write_session_state(session, RECOVERY_FAILED, problem)
-        return False
-    (session / SESSION_FILE).unlink(missing_ok=True)
-    try:
-        session.rmdir()
-    except OSError:
-        # Unexpected files are recovery data and must not be silently removed.
-        _write_session_state(session, RECOVERY_FAILED, "unconsumed recovery files remain")
-        return False
-    return True
+        return REPAIR_PARTIAL
+    return REPAIR_FULL
 
 
 def _repair_all(sessions: list[Path], logger: logging.Logger) -> int:
     recovered = 0
+    partial = 0
     failed = 0
     for session in sessions:
         try:
-            success = _repair_session(session, logger)
-        except BaseException as exc:
+            result = _repair_session(session, logger)
+        except KeyboardInterrupt:
+            print("\nRepair cancelled. Source WAV recordings were kept.")
+            return 130
+        except _ActiveSessionError:
+            # A recording may have started between discovery and repair.
+            continue
+        except Exception as exc:
             _write_session_state(session, RECOVERY_FAILED, str(exc))
-            success = False
-        recovered += int(success)
-        failed += int(not success)
+            result = REPAIR_FAILED
+        recovered += int(result == REPAIR_FULL)
+        partial += int(result == REPAIR_PARTIAL)
+        failed += int(result == REPAIR_FAILED)
     print("\nRepair completed:")
-    print(f"{recovered} recovered")
-    print(f"{failed} could not be fully repaired")
-    if failed:
+    print(f"{recovered} fully recovered")
+    print(f"{partial} partially recovered")
+    print(f"{failed} failed")
+    if partial or failed:
         print("\nFailed recovery data was preserved.")
-    return 0 if failed == 0 else 1
+    return 0 if partial == 0 and failed == 0 else 1
 
 
 def _mix_available_chunks(output: Path, logger: logging.Logger,
@@ -500,6 +594,10 @@ def run() -> int:
         extra={**diagnostic_log, "output_directory": str(output)},
     )
     _write_session_state(output, RECOVERY_PENDING)
+    session_lock = _SessionLock(output)
+    if not session_lock.acquire():
+        print(f"Could not lock recording session: {output}", file=sys.stderr)
+        return 1
     sys.argv = [
         str(Path(__file__)),
         "record",
@@ -512,37 +610,51 @@ def run() -> int:
         "--output",
         str(output),
     ]
+    recording_succeeded = False
     try:
-        result = main()
-    except Exception as exc:
-        print(f"Recording command failed unexpectedly: {exc}", file=sys.stderr)
-        logger.exception(
-            "Recording command raised an unexpected exception",
-            extra={**diagnostic_log, "output_directory": str(output)},
-        )
-        return 1
-    if result != 0:
-        print(f"Recording failed; recovery recordings kept in: {output}")
-        logger.error(
-            "Recording command failed with exit code %s; recovery recordings retained in %s",
-            result, output,
-            extra={**diagnostic_log, "output_directory": str(output)},
-        )
-        return result
+        try:
+            result = main()
+        except Exception as exc:
+            print(f"Recording command failed unexpectedly: {exc}", file=sys.stderr)
+            logger.exception(
+                "Recording command raised an unexpected exception",
+                extra={**diagnostic_log, "output_directory": str(output)},
+            )
+            return 1
+        if result != 0:
+            print(f"Recording failed; recovery recordings kept in: {output}")
+            logger.error(
+                "Recording command failed with exit code %s; recovery recordings retained in %s",
+                result, output,
+                extra={**diagnostic_log, "output_directory": str(output)},
+            )
+            return result
 
-    postprocess_result = _finish_mp3(output, logger, diagnostic_log, final_path)
-    if postprocess_result != 0:
-        print(f"Recovery recordings kept in: {output}")
-        logger.warning("Recovery recordings retained", extra={
-            **diagnostic_log, "output_directory": str(output)})
-        return postprocess_result
-    (output / SESSION_FILE).unlink(missing_ok=True)
-    try:
-        output.rmdir()
-    except OSError:
-        # Unpaired or unrelated recovery files intentionally keep the session.
-        logger.warning("Recovery files remain in %s", output, extra={
-            **diagnostic_log, "output_directory": str(output)})
+        postprocess_result = _finish_mp3(output, logger, diagnostic_log, final_path)
+        if postprocess_result != 0:
+            print(f"Recovery recordings kept in: {output}")
+            logger.warning("Recovery recordings retained", extra={
+                **diagnostic_log, "output_directory": str(output)})
+            return postprocess_result
+        recording_succeeded = True
+    finally:
+        session_lock.release()
+
+    if recording_succeeded:
+        (output / SESSION_LOCK_FILE).unlink(missing_ok=True)
+        remaining = [path.name for path in output.iterdir()
+                     if path.name != SESSION_FILE]
+        if remaining:
+            reason = "unconsumed recovery files remain: " + ", ".join(sorted(remaining))
+            _write_session_state(output, RECOVERY_FAILED, reason)
+            logger.warning(reason, extra={
+                **diagnostic_log, "output_directory": str(output)})
+        else:
+            (output / SESSION_FILE).unlink(missing_ok=True)
+            try:
+                output.rmdir()
+            except OSError:
+                _write_session_state(output, RECOVERY_FAILED, "recovery directory cleanup failed")
     _open_output_folder(OUTPUT_ROOT, logger, diagnostic_log)
     logger.info(
         "Recording request finished",
