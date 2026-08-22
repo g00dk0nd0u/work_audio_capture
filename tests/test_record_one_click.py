@@ -182,6 +182,23 @@ def test_mix_common_chunks_promotes_mp3_and_keeps_unpaired_final_chunk(tmp_path,
     assert "Unpaired recording chunks kept" in caplog.text
 
 
+def test_multiple_chunks_are_encoded_into_one_final_mp3(tmp_path):
+    for number, value in ((1, 10), (2, 20)):
+        _write(tmp_path / f"render_{number:04d}.wav", 1, 48000, [value])
+        _write(tmp_path / f"microphone_{number:04d}.wav", 1, 48000, [1])
+
+    final = record_one_click._mix_available_chunks(tmp_path, logging.getLogger("test-multi"))
+
+    assert final == tmp_path / "recording_0001.mp3"
+    assert len(_FakeEncoder.instances) == 1
+    assert _samples(bytes(_FakeEncoder.instances[0].data)) == [11, 21]
+    assert not list(tmp_path.glob("*.wav"))
+
+
+def test_recovery_root_is_outside_repository():
+    assert not record_one_click.RECOVERY_ROOT.is_relative_to(record_one_click.PROJECT_ROOT)
+
+
 def test_encoder_failure_keeps_source_wavs_and_removes_partial_output(tmp_path):
     render = tmp_path / "render_0001.wav"
     microphone = tmp_path / "microphone_0001.wav"

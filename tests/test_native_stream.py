@@ -3,7 +3,7 @@ import ctypes
 import pytest
 
 import audio_capture.native_backend as native
-from audio_capture.wasapi import AudioFormat, LPVOID, WAIT_TIMEOUT, eRender
+from audio_capture.wasapi import AudioFormat, LPVOID, WAIT_OBJECT_0, WAIT_TIMEOUT, eRender
 
 
 class TimeoutKernel:
@@ -33,6 +33,55 @@ def test_repeated_timeouts_return_control_without_synthetic_audio(monkeypatch):
     assert stream.read(1024) == b""
     assert stream.pending == bytearray()
     assert kernel.waits == 3
+
+
+def test_pcm16_engine_request_preserves_rate_and_channels():
+    requested = native._pcm16_engine_format(AudioFormat(4, 48000, 32, 32, "float", 16))
+    assert requested.wFormatTag == 1
+    assert requested.nChannels == 4
+    assert requested.nSamplesPerSec == 48000
+    assert requested.wBitsPerSample == 16
+    assert requested.nBlockAlign == 8
+    assert requested.nAvgBytesPerSec == 384000
+
+
+def test_read_stops_draining_packets_once_one_read_is_buffered(monkeypatch):
+    pcm = ctypes.create_string_buffer(b"\x01\x00\x02\x00" * 4)
+    calls = {"next": 0}
+
+    class Kernel:
+        def WaitForSingleObject(self, _event, _milliseconds):
+            return WAIT_OBJECT_0
+
+    def fake_method(_pointer, index, _restype, *_argtypes):
+        if index == 5:
+            def next_packet(_capture, available):
+                calls["next"] += 1
+                available._obj.value = 4
+                return 0
+            return next_packet
+        if index == 3:
+            def get_buffer(_capture, data, frames, flags, *_unused):
+                data._obj.value = ctypes.addressof(pcm)
+                frames._obj.value = 4
+                flags._obj.value = 0
+                return 0
+            return get_buffer
+        if index == 4:
+            return lambda *_args: 0
+        raise AssertionError(index)
+
+    stream = native.NativeWasapiStream.__new__(native.NativeWasapiStream)
+    stream.format = AudioFormat(2, 48000, 16, 16, "pcm", 4)
+    stream.pending = bytearray()
+    stream.capture = LPVOID(1)
+    stream.event = 123
+    monkeypatch.setattr(native, "_require_windows", lambda: (object(), Kernel()))
+    monkeypatch.setattr(native, "_method", fake_method)
+
+    assert len(stream.read(2)) == 8
+    assert len(stream.pending) == 8
+    assert calls["next"] == 1
 
 
 def test_close_releases_every_resource_even_when_stop_fails(monkeypatch):

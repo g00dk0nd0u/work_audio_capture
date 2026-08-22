@@ -15,7 +15,7 @@ from .wasapi import (
     LPVOID, PKEY_Device_FriendlyName, PROPVARIANT, STGM_READ, UINT32,
     VT_LPWSTR, WAIT_OBJECT_0, WAIT_TIMEOUT, WAVEFORMATEX, AudioFormat,
     ComApartment, WasapiUnavailable, _method, _require_windows, check_hresult,
-    eCapture, eConsole, eRender, interpret_format, pcm16, release,
+    WAVE_FORMAT_PCM, eCapture, eConsole, eRender, interpret_format, pcm16, release,
 )
 
 
@@ -23,6 +23,13 @@ from .wasapi import (
 class NativeEndpointInfo:
     endpoint: Endpoint
     flow: int
+
+
+def _pcm16_engine_format(source: AudioFormat) -> WAVEFORMATEX:
+    """Build the same-rate/channel PCM16 format requested from the audio engine."""
+    block_align = source.channels * 2
+    return WAVEFORMATEX(WAVE_FORMAT_PCM, source.channels, source.sample_rate,
+                        source.sample_rate * block_align, block_align, 16, 0)
 
 
 def _create_enumerator() -> LPVOID:
@@ -142,11 +149,26 @@ class NativeWasapiStream:
             raw = ctypes.POINTER(WAVEFORMATEX)()
             check_hresult(_method(self.client, 8, HRESULT, ctypes.POINTER(ctypes.POINTER(WAVEFORMATEX)))(self.client, ctypes.byref(raw)), "IAudioClient.GetMixFormat")
             try:
-                self.format = interpret_format(raw)
+                native_format = interpret_format(raw)
+                pcm_format = _pcm16_engine_format(native_format)
+                closest = ctypes.POINTER(WAVEFORMATEX)()
+                supported = _method(
+                    self.client, 7, HRESULT, ctypes.c_int,
+                    ctypes.POINTER(WAVEFORMATEX),
+                    ctypes.POINTER(ctypes.POINTER(WAVEFORMATEX)),
+                )(self.client, AUDCLNT_SHAREMODE_SHARED, ctypes.byref(pcm_format), ctypes.byref(closest))
+                if closest:
+                    ctypes.windll.ole32.CoTaskMemFree(closest)
+                # S_OK means the engine accepts this exact PCM16 layout. S_FALSE
+                # supplies a closest format, which is not safe to silently use.
+                requested = ctypes.pointer(pcm_format) if supported == 0 else raw
+                self.format = (AudioFormat(native_format.channels, native_format.sample_rate,
+                                           16, 16, "pcm", native_format.channels * 2)
+                               if supported == 0 else native_format)
                 flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK | (AUDCLNT_STREAMFLAGS_LOOPBACK if flow == eRender else 0)
                 check_hresult(_method(self.client, 3, HRESULT, ctypes.c_int, DWORD, ctypes.c_longlong, ctypes.c_longlong,
                                       ctypes.POINTER(WAVEFORMATEX), LPVOID)(
-                    self.client, AUDCLNT_SHAREMODE_SHARED, flags, 0, 0, raw, None), "IAudioClient.Initialize")
+                    self.client, AUDCLNT_SHAREMODE_SHARED, flags, 0, 0, requested, None), "IAudioClient.Initialize")
             finally:
                 ctypes.windll.ole32.CoTaskMemFree(raw)
             _, kernel32 = _require_windows()
@@ -177,7 +199,7 @@ class NativeWasapiStream:
                 return b""
             if wait != WAIT_OBJECT_0:
                 raise ctypes.WinError()
-            while True:
+            while len(self.pending) < target:
                 available = UINT32()
                 check_hresult(_method(self.capture, 5, HRESULT, ctypes.POINTER(UINT32))(self.capture, ctypes.byref(available)), "IAudioCaptureClient.GetNextPacketSize")
                 if not available.value:
@@ -186,8 +208,12 @@ class NativeWasapiStream:
                 check_hresult(_method(self.capture, 3, HRESULT, ctypes.POINTER(LPVOID), ctypes.POINTER(UINT32), ctypes.POINTER(DWORD), LPVOID, LPVOID)(
                     self.capture, ctypes.byref(data), ctypes.byref(packet_frames), ctypes.byref(flags), None, None), "IAudioCaptureClient.GetBuffer")
                 try:
-                    raw = b"" if flags.value & AUDCLNT_BUFFERFLAGS_SILENT else ctypes.string_at(data, packet_frames.value * self.format.block_align)
-                    self.pending.extend(pcm16(raw, self.format, packet_frames.value, bool(flags.value & AUDCLNT_BUFFERFLAGS_SILENT)))
+                    silent = bool(flags.value & AUDCLNT_BUFFERFLAGS_SILENT)
+                    raw = b"" if silent else ctypes.string_at(
+                        data, packet_frames.value * self.format.block_align)
+                    # Exact PCM16 negotiation makes this a single native copy.
+                    # Conversion remains available for endpoints that reject it.
+                    self.pending.extend(pcm16(raw, self.format, packet_frames.value, silent))
                 finally:
                     check_hresult(_method(self.capture, 4, HRESULT, UINT32)(self.capture, packet_frames.value), "IAudioCaptureClient.ReleaseBuffer")
         result = bytes(self.pending[:target])

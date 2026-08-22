@@ -241,3 +241,79 @@ def test_close_runs_when_stop_stream_fails(tmp_path):
     recorder._capture(Endpoint(1, "mic", 1, 8000, "microphone"), tmp_path / "mic.wav")
     assert backend.streams[0].closed
     assert isinstance(recorder.errors[0], RuntimeError)
+
+
+def test_recording_time_limit_uses_injected_monotonic_clock(tmp_path, caplog):
+    values = iter((100.0, 100.0 + 12 * 60 * 60))
+    recorder = ConcurrentRecorder(
+        FakeBackend(), frames_per_buffer=8, chunk_duration_seconds=0,
+        clock=lambda: next(values),
+    )
+    render = Endpoint(2, "render", 1, 8000, "render-loopback")
+    microphone = Endpoint(3, "microphone", 1, 8000, "microphone")
+    caplog.set_level("INFO", logger="work_audio_capture")
+
+    recorder.record(render, microphone, tmp_path / "render.wav", tmp_path / "microphone.wav")
+
+    assert "recording time limit reached" in caplog.text
+    assert recorder.stop_event.is_set()
+
+
+def test_shutdown_timeout_is_bounded_and_reports_recovery(tmp_path, caplog):
+    release = threading.Event()
+
+    class BlockingStream(FakeStream):
+        def read(self, frames, exception_on_overflow=False):
+            release.wait()
+            return super().read(frames, exception_on_overflow)
+
+    class BlockingBackend(FakeBackend):
+        def open_input(self, endpoint, frames_per_buffer):
+            stream = BlockingStream()
+            self.streams.append(stream)
+            return stream
+
+    values = iter((0.0, 12 * 60 * 60))
+    recorder = ConcurrentRecorder(
+        BlockingBackend(), chunk_duration_seconds=0,
+        shutdown_timeout_seconds=0.05, clock=lambda: next(values),
+    )
+    endpoint = Endpoint(1, "audio", 1, 8000, "microphone")
+    caplog.set_level("ERROR", logger="work_audio_capture")
+    started = time.monotonic()
+    try:
+        with pytest.raises(RuntimeError, match="shutdown timed out"):
+            recorder.record(endpoint, endpoint, tmp_path / "render.wav", tmp_path / "microphone.wav")
+    finally:
+        release.set()
+
+    assert time.monotonic() - started < 1
+    assert (tmp_path / "render.wav").exists()
+    assert (tmp_path / "microphone.wav").exists()
+    assert "recovery WAVs were kept" in caplog.text
+
+
+def test_shared_chunk_clock_tolerates_slight_boundary_timing_difference():
+    values = iter((599.999, 600.001, 600.002))
+    recorder = ConcurrentRecorder(FakeBackend(), clock=lambda: next(values))
+    recorder._chunk_number = 1
+    recorder._chunk_deadline = 600.0
+
+    # One stream observes the old chunk just before the boundary; the other
+    # advances the shared generation just after it. Neither stream blocks.
+    assert recorder._session_chunk_number() == 1
+    assert recorder._session_chunk_number() == 2
+    assert recorder._session_chunk_number() == 2
+
+
+def test_shared_chunk_clock_catches_up_multiple_intervals_at_once():
+    values = iter((1900.0, 1900.001))
+    recorder = ConcurrentRecorder(FakeBackend(), clock=lambda: next(values))
+    recorder._chunk_number = 1
+    recorder._chunk_deadline = 600.0
+
+    # 1900s belongs to chunk 4. A second stream sees the same generation
+    # instead of causing tiny chunk 3 and 4 catch-up files on later reads.
+    assert recorder._session_chunk_number() == 4
+    assert recorder._chunk_deadline == 2400.0
+    assert recorder._session_chunk_number() == 4
