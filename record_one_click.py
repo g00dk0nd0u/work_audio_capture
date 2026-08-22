@@ -385,9 +385,10 @@ def run() -> int:
         )
         return 1
     if result != 0:
+        print(f"Recording failed; recovery recordings kept in: {output}")
         logger.error(
-            "Recording command failed with exit code %s",
-            result,
+            "Recording command failed with exit code %s; recovery recordings retained in %s",
+            result, output,
             extra={**diagnostic_log, "output_directory": str(output)},
         )
         return result
@@ -402,7 +403,8 @@ def run() -> int:
         output.rmdir()
     except OSError:
         # Unpaired or unrelated recovery files intentionally keep the session.
-        pass
+        logger.warning("Recovery files remain in %s", output, extra={
+            **diagnostic_log, "output_directory": str(output)})
     _open_output_folder(OUTPUT_ROOT, logger, diagnostic_log)
     logger.info(
         "Recording request finished",
