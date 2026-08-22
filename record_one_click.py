@@ -31,6 +31,9 @@ LOG_PATH = PROJECT_ROOT / "audio_capture.log"
 MIX_FRAMES = 262144
 MP3_BITRATE_BPS = DEFAULT_MP3_BITRATE_BPS
 MP3_ENCODER_FACTORY = Mp3Encoder
+SESSION_FILE = "session.json"
+RECOVERY_PENDING = "recovery_pending"
+RECOVERY_FAILED = "recovery_failed"
 _LOG_EXTRA_FIELDS = (
     "python_version",
     "python_implementation",
@@ -84,6 +87,49 @@ def _runtime_environment() -> dict[str, str]:
         "python_architecture": "64bit" if sys.maxsize > 2**32 else "32bit",
         "os_version": platform.platform(),
     }
+
+
+def _write_session_state(directory: Path, status: str, reason: str | None = None) -> None:
+    """Replace the small recovery marker without risking the previous marker."""
+    directory.mkdir(parents=True, exist_ok=True)
+    state = {"status": status}
+    if reason:
+        state["reason"] = reason
+    path = directory / SESSION_FILE
+    temporary = directory / (SESSION_FILE + ".tmp")
+    temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def _pending_sessions(root: Path = RECOVERY_ROOT) -> list[Path]:
+    """Inspect only session metadata; WAV files are deliberately not opened here."""
+    if not root.is_dir():
+        return []
+    pending = []
+    for directory in root.iterdir():
+        marker = directory / SESSION_FILE
+        if not directory.is_dir() or not marker.is_file():
+            continue
+        try:
+            state = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if state.get("status") == RECOVERY_PENDING:
+            pending.append(directory)
+    return sorted(pending, key=lambda path: path.name)
+
+
+def _choose_startup_action(pending: list[Path]) -> str:
+    if not pending:
+        return "record"
+    print(f"Interrupted recording(s) found: {len(pending)}")
+    print("\n[1] Start a new recording now")
+    print("[2] Repair all interrupted recordings")
+    try:
+        choice = input("Choose [1]: ").strip()
+    except EOFError:
+        choice = ""
+    return "repair" if choice == "2" else "record"
 
 
 def _pcm16_samples(data: bytes) -> array:
@@ -206,11 +252,97 @@ def _recording_chunks(directory: Path, stem: str) -> dict[int, Path]:
     return chunks
 
 
+def _readable_pair(render_path: Path, microphone_path: Path) -> None:
+    """Fully validate a pair so a truncated crash tail is never consumed."""
+    for path in (render_path, microphone_path):
+        with wave.open(str(path), "rb") as source:
+            frame_bytes = source.getnchannels() * source.getsampwidth()
+            expected = source.getnframes() * frame_bytes
+            actual = len(source.readframes(source.getnframes()))
+            if frame_bytes <= 0 or actual != expected:
+                raise ValueError(f"incomplete WAV chunk: {path.name}")
+
+
+def _unique_recovered_path(session: Path) -> Path:
+    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    base = OUTPUT_ROOT / f"recovered_{session.name}.mp3"
+    candidate = base
+    number = 2
+    while candidate.exists() or candidate.with_name(candidate.name + ".part").exists():
+        candidate = OUTPUT_ROOT / f"recovered_{session.name}_{number}.mp3"
+        number += 1
+    return candidate
+
+
+def _repair_session(session: Path, logger: logging.Logger) -> bool:
+    render = _recording_chunks(session, "render")
+    microphone = _recording_chunks(session, "microphone")
+    common = sorted(render.keys() & microphone.keys())
+    readable = []
+    problem = None
+    for number in common:
+        try:
+            _readable_pair(render[number], microphone[number])
+        except Exception as exc:
+            problem = str(exc)
+            continue
+        readable.append(number)
+
+    unpaired = sorted(render.keys() ^ microphone.keys())
+    if problem is None and unpaired:
+        problem = f"unpaired chunks remain: {unpaired}"
+    try:
+        if not readable:
+            raise ValueError(problem or "no safely readable matched chunks were found")
+        _mix_available_chunks(
+            session, logger, _unique_recovered_path(session), chunk_numbers=readable
+        )
+    except Exception as exc:
+        reason = problem or str(exc)
+        _write_session_state(session, RECOVERY_FAILED, reason)
+        logger.exception("Interrupted recording repair failed: %s", session)
+        return False
+
+    if problem:
+        _write_session_state(session, RECOVERY_FAILED, problem)
+        return False
+    (session / SESSION_FILE).unlink(missing_ok=True)
+    try:
+        session.rmdir()
+    except OSError:
+        # Unexpected files are recovery data and must not be silently removed.
+        _write_session_state(session, RECOVERY_FAILED, "unconsumed recovery files remain")
+        return False
+    return True
+
+
+def _repair_all(sessions: list[Path], logger: logging.Logger) -> int:
+    recovered = 0
+    failed = 0
+    for session in sessions:
+        try:
+            success = _repair_session(session, logger)
+        except BaseException as exc:
+            _write_session_state(session, RECOVERY_FAILED, str(exc))
+            success = False
+        recovered += int(success)
+        failed += int(not success)
+    print("\nRepair completed:")
+    print(f"{recovered} recovered")
+    print(f"{failed} could not be fully repaired")
+    if failed:
+        print("\nFailed recovery data was preserved.")
+    return 0 if failed == 0 else 1
+
+
 def _mix_available_chunks(output: Path, logger: logging.Logger,
-                          final_path: Path | None = None) -> Path:
+                          final_path: Path | None = None,
+                          chunk_numbers: list[int] | None = None) -> Path:
     render_chunks = _recording_chunks(output, "render")
     microphone_chunks = _recording_chunks(output, "microphone")
     common_chunks = sorted(render_chunks.keys() & microphone_chunks.keys())
+    if chunk_numbers is not None:
+        common_chunks = [number for number in chunk_numbers if number in common_chunks]
     missing_render = sorted(microphone_chunks.keys() - render_chunks.keys())
     missing_microphone = sorted(render_chunks.keys() - microphone_chunks.keys())
     if missing_render or missing_microphone:
@@ -325,6 +457,10 @@ def run() -> int:
     logger.info("Recording request started", extra=environment_log)
     logger.info("Runtime environment", extra=environment_log)
 
+    pending = _pending_sessions()
+    if _choose_startup_action(pending) == "repair":
+        return _repair_all(pending, logger)
+
     try:
         from audio_capture.native_backend import NativeWasapiBackend
 
@@ -363,6 +499,7 @@ def run() -> int:
         "Recording output directory selected",
         extra={**diagnostic_log, "output_directory": str(output)},
     )
+    _write_session_state(output, RECOVERY_PENDING)
     sys.argv = [
         str(Path(__file__)),
         "record",
@@ -399,6 +536,7 @@ def run() -> int:
         logger.warning("Recovery recordings retained", extra={
             **diagnostic_log, "output_directory": str(output)})
         return postprocess_result
+    (output / SESSION_FILE).unlink(missing_ok=True)
     try:
         output.rmdir()
     except OSError:
