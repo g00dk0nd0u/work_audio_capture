@@ -114,13 +114,14 @@ class _SessionLock:
 
     def acquire(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        lock_file = self.path.open("a+b")
-        lock_file.seek(0)
-        if lock_file.read(1) == b"":
-            lock_file.write(b"\0")
-            lock_file.flush()
-        lock_file.seek(0)
+        lock_file = None
         try:
+            lock_file = self.path.open("a+b")
+            lock_file.seek(0)
+            if lock_file.read(1) == b"":
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
             if os.name == "nt":
                 import msvcrt
                 msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
@@ -128,7 +129,11 @@ class _SessionLock:
                 import fcntl
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            lock_file.close()
+            if lock_file is not None:
+                try:
+                    lock_file.close()
+                except Exception:
+                    pass
             return False
         self.file = lock_file
         return True
@@ -136,15 +141,22 @@ class _SessionLock:
     def release(self) -> None:
         if self.file is None:
             return
-        if os.name == "nt":
-            import msvcrt
-            self.file.seek(0)
-            msvcrt.locking(self.file.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(self.file.fileno(), fcntl.LOCK_UN)
-        self.file.close()
+        lock_file = self.file
         self.file = None
+        try:
+            if os.name == "nt":
+                import msvcrt
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            lock_file.close()
+        except Exception:
+            pass
 
 
 class _ActiveSessionError(RuntimeError):
@@ -593,11 +605,16 @@ def run() -> int:
         "Recording output directory selected",
         extra={**diagnostic_log, "output_directory": str(output)},
     )
-    _write_session_state(output, RECOVERY_PENDING)
+    output.mkdir(parents=True, exist_ok=True)
     session_lock = _SessionLock(output)
     if not session_lock.acquire():
         print(f"Could not lock recording session: {output}", file=sys.stderr)
         return 1
+    try:
+        _write_session_state(output, RECOVERY_PENDING)
+    except BaseException:
+        session_lock.release()
+        raise
     sys.argv = [
         str(Path(__file__)),
         "record",
