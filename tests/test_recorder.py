@@ -317,3 +317,119 @@ def test_shared_chunk_clock_catches_up_multiple_intervals_at_once():
     assert recorder._session_chunk_number() == 4
     assert recorder._chunk_deadline == 2400.0
     assert recorder._session_chunk_number() == 4
+
+
+@pytest.mark.parametrize(
+    ("failing_kind", "failure"),
+    [
+        ("render-loopback", PermissionError(13, "access lost")),
+        ("microphone", OSError(5, "WAV device error")),
+    ],
+)
+def test_wav_write_failure_stops_peer_and_preserves_chunks(
+        tmp_path, monkeypatch, failing_kind, failure):
+    """A current-chunk failure cannot remove an already finalized chunk."""
+    monkeypatch.setattr("audio_capture.recorder.MAX_PCM_DATA_BYTES", 16)
+    real_open = wave.open
+
+    class FailingWriter:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+
+        def __getattr__(self, name):
+            return getattr(self.wrapped, name)
+
+        def writeframesraw(self, data):
+            raise failure
+
+    def injected_open(filename, mode):
+        wrapped = real_open(filename, mode)
+        path = str(filename)
+        if failing_kind.split("-")[0] in path and "_0002.wav" in path:
+            return FailingWriter(wrapped)
+        return wrapped
+
+    monkeypatch.setattr("audio_capture.recorder.wave.open", injected_open)
+    backend = FakeBackend()
+    recorder = ConcurrentRecorder(backend, frames_per_buffer=8, chunk_duration_seconds=0)
+    render = Endpoint(1, "render", 1, 8000, "render-loopback")
+    microphone = Endpoint(2, "microphone", 1, 8000, "microphone")
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match=r"WAV write failed.*_0002\.wav") as raised:
+        recorder.record(render, microphone, tmp_path / "render_0001.wav",
+                        tmp_path / "microphone_0001.wav")
+
+    assert time.monotonic() - started < 2
+    assert isinstance(raised.value.__cause__.__cause__, type(failure))
+    assert all(stream.closed for stream in backend.streams)
+    for stem in ("render", "microphone"):
+        completed = tmp_path / f"{stem}_0001.wav"
+        assert completed.exists()
+        with real_open(str(completed), "rb") as recording:
+            assert recording.getnframes() > 0
+    assert (tmp_path / f"{failing_kind.split('-')[0]}_0002.wav").exists()
+
+
+def test_opening_next_chunk_failure_keeps_completed_chunk(tmp_path, monkeypatch):
+    monkeypatch.setattr("audio_capture.recorder.MAX_PCM_DATA_BYTES", 16)
+    real_open = wave.open
+
+    def injected_open(filename, mode):
+        if str(filename).endswith("render_0002.wav"):
+            raise PermissionError(13, "cannot create chunk")
+        return real_open(filename, mode)
+
+    monkeypatch.setattr("audio_capture.recorder.wave.open", injected_open)
+    backend = FakeBackend()
+    recorder = ConcurrentRecorder(backend, frames_per_buffer=8, chunk_duration_seconds=0)
+    render = Endpoint(1, "render", 1, 8000, "render-loopback")
+    microphone = Endpoint(2, "microphone", 1, 8000, "microphone")
+
+    with pytest.raises(RuntimeError, match=r"WAV open failed.*render_0002\.wav") as raised:
+        recorder.record(render, microphone, tmp_path / "render_0001.wav",
+                        tmp_path / "microphone_0001.wav")
+
+    assert isinstance(raised.value.__cause__.__cause__, PermissionError)
+    with real_open(str(tmp_path / "render_0001.wav"), "rb") as completed:
+        assert completed.getnframes() > 0
+    assert all(stream.closed for stream in backend.streams)
+
+
+def test_wav_close_failure_preserves_current_and_previous_files(tmp_path, monkeypatch):
+    previous = tmp_path / "render_0001.wav"
+    with wave.open(str(previous), "wb") as output:
+        output.setparams((1, 2, 8000, 0, "NONE", "not compressed"))
+        output.writeframes(b"\x01\x00")
+    previous_bytes = previous.read_bytes()
+    current = tmp_path / "render_0002.wav"
+    real_open = wave.open
+
+    class CloseFailure:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+
+        def __getattr__(self, name):
+            return getattr(self.wrapped, name)
+
+        def close(self):
+            self.wrapped.close()
+            raise OSError(5, "header finalization failed")
+
+    def injected_open(filename, mode):
+        wrapped = real_open(filename, mode)
+        return CloseFailure(wrapped) if str(filename) == str(current) else wrapped
+
+    monkeypatch.setattr("audio_capture.recorder.wave.open", injected_open)
+    backend = FakeBackend()
+    recorder = ConcurrentRecorder(backend, frames_per_buffer=8)
+    recorder.stop_event.set()
+    recorder._capture(Endpoint(1, "render", 1, 8000, "render-loopback"), current)
+
+    assert "WAV close failed" in str(recorder.errors[0])
+    assert isinstance(recorder.errors[0].__cause__, OSError)
+    assert current.exists()
+    assert previous.read_bytes() == previous_bytes
+    with real_open(str(previous), "rb") as completed:
+        assert completed.getnframes() == 1
+    assert backend.streams[0].closed

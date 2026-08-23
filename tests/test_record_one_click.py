@@ -232,6 +232,31 @@ def test_finalize_failure_keeps_source_wavs_and_removes_partial_output(tmp_path)
     assert not (tmp_path / "recording_0001.part.mp3").exists()
 
 
+def test_publish_failure_keeps_wavs_and_existing_final(tmp_path, monkeypatch):
+    render = tmp_path / "render_0001.wav"
+    microphone = tmp_path / "microphone_0001.wav"
+    final = tmp_path / "recording_0001.mp3"
+    _write(render, 1, 48000, [1, 2])
+    _write(microphone, 1, 48000, [3, 4])
+    final.write_bytes(b"existing recording")
+    real_replace = Path.replace
+
+    def fail_publish(source, destination):
+        if str(source).endswith(".mp3.part"):
+            raise PermissionError(13, "output directory became read-only")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(Path, "replace", fail_publish)
+
+    with pytest.raises(PermissionError, match="read-only"):
+        record_one_click._mix_available_chunks(
+            tmp_path, logging.getLogger("test-publish"), final)
+
+    assert render.exists() and microphone.exists()
+    assert final.read_bytes() == b"existing recording"
+    assert not (tmp_path / "recording_0001.mp3.part").exists()
+
+
 def test_unsupported_sample_rate_keeps_source_wavs(tmp_path):
     render = tmp_path / "render_0001.wav"
     microphone = tmp_path / "microphone_0001.wav"

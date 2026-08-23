@@ -489,8 +489,13 @@ def _mix_available_chunks(output: Path, logger: logging.Logger,
         temp_path.replace(final_path)
     except BaseException:
         print()
-        if temp_path.exists():
-            temp_path.unlink()
+        # Cleanup is best-effort: a second permissions error must not hide the
+        # encoder/publish error that explains why the transaction failed.
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
         raise
 
     # Transaction boundary: sources survive until the complete MP3 is finalized

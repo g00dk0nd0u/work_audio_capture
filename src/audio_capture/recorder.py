@@ -75,6 +75,17 @@ def _endpoint_error(endpoint: Endpoint, stage: str, error: BaseException) -> Run
     return wrapped
 
 
+def _wav_error(endpoint: Endpoint, stage: str, path: Path,
+               error: BaseException) -> RuntimeError:
+    wrapped = RuntimeError(
+        f"{endpoint.kind} WAV {stage} failed for {path}: {error}"
+    )
+    wrapped.__cause__ = error
+    # Avoid wrapping this useful, path-specific diagnostic again in _capture.
+    setattr(wrapped, "_capture_context", True)
+    return wrapped
+
+
 class ConcurrentRecorder:
     def __init__(self, backend: Backend, frames_per_buffer: int = 1024,
                  chunk_duration_seconds: int = 600, mono_output: bool = False,
@@ -89,6 +100,7 @@ class ConcurrentRecorder:
         self.clock = clock
         self.stop_event = threading.Event()
         self.errors: list[BaseException] = []
+        self._errors_lock = threading.Lock()
         self._chunk_lock = threading.Lock()
         self._chunk_number = 1
         self._chunk_deadline = 0.0
@@ -132,11 +144,15 @@ class ConcurrentRecorder:
                     f"capture shutdown timed out after {self.shutdown_timeout_seconds:g}s: "
                     + ", ".join(stuck)
                 )
-                self.errors.append(error)
+                self._add_error(error)
                 LOGGER.error("%s; recovery WAVs were kept", error)
         if self.errors:
             details = " | ".join(str(error) for error in self.errors)
             raise RuntimeError(f"audio capture failed: {details}") from self.errors[0]
+
+    def _add_error(self, error: BaseException) -> None:
+        with self._errors_lock:
+            self.errors.append(error)
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -158,6 +174,7 @@ class ConcurrentRecorder:
     def _capture(self, endpoint: Endpoint, path: Path) -> None:
         stream = None
         capture_error: BaseException | None = None
+        secondary_errors: list[BaseException] = []
         try:
             stream = self.backend.open_input(endpoint, self.frames)
             sample_width = self.backend.sample_width()
@@ -178,7 +195,12 @@ class ConcurrentRecorder:
                     if path.stem.rsplit('_', 1)[-1].isdigit() else
                     f"{path.stem}_{chunk_number:04d}{path.suffix}"
                 )
-                with wave.open(str(chunk_path), "wb") as output:
+                try:
+                    output = wave.open(str(chunk_path), "wb")
+                except BaseException as exc:
+                    raise _wav_error(endpoint, "open", chunk_path, exc) from exc
+                chunk_error: BaseException | None = None
+                try:
                     output.setnchannels(output_channels)
                     output.setsampwidth(sample_width)
                     output.setframerate(endpoint.sample_rate)
@@ -200,7 +222,10 @@ class ConcurrentRecorder:
                         )
                         if len(output_data) != input_frames * output_block_align:
                             raise ValueError("audio conversion changed the PCM frame count")
-                        output.writeframesraw(output_data)
+                        try:
+                            output.writeframesraw(output_data)
+                        except BaseException as exc:
+                            raise _wav_error(endpoint, "write", chunk_path, exc) from exc
                         frames_in_chunk += input_frames
                         if self.stop_event.is_set():
                             return
@@ -210,9 +235,26 @@ class ConcurrentRecorder:
                         if time_limit or size_limit:
                             chunk_number = max(chunk_number + 1, session_chunk)
                             break
+                except BaseException as exc:
+                    chunk_error = exc
+                    raise
+                finally:
+                    try:
+                        output.close()
+                    except BaseException as exc:
+                        close_error = _wav_error(endpoint, "close", chunk_path, exc)
+                        if chunk_error is None:
+                            raise close_error from exc
+                        # Keep the primary open/write/capture error as record()'s cause,
+                        # while retaining a secondary finalization diagnostic.
+                        secondary_errors.append(close_error)
         except BaseException as exc:
             capture_error = exc
-            self.errors.append(_endpoint_error(endpoint, "capture", exc))
+            error = (exc if getattr(exc, "_capture_context", False)
+                     else _endpoint_error(endpoint, "capture", exc))
+            self._add_error(error)
+            for secondary_error in secondary_errors:
+                self._add_error(secondary_error)
             self.stop_event.set()
         finally:
             if stream is not None:
@@ -227,5 +269,5 @@ class ConcurrentRecorder:
                     if cleanup_error is None:
                         cleanup_error = exc
                 if capture_error is None and cleanup_error is not None:
-                    self.errors.append(_endpoint_error(endpoint, "cleanup", cleanup_error))
+                    self._add_error(_endpoint_error(endpoint, "cleanup", cleanup_error))
                     self.stop_event.set()
