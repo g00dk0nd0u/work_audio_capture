@@ -232,6 +232,32 @@ def test_finalize_failure_keeps_source_wavs_and_removes_partial_output(tmp_path)
     assert not (tmp_path / "recording_0001.part.mp3").exists()
 
 
+def test_failed_session_repair_preserves_all_chunks_and_usable_metadata(
+        tmp_path, monkeypatch):
+    session = _pending_session(tmp_path, "encoder-failure")
+    chunks = []
+    for number in (1, 2):
+        render = session / f"render_{number:04d}.wav"
+        microphone = session / f"microphone_{number:04d}.wav"
+        _write(render, 1, 48000, [number])
+        _write(microphone, 1, 48000, [number])
+        chunks.extend((render, microphone))
+    unrelated = session / "render_0099.wav"
+    _write(unrelated, 1, 48000, [99])
+    chunks.append(unrelated)
+    monkeypatch.setattr(record_one_click, "OUTPUT_ROOT", tmp_path / "recordings")
+    _FakeEncoder.fail = True
+
+    assert record_one_click._repair_session(
+        session, logging.getLogger("failed-repair")) == record_one_click.REPAIR_FAILED
+
+    assert all(path.exists() for path in chunks)
+    state = json.loads((session / record_one_click.SESSION_FILE).read_text())
+    assert state["status"] == record_one_click.RECOVERY_FAILED
+    assert state["reason"]
+    assert not list((tmp_path / "recordings").glob("*.mp3"))
+
+
 def test_publish_failure_keeps_wavs_and_existing_final(tmp_path, monkeypatch):
     render = tmp_path / "render_0001.wav"
     microphone = tmp_path / "microphone_0001.wav"
@@ -276,13 +302,29 @@ def _pending_session(root: Path, name: str) -> Path:
     return session
 
 
-def test_pending_detection_ignores_failed_and_reads_only_metadata(tmp_path):
+def test_pending_detection_ignores_failed_and_reads_only_metadata(tmp_path, monkeypatch):
     pending = _pending_session(tmp_path, "pending")
     failed = tmp_path / "failed"
     record_one_click._write_session_state(failed, record_one_click.RECOVERY_FAILED, "bad tail")
-    (pending / "render_0001.wav").write_bytes(b"not inspected during startup")
+    pending_wav = pending / "render_0001.wav"
+    pending_wav.write_bytes(b"not inspected during startup")
+    failed_wav = failed / "render_0001.wav"
+    failed_wav.write_bytes(b"failed data must remain untouched")
+    failed_marker = (failed / record_one_click.SESSION_FILE).read_bytes()
+    monkeypatch.setattr(
+        record_one_click,
+        "_readable_pair",
+        lambda *_args: pytest.fail("startup discovery must not validate WAV data"),
+    )
+    monkeypatch.setattr(
+        record_one_click.wave,
+        "open",
+        lambda *_args, **_kwargs: pytest.fail("startup discovery must not open WAV data"),
+    )
 
     assert record_one_click._pending_sessions(tmp_path) == [pending]
+    assert failed_wav.read_bytes() == b"failed data must remain untouched"
+    assert (failed / record_one_click.SESSION_FILE).read_bytes() == failed_marker
 
 
 def test_startup_default_does_not_repair(monkeypatch, tmp_path):
@@ -301,10 +343,17 @@ def test_no_pending_session_starts_without_prompt(monkeypatch):
 def test_repair_batch_continues_after_failure(monkeypatch, tmp_path):
     sessions = [_pending_session(tmp_path, name) for name in ("one", "two", "three")]
     attempted = []
+    repair_in_progress = False
     def repair(session, _logger):
+        nonlocal repair_in_progress
+        assert not repair_in_progress
+        repair_in_progress = True
         attempted.append(session.name)
-        return (record_one_click.REPAIR_FAILED if session.name == "two"
-                else record_one_click.REPAIR_FULL)
+        try:
+            return (record_one_click.REPAIR_FAILED if session.name == "two"
+                    else record_one_click.REPAIR_FULL)
+        finally:
+            repair_in_progress = False
     monkeypatch.setattr(record_one_click, "_repair_session", repair)
 
     assert record_one_click._repair_all(sessions, logging.getLogger("batch")) == 1
@@ -351,6 +400,37 @@ def test_active_session_is_not_returned_by_recovery_detection(tmp_path):
     finally:
         lock.release()
     assert record_one_click._pending_sessions(tmp_path) == [session]
+
+
+def test_stale_lock_file_does_not_block_pending_session_discovery(tmp_path):
+    session = _pending_session(tmp_path, "crashed")
+    stale_lock = session / record_one_click.SESSION_LOCK_FILE
+    stale_lock.write_bytes(b"\0")
+
+    assert record_one_click._pending_sessions(tmp_path) == [session]
+    assert stale_lock.exists()
+
+
+def test_session_becoming_active_between_discovery_and_repair_is_skipped(
+        tmp_path, monkeypatch):
+    session = _pending_session(tmp_path, "racing")
+    assert record_one_click._pending_sessions(tmp_path) == [session]
+
+    active_recording_lock = record_one_click._SessionLock(session)
+    assert active_recording_lock.acquire()
+    monkeypatch.setattr(
+        record_one_click,
+        "_repair_locked_session",
+        lambda *_args: pytest.fail("an active session must never be repaired"),
+    )
+    try:
+        assert record_one_click._repair_all(
+            [session], logging.getLogger("race")) == 0
+    finally:
+        active_recording_lock.release()
+
+    state = json.loads((session / record_one_click.SESSION_FILE).read_text())
+    assert state["status"] == record_one_click.RECOVERY_PENDING
 
 
 def test_permission_error_opening_locked_session_is_treated_as_active(
