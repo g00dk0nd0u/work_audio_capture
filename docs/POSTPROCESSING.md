@@ -1,13 +1,26 @@
-# MP3 post-processing status
+# MP3 post-processing transaction
 
-After recording stops, one-click mode converts the saved render/microphone WAV files into the final MP3.
+One-click recording uses this transaction:
 
-The terminal explicitly shows this state so it is not confused with a crash or a still-running recording:
+```text
+simultaneous WASAPI capture
+  -> recovery WAV chunks (about 10 minutes each)
+  -> Ctrl+C / capture stop
+  -> validate and sequentially mix/downmix matched chunks
+  -> one Media Foundation MP3 written as <final-name>.mp3.part
+  -> finalize encoder
+  -> atomic replace to <final-name>.mp3
+  -> delete only the source WAVs incorporated into the published MP3
+```
 
-- `Recording stopped. Creating MP3 now...`
-- live `Creating MP3 chunk X/Y: N%` progress
-- a final saved message on success
+Recovery WAVs live under `%LOCALAPPDATA%\WorkAudioCapture\<session>` and the published normal MP3 lives in the repository/distribution `recordings` directory. Multiple WAV pairs are fed, in chunk-number order, through one bounded-memory encoder; they do not become multiple numbered MP3 outputs.
 
-Pressing Ctrl+C a second time during this stage cancels MP3 creation only. The partial `.part.mp3` is removed and the source WAV files are kept for recovery.
+The terminal reports `Creating final MP3: N%`. Publication is the transaction boundary: the final path is not exposed until the complete MP3 is finalized, non-empty, and renamed from `.part`.
 
-The JSONL log records post-processing start, periodic progress, cancellation, and completion. This allows a collected log to distinguish an active/partially completed MP3 conversion from a capture failure.
+## Cancellation and failure
+
+- A second `Ctrl+C` during post-processing cancels it. The `.part` output is removed and source WAVs remain.
+- Validation, mixing, encoder, finalize, or publish failure also removes `.part` and retains the source WAVs.
+- Source deletion begins only after atomic publish. Only WAV pairs actually incorporated into that MP3 are cleanup candidates; unpaired, corrupt, or otherwise unconsumed files remain.
+- Interrupted-session repair validates complete matched pairs before encoding. A corrupt crash-tail pair can therefore be skipped while earlier valid pairs are recovered.
+- A partial or failed repair preserves remaining data and records `recovery_failed`, preventing repeated startup prompts. See [`RECOVERY.md`](RECOVERY.md).
