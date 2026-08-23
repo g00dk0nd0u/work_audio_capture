@@ -71,9 +71,11 @@ _LOG_EXTRA_FIELDS = (
     "terminal_status",
     "render_audio_duration_seconds",
     "microphone_audio_duration_seconds",
+    "duration_delta_seconds",
     "duration_difference_seconds",
     "duration_drift_milliseconds",
     "drift_rate_milliseconds_per_hour",
+    "microphone_start_offset_milliseconds",
 )
 
 

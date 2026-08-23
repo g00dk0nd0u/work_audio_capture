@@ -45,9 +45,12 @@ class StreamStatistics:
         return max(0.0, self.capture_end_monotonic - self.capture_start_monotonic)
 
     def successful_read(self, frames: int, now: float | None) -> None:
-        if now is not None and self.last_successful_read_monotonic is not None:
+        previous = self.last_successful_read_monotonic
+        if previous is None:
+            previous = self.capture_start_monotonic
+        if now is not None and previous is not None:
             self.longest_read_gap_seconds = max(
-                self.longest_read_gap_seconds, now - self.last_successful_read_monotonic)
+                self.longest_read_gap_seconds, now - previous)
         if now is not None:
             self.last_successful_read_monotonic = now
         self.total_input_frames += frames
@@ -76,17 +79,32 @@ def session_timing_fields(render: StreamStatistics,
                           microphone: StreamStatistics) -> dict[str, float | None]:
     render_duration = render.audio_duration_seconds
     microphone_duration = microphone.audio_duration_seconds
-    difference = abs(render_duration - microphone_duration)
-    reference_duration = max(render_duration, microphone_duration)
+    # Positive means the microphone accumulated more audio than render.
+    delta = microphone_duration - render_duration
+    difference = abs(delta)
     drift_rate = None
-    if reference_duration >= MIN_DRIFT_RATE_DURATION_SECONDS:
-        drift_rate = difference * 1000.0 * 3600.0 / reference_duration
+    if (render.terminal_status == "normal_stop" and
+            microphone.terminal_status == "normal_stop" and
+            render_duration >= MIN_DRIFT_RATE_DURATION_SECONDS and
+            microphone_duration >= MIN_DRIFT_RATE_DURATION_SECONDS):
+        # Normalize signed drift against the streams' common mean duration.
+        reference_duration = (render_duration + microphone_duration) / 2.0
+        drift_rate = delta * 1000.0 * 3600.0 / reference_duration
+    start_offset = None
+    if (render.capture_start_monotonic is not None and
+            microphone.capture_start_monotonic is not None):
+        # Positive means microphone capture started later than render.
+        start_offset = (
+            microphone.capture_start_monotonic - render.capture_start_monotonic
+        ) * 1000.0
     return {
         "render_audio_duration_seconds": render_duration,
         "microphone_audio_duration_seconds": microphone_duration,
+        "duration_delta_seconds": delta,
         "duration_difference_seconds": difference,
-        "duration_drift_milliseconds": difference * 1000.0,
+        "duration_drift_milliseconds": delta * 1000.0,
         "drift_rate_milliseconds_per_hour": drift_rate,
+        "microphone_start_offset_milliseconds": start_offset,
     }
 
 
@@ -265,7 +283,6 @@ class ConcurrentRecorder:
     def _capture(self, endpoint: Endpoint, path: Path) -> None:
         statistics = StreamStatistics(
             endpoint.kind, endpoint.name, endpoint.sample_rate, endpoint.channels,
-            capture_start_monotonic=self._diagnostics_now(),
         )
         self.stream_statistics[endpoint.kind] = statistics
         stream = None
@@ -285,6 +302,7 @@ class ConcurrentRecorder:
             max_chunk_frames = MAX_PCM_DATA_BYTES // output_block_align
             frames_in_chunk = 0
             chunk_number = 1
+            capture_start_attempted = False
             while True:
                 chunk_path = path if chunk_number == 1 else path.with_name(
                     f"{path.stem.rsplit('_', 1)[0]}_{chunk_number:04d}{path.suffix}"
@@ -307,12 +325,14 @@ class ConcurrentRecorder:
                     while True:
                         remaining_frames = max_chunk_frames - frames_in_chunk
                         read_frames = min(self.frames, remaining_frames)
+                        if not capture_start_attempted:
+                            capture_start_attempted = True
+                            statistics.capture_start_monotonic = self._diagnostics_now()
                         data = stream.read(read_frames, exception_on_overflow=False)
                         read_at = self._diagnostics_now()
                         if len(data) % input_block_align:
                             raise ValueError("audio stream returned a partial frame")
                         input_frames = len(data) // input_block_align
-                        statistics.successful_read(input_frames, read_at)
                         if input_frames > remaining_frames:
                             raise ValueError("audio stream returned more than the WAV chunk limit")
                         output_data = (
@@ -321,6 +341,7 @@ class ConcurrentRecorder:
                         )
                         if len(output_data) != input_frames * output_block_align:
                             raise ValueError("audio conversion changed the PCM frame count")
+                        statistics.successful_read(input_frames, read_at)
                         try:
                             output.writeframesraw(output_data)
                             statistics.total_pcm_bytes_written += len(output_data)
