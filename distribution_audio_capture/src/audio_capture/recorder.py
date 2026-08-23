@@ -45,6 +45,8 @@ class StreamStatistics:
         return max(0.0, self.capture_end_monotonic - self.capture_start_monotonic)
 
     def successful_read(self, frames: int, now: float | None) -> None:
+        if frames <= 0:
+            return
         previous = self.last_successful_read_monotonic
         if previous is None:
             previous = self.capture_start_monotonic

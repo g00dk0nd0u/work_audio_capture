@@ -118,6 +118,62 @@ def test_stream_statistics_derive_counts_durations_and_longest_gap():
     assert statistics.longest_read_gap_seconds == 1.5
 
 
+@pytest.mark.parametrize("frames", [0, -1])
+def test_stream_statistics_ignore_non_positive_frame_reads(frames):
+    statistics = StreamStatistics(
+        "render-loopback", "speakers", 8000, 2,
+        total_input_frames=8,
+        capture_start_monotonic=10.0,
+        last_successful_read_monotonic=11.0,
+        longest_read_gap_seconds=1.0,
+    )
+
+    statistics.successful_read(frames, 20.0)
+
+    assert statistics.total_input_frames == 8
+    assert statistics.last_successful_read_monotonic == 11.0
+    assert statistics.longest_read_gap_seconds == 1.0
+
+
+def test_zero_frame_reads_before_first_audio_preserve_full_initial_gap():
+    statistics = StreamStatistics(
+        "render-loopback", "speakers", 8000, 2,
+        capture_start_monotonic=10.0,
+    )
+
+    statistics.successful_read(0, 10.2)
+    statistics.successful_read(0, 10.4)
+
+    assert statistics.total_input_frames == 0
+    assert statistics.last_successful_read_monotonic is None
+
+    statistics.successful_read(8, 12.0)
+
+    assert statistics.total_input_frames == 8
+    assert statistics.last_successful_read_monotonic == 12.0
+    assert statistics.longest_read_gap_seconds == 2.0
+
+
+def test_zero_frame_reads_between_audio_preserve_full_read_gap():
+    statistics = StreamStatistics(
+        "microphone", "mic", 8000, 1,
+        capture_start_monotonic=10.0,
+    )
+    statistics.successful_read(8, 10.1)
+
+    statistics.successful_read(0, 10.3)
+    statistics.successful_read(0, 10.5)
+
+    assert statistics.total_input_frames == 8
+    assert statistics.last_successful_read_monotonic == 10.1
+
+    statistics.successful_read(8, 12.1)
+
+    assert statistics.total_input_frames == 16
+    assert statistics.last_successful_read_monotonic == 12.1
+    assert statistics.longest_read_gap_seconds == 2.0
+
+
 @pytest.mark.parametrize(
     ("render_frames", "microphone_frames", "expected_delta"),
     [(359_900, 360_100, 2.0), (360_100, 359_900, -2.0)],
