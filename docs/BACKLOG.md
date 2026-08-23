@@ -16,6 +16,8 @@ This document separates the implemented baseline from work that still requires e
 - Transactional `.part` output, atomic publication, and cleanup only after successful finalize/publish; cancellation and failures preserve recovery inputs
 - Normal MP3 output in the repository/distribution `recordings` directory
 - JSONL diagnostics and repository/distribution synchronization tests
+- Per-stream capture timing metadata (frames, PCM bytes, active time, read gaps, chunks,
+  terminal status) and session-level render/microphone duration drift diagnostics
 - Windows CI coverage for Python 3.10, 3.12, 3.13, and 3.14
 
 The normal native path requires no third-party runtime package. `PyAudioWPatch` remains an explicitly selected optional backend.
@@ -39,7 +41,9 @@ Do not treat automated or single-development-machine results as hardware accepta
 
 ## P1 — timing and mix policy
 
-- Measure independent render/microphone clock drift, start offsets, and gaps
+- Measure independent render/microphone clock drift, start offsets, and gaps on
+  representative real machines and in long sessions (instrumentation is implemented;
+  representative timing validation remains outstanding)
 - Decide a resampling policy for mismatched sample rates and accumulated drift
 - Evaluate channel-mask/microphone-array-aware downmix if hardware results justify it
 - Define gain, limiting, and loudness policy if clipping or intelligibility tests justify it
