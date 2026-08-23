@@ -1,94 +1,51 @@
 # Project status and backlog
 
-This file tracks the current architecture and the remaining reliability work. Keep it aligned with the open GitHub issues and the actual `main` implementation.
+This document separates the implemented baseline from work that still requires engineering or real Windows hardware validation.
 
 ## Implemented baseline
 
-The current default path is dependency-free CPython plus Windows system APIs:
+- Dependency-free native MMDevice / WASAPI capture through standard-library `ctypes`, with simultaneous playback loopback and microphone streams
+- Default endpoints for one-click use and explicit endpoint IDs for the advanced CLI
+- PCM / IEEE-float native formats converted to PCM16; mono/stereo/multichannel input supported
+- Internal recovery WAVs under `%LOCALAPPDATA%\WorkAudioCapture\<session>`, rotated approximately every 10 minutes
+- A 12-hour recording safety limit and bounded recorder shutdown
+- OS-backed `session.lock` protection so active recording and repair cannot operate on the same session concurrently
+- `session.json` interrupted-session tracking, repair-all startup choice, `recovery_pending` discovery, and `recovery_failed` prompt suppression
+- Validation and partial repair of readable matched chunks even when a crash-tail or unpaired chunk cannot be used
+- Sequential mix/downmix of all usable recovery chunks into one mono 80 kbps Media Foundation MP3 per session
+- Transactional `.part` output, atomic publication, and cleanup only after successful finalize/publish; cancellation and failures preserve recovery inputs
+- Normal MP3 output in the repository/distribution `recordings` directory
+- JSONL diagnostics and repository/distribution synchronization tests
+- Windows CI coverage for Python 3.10, 3.12, 3.13, and 3.14
 
-- Native MMDevice / WASAPI access through standard-library `ctypes`
-- WASAPI loopback capture for PC playback plus separate microphone capture
-- Explicit endpoint IDs for advanced CLI recording and Windows-default endpoint selection for one-click recording
-- PCM / IEEE-float Windows mix formats converted to PCM16 by the native backend
-- One-click temporary WAVs stored as mono PCM16
-- Mono, stereo, and multichannel PCM16 endpoints downmixed to mono without changing frame count
-- Bounded WAV chunk rotation by duration and PCM size
-- Render and microphone chunks combined to mono MP3 at 80 kbps through Windows Media Foundation
-- Explicit post-recording transition to MP3 generation with terminal progress (`Creating MP3 chunk X/Y: N%`)
-- Second Ctrl+C during MP3 post-processing cancels conversion without a traceback, removes partial `.part.mp3`, and keeps source WAVs
-- Source WAVs retained whenever MP3 encoding/finalization fails or post-processing is cancelled
-- JSONL diagnostics containing OS, Python, endpoint names, channel counts, sample rates, output directory, exception traces, and post-processing start/progress/cancel/completion events
-- Repository/distribution runtime synchronization covered by tests
+The normal native path requires no third-party runtime package. `PyAudioWPatch` remains an explicitly selected optional backend.
 
-`PyAudioWPatch` remains an optional explicitly selected backend. It is not an automatic fallback and is not required for the default native path.
+## P0 — representative real-PC validation
 
-See `POSTPROCESSING.md` for the current MP3 post-processing state model.
+Do not treat automated or single-development-machine results as hardware acceptance. Validate on representative managed Windows laptops and actual device combinations:
 
-## Known current limitations
+- Default playback + microphone, including Teams/Zoom and multichannel microphone arrays
+- USB, Bluetooth, dock, headset, and built-in endpoints used in practice
+- Five-minute, 60-minute, and long-session recordings, measuring integrity, gaps, CPU, memory, disk use, shutdown, and MP3 duration
+- Crash/interruption recovery, corrupt-tail partial repair, cancellation, retained data, and actionable `audio_capture.log`
+- Operation under corporate policy without admin rights or runtime package installation
 
-- One-click MP3 creation requires render and microphone WAV sample rates to match.
-- MP3 output currently supports 32 kHz, 44.1 kHz, and 48 kHz without resampling.
-- There is no clock-drift correction or resampling between the independent render and microphone streams.
-- Multichannel downmixing currently uses an arithmetic average; it is not channel-mask-aware and may not be ideal for every microphone array or surround layout.
-- Render + microphone mixing clamps PCM16 overflow but has no adaptive gain, limiter, or loudness normalization.
-- MP3 encoding remains a post-capture step rather than live encoding, so post-processing time increases with recording length even though progress is visible.
-- Endpoint removal/default changes, suspend/resume, and device invalidation do not yet have automatic teardown/re-enumeration/recovery.
-- Tray UI is intentionally deferred until capture compatibility and long-session reliability are proven on representative managed PCs.
+## P1 — device and lifecycle recovery
 
-## #2 — P0: managed-PC native WASAPI acceptance
+- Define teardown, bounded retry, re-enumeration, and restart behavior for endpoint removal, device invalidation, and default-device changes
+- Define and validate suspend/resume behavior
+- Run eight-to-twelve-hour hardware soak tests and record resource use and output integrity
+- Improve diagnostics for frames, gaps, device transitions, and disk/permission failures where practical
 
-Validate the current native + one-click path on representative managed Windows laptops and audio-device combinations, not only one development machine.
+## P1 — timing and mix policy
 
-Acceptance should cover:
-
-- Default playback + microphone one-click recording to combined MP3
-- Remote Teams/Zoom/system playback and local microphone both audible
-- A representative multichannel microphone-array laptop
-- USB/Bluetooth/headset endpoint combinations where used in practice
-- Advanced explicit-endpoint CLI recording for non-default endpoint selection
-- Five-minute and 60-minute captures with CPU, memory, disk usage, post-processing duration, and resulting file integrity recorded
-- Confirmation that MP3 progress is visibly updated after recording stops
-- Confirmation that cancelling MP3 post-processing keeps source WAVs and removes partial output
-- Failure diagnostics captured from `audio_capture.log` without requiring users to run extra discovery commands
-
-## #3 — P0: corporate deployment review
-
-Validate the dependency-free native path under managed-PC policy:
-
-- CPython and Windows system DLL/API use through `ctypes`
-- Microphone privacy permission and MMDevice/WASAPI access
-- Script execution policy and writable recording/log directories
-- Operation without admin rights or runtime `pip install`
-
-`PyAudioWPatch` wheel/SBOM/native-DLL review is required only if the optional `--backend pyaudio` path is intentionally distributed.
-
-## #4 — P1: long-session lifecycle
-
-After the P0 multi-PC hardware gate, harden lifecycle behavior as one coherent state machine:
-
-- Endpoint removal / device invalidation / default changes / suspend-resume
-- Explicit teardown, bounded retry, re-enumeration, and restart policy using stable endpoint IDs
-- Readable partial files on Ctrl+C, stream failure, permission loss, and disk-full conditions where practical
-- No deadlocks or indefinite shutdown hangs
-- Useful long-session diagnostics for bytes/frames written, gaps, CPU, memory, disk use, and post-processing duration
-- Eight-hour soak test
-
-Existing chunk rotation, visible post-processing progress, and WAV-preservation behavior should remain invariants.
-
-## #5 — P1: timing, resampling, and mix policy
-
-Quantify the two independent audio clocks and define the next format policy around the one-click MP3 implementation that already exists:
-
-- Measure render-vs-microphone start offset, gaps, and long-session drift
-- Decide whether/when to resample mismatched 44.1/48 kHz endpoints
-- Keep resampling/conversion outside time-critical capture callbacks where possible
-- Evaluate channel-mask-aware or microphone-array-aware downmix only if real hardware demonstrates a quality problem with arithmetic averaging
-- Define gain/limiting policy if clipping proves material in real recordings
-- Measure real-machine MP3 post-processing duration for representative 5/30/60-minute recordings and optimize only where it materially improves user experience
-- Preserve transcription-friendly output and failure-safe WAV retention
+- Measure independent render/microphone clock drift, start offsets, and gaps
+- Decide a resampling policy for mismatched sample rates and accumulated drift
+- Evaluate channel-mask/microphone-array-aware downmix if hardware results justify it
+- Define gain, limiting, and loudness policy if clipping or intelligibility tests justify it
 
 ## Later / intentionally deferred
 
-- Tray/taskbar UI and launcher packaging
-- Automatic transcription / diarization / AI workflow integration
-- Additional compact output codecs beyond the current MP3 path
+- Launcher and tray/taskbar UX, after reliability and representative hardware validation
+- Automatic transcription, diarization, and AI workflow integration
+- Additional compact output codecs
