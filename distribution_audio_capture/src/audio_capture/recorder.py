@@ -6,6 +6,7 @@ import threading
 import time
 import wave
 from array import array
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
@@ -14,6 +15,99 @@ from .model import Endpoint
 MAX_PCM_DATA_BYTES = (7 * 1024**3) // 2
 MAX_RECORDING_SECONDS = 12 * 60 * 60
 LOGGER = logging.getLogger("work_audio_capture")
+MIN_DRIFT_RATE_DURATION_SECONDS = 60.0
+
+
+@dataclass
+class StreamStatistics:
+    endpoint_kind: str
+    endpoint_name: str
+    sample_rate: int
+    channel_count: int
+    total_input_frames: int = 0
+    total_pcm_bytes_written: int = 0
+    capture_start_monotonic: float | None = None
+    last_successful_read_monotonic: float | None = None
+    capture_end_monotonic: float | None = None
+    longest_read_gap_seconds: float = 0.0
+    chunks_opened: int = 0
+    chunks_completed: int = 0
+    terminal_status: str = "normal_stop"
+
+    @property
+    def audio_duration_seconds(self) -> float:
+        return self.total_input_frames / self.sample_rate if self.sample_rate else 0.0
+
+    @property
+    def wall_duration_seconds(self) -> float:
+        if self.capture_start_monotonic is None or self.capture_end_monotonic is None:
+            return 0.0
+        return max(0.0, self.capture_end_monotonic - self.capture_start_monotonic)
+
+    def successful_read(self, frames: int, now: float | None) -> None:
+        if frames <= 0:
+            return
+        previous = self.last_successful_read_monotonic
+        if previous is None:
+            previous = self.capture_start_monotonic
+        if now is not None and previous is not None:
+            self.longest_read_gap_seconds = max(
+                self.longest_read_gap_seconds, now - previous)
+        if now is not None:
+            self.last_successful_read_monotonic = now
+        self.total_input_frames += frames
+
+    def log_fields(self) -> dict[str, object]:
+        return {
+            "endpoint_kind": self.endpoint_kind,
+            "endpoint_name": self.endpoint_name,
+            "sample_rate": self.sample_rate,
+            "channel_count": self.channel_count,
+            "total_input_frames": self.total_input_frames,
+            "total_pcm_bytes_written": self.total_pcm_bytes_written,
+            "capture_start_monotonic": self.capture_start_monotonic,
+            "last_successful_read_monotonic": self.last_successful_read_monotonic,
+            "capture_end_monotonic": self.capture_end_monotonic,
+            "audio_duration_seconds": self.audio_duration_seconds,
+            "wall_duration_seconds": self.wall_duration_seconds,
+            "longest_read_gap_seconds": self.longest_read_gap_seconds,
+            "chunks_opened": self.chunks_opened,
+            "chunks_completed": self.chunks_completed,
+            "terminal_status": self.terminal_status,
+        }
+
+
+def session_timing_fields(render: StreamStatistics,
+                          microphone: StreamStatistics) -> dict[str, float | None]:
+    render_duration = render.audio_duration_seconds
+    microphone_duration = microphone.audio_duration_seconds
+    # Positive means the microphone accumulated more audio than render.
+    delta = microphone_duration - render_duration
+    difference = abs(delta)
+    drift_rate = None
+    if (render.terminal_status == "normal_stop" and
+            microphone.terminal_status == "normal_stop" and
+            render_duration >= MIN_DRIFT_RATE_DURATION_SECONDS and
+            microphone_duration >= MIN_DRIFT_RATE_DURATION_SECONDS):
+        # Normalize signed drift against the streams' common mean duration.
+        reference_duration = (render_duration + microphone_duration) / 2.0
+        drift_rate = delta * 1000.0 * 3600.0 / reference_duration
+    start_offset = None
+    if (render.capture_start_monotonic is not None and
+            microphone.capture_start_monotonic is not None):
+        # Positive means microphone capture started later than render.
+        start_offset = (
+            microphone.capture_start_monotonic - render.capture_start_monotonic
+        ) * 1000.0
+    return {
+        "render_audio_duration_seconds": render_duration,
+        "microphone_audio_duration_seconds": microphone_duration,
+        "duration_delta_seconds": delta,
+        "duration_difference_seconds": difference,
+        "duration_drift_milliseconds": delta * 1000.0,
+        "drift_rate_milliseconds_per_hour": drift_rate,
+        "microphone_start_offset_milliseconds": start_offset,
+    }
 
 
 class InputStream(Protocol):
@@ -90,7 +184,8 @@ class ConcurrentRecorder:
     def __init__(self, backend: Backend, frames_per_buffer: int = 1024,
                  chunk_duration_seconds: int = 600, mono_output: bool = False,
                  max_recording_seconds: float = MAX_RECORDING_SECONDS,
-                 shutdown_timeout_seconds: float = 5.0, clock=time.monotonic) -> None:
+                 shutdown_timeout_seconds: float = 5.0, clock=time.monotonic,
+                 diagnostics_clock=time.monotonic) -> None:
         self.backend = backend
         self.frames = frames_per_buffer
         self.chunk_duration_seconds = chunk_duration_seconds
@@ -98,16 +193,19 @@ class ConcurrentRecorder:
         self.max_recording_seconds = max_recording_seconds
         self.shutdown_timeout_seconds = shutdown_timeout_seconds
         self.clock = clock
+        self.diagnostics_clock = diagnostics_clock
         self.stop_event = threading.Event()
         self.errors: list[BaseException] = []
         self._errors_lock = threading.Lock()
         self._chunk_lock = threading.Lock()
         self._chunk_number = 1
         self._chunk_deadline = 0.0
+        self.stream_statistics: dict[str, StreamStatistics] = {}
 
     def record(self, render: Endpoint, microphone: Endpoint, render_path: Path, microphone_path: Path) -> None:
         self.stop_event.clear()
         self.errors.clear()
+        self.stream_statistics.clear()
         self._chunk_number = 1
         started_at = self.clock()
         self._chunk_deadline = (started_at + self.chunk_duration_seconds
@@ -146,6 +244,13 @@ class ConcurrentRecorder:
                 )
                 self._add_error(error)
                 LOGGER.error("%s; recovery WAVs were kept", error)
+        try:
+            if render.kind in self.stream_statistics and microphone.kind in self.stream_statistics:
+                LOGGER.info("capture session timing diagnostics", extra=session_timing_fields(
+                    self.stream_statistics[render.kind], self.stream_statistics[microphone.kind]))
+        except BaseException:
+            # Instrumentation must never alter capture success or the original error.
+            pass
         if self.errors:
             details = " | ".join(str(error) for error in self.errors)
             raise RuntimeError(f"audio capture failed: {details}") from self.errors[0]
@@ -156,6 +261,12 @@ class ConcurrentRecorder:
 
     def stop(self) -> None:
         self.stop_event.set()
+
+    def _diagnostics_now(self) -> float | None:
+        try:
+            return self.diagnostics_clock()
+        except BaseException:
+            return None
 
     def _session_chunk_number(self) -> int:
         """Return one wall-clock chunk number shared by both independent clocks."""
@@ -172,6 +283,10 @@ class ConcurrentRecorder:
             return self._chunk_number
 
     def _capture(self, endpoint: Endpoint, path: Path) -> None:
+        statistics = StreamStatistics(
+            endpoint.kind, endpoint.name, endpoint.sample_rate, endpoint.channels,
+        )
+        self.stream_statistics[endpoint.kind] = statistics
         stream = None
         capture_error: BaseException | None = None
         secondary_errors: list[BaseException] = []
@@ -189,6 +304,7 @@ class ConcurrentRecorder:
             max_chunk_frames = MAX_PCM_DATA_BYTES // output_block_align
             frames_in_chunk = 0
             chunk_number = 1
+            capture_start_attempted = False
             while True:
                 chunk_path = path if chunk_number == 1 else path.with_name(
                     f"{path.stem.rsplit('_', 1)[0]}_{chunk_number:04d}{path.suffix}"
@@ -197,6 +313,7 @@ class ConcurrentRecorder:
                 )
                 try:
                     output = wave.open(str(chunk_path), "wb")
+                    statistics.chunks_opened += 1
                 except BaseException as exc:
                     raise _wav_error(endpoint, "open", chunk_path, exc) from exc
                 chunk_error: BaseException | None = None
@@ -210,7 +327,11 @@ class ConcurrentRecorder:
                     while True:
                         remaining_frames = max_chunk_frames - frames_in_chunk
                         read_frames = min(self.frames, remaining_frames)
+                        if not capture_start_attempted:
+                            capture_start_attempted = True
+                            statistics.capture_start_monotonic = self._diagnostics_now()
                         data = stream.read(read_frames, exception_on_overflow=False)
+                        read_at = self._diagnostics_now()
                         if len(data) % input_block_align:
                             raise ValueError("audio stream returned a partial frame")
                         input_frames = len(data) // input_block_align
@@ -222,8 +343,10 @@ class ConcurrentRecorder:
                         )
                         if len(output_data) != input_frames * output_block_align:
                             raise ValueError("audio conversion changed the PCM frame count")
+                        statistics.successful_read(input_frames, read_at)
                         try:
                             output.writeframesraw(output_data)
+                            statistics.total_pcm_bytes_written += len(output_data)
                         except BaseException as exc:
                             raise _wav_error(endpoint, "write", chunk_path, exc) from exc
                         frames_in_chunk += input_frames
@@ -241,6 +364,8 @@ class ConcurrentRecorder:
                 finally:
                     try:
                         output.close()
+                        if chunk_error is None:
+                            statistics.chunks_completed += 1
                     except BaseException as exc:
                         close_error = _wav_error(endpoint, "close", chunk_path, exc)
                         if chunk_error is None:
@@ -250,6 +375,10 @@ class ConcurrentRecorder:
                         secondary_errors.append(close_error)
         except BaseException as exc:
             capture_error = exc
+            statistics.terminal_status = (
+                "wav_io_failure" if getattr(exc, "_capture_context", False)
+                else "read_capture_failure"
+            )
             error = (exc if getattr(exc, "_capture_context", False)
                      else _endpoint_error(endpoint, "capture", exc))
             self._add_error(error)
@@ -269,5 +398,11 @@ class ConcurrentRecorder:
                     if cleanup_error is None:
                         cleanup_error = exc
                 if capture_error is None and cleanup_error is not None:
+                    statistics.terminal_status = "shutdown_cleanup_failure"
                     self._add_error(_endpoint_error(endpoint, "cleanup", cleanup_error))
                     self.stop_event.set()
+            statistics.capture_end_monotonic = self._diagnostics_now()
+            try:
+                LOGGER.info("capture stream timing diagnostics", extra=statistics.log_fields())
+            except BaseException:
+                pass

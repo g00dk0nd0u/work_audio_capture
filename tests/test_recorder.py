@@ -7,7 +7,12 @@ from array import array
 import pytest
 
 from audio_capture.model import Endpoint
-from audio_capture.recorder import ConcurrentRecorder, downmix_pcm16_mono
+from audio_capture.recorder import (
+    ConcurrentRecorder,
+    StreamStatistics,
+    downmix_pcm16_mono,
+    session_timing_fields,
+)
 
 
 class FakeStream:
@@ -95,6 +100,236 @@ def test_concurrent_capture_writes_valid_wavs_and_closes_streams(tmp_path):
             assert recording.getnchannels() == 1
             assert recording.getframerate() == 8000
             assert recording.getnframes() > 0
+
+
+def test_stream_statistics_derive_counts_durations_and_longest_gap():
+    statistics = StreamStatistics("render-loopback", "speakers", 8, 2)
+    statistics.capture_start_monotonic = 10.0
+    statistics.successful_read(4, 10.25)
+    statistics.total_pcm_bytes_written += 16
+    statistics.successful_read(8, 11.75)
+    statistics.total_pcm_bytes_written += 32
+    statistics.capture_end_monotonic = 12.5
+
+    assert statistics.total_input_frames == 12
+    assert statistics.total_pcm_bytes_written == 48
+    assert statistics.audio_duration_seconds == 1.5
+    assert statistics.wall_duration_seconds == 2.5
+    assert statistics.longest_read_gap_seconds == 1.5
+
+
+@pytest.mark.parametrize("frames", [0, -1])
+def test_stream_statistics_ignore_non_positive_frame_reads(frames):
+    statistics = StreamStatistics(
+        "render-loopback", "speakers", 8000, 2,
+        total_input_frames=8,
+        capture_start_monotonic=10.0,
+        last_successful_read_monotonic=11.0,
+        longest_read_gap_seconds=1.0,
+    )
+
+    statistics.successful_read(frames, 20.0)
+
+    assert statistics.total_input_frames == 8
+    assert statistics.last_successful_read_monotonic == 11.0
+    assert statistics.longest_read_gap_seconds == 1.0
+
+
+def test_zero_frame_reads_before_first_audio_preserve_full_initial_gap():
+    statistics = StreamStatistics(
+        "render-loopback", "speakers", 8000, 2,
+        capture_start_monotonic=10.0,
+    )
+
+    statistics.successful_read(0, 10.2)
+    statistics.successful_read(0, 10.4)
+
+    assert statistics.total_input_frames == 0
+    assert statistics.last_successful_read_monotonic is None
+
+    statistics.successful_read(8, 12.0)
+
+    assert statistics.total_input_frames == 8
+    assert statistics.last_successful_read_monotonic == 12.0
+    assert statistics.longest_read_gap_seconds == 2.0
+
+
+def test_zero_frame_reads_between_audio_preserve_full_read_gap():
+    statistics = StreamStatistics(
+        "microphone", "mic", 8000, 1,
+        capture_start_monotonic=10.0,
+    )
+    statistics.successful_read(8, 10.1)
+
+    statistics.successful_read(0, 10.3)
+    statistics.successful_read(0, 10.5)
+
+    assert statistics.total_input_frames == 8
+    assert statistics.last_successful_read_monotonic == 10.1
+
+    statistics.successful_read(8, 12.1)
+
+    assert statistics.total_input_frames == 16
+    assert statistics.last_successful_read_monotonic == 12.1
+    assert statistics.longest_read_gap_seconds == 2.0
+
+
+@pytest.mark.parametrize(
+    ("render_frames", "microphone_frames", "expected_delta"),
+    [(359_900, 360_100, 2.0), (360_100, 359_900, -2.0)],
+)
+def test_session_duration_drift_fields_preserve_direction(
+        render_frames, microphone_frames, expected_delta):
+    render = StreamStatistics("render-loopback", "speakers", 100, 2,
+                              total_input_frames=render_frames)
+    microphone = StreamStatistics("microphone", "mic", 100, 1,
+                                  total_input_frames=microphone_frames)
+
+    fields = session_timing_fields(render, microphone)
+
+    # Positive means microphone accumulated more audio; negative means render did.
+    assert fields["duration_delta_seconds"] == expected_delta
+    assert fields["duration_difference_seconds"] == 2.0
+    assert fields["duration_drift_milliseconds"] == expected_delta * 1000.0
+    assert fields["drift_rate_milliseconds_per_hour"] == expected_delta * 1000.0
+
+
+@pytest.mark.parametrize(
+    ("render_status", "microphone_status", "render_frames", "microphone_frames"),
+    [
+        ("read_capture_failure", "normal_stop", 6_000, 6_100),
+        ("normal_stop", "read_capture_failure", 6_000, 6_100),
+        ("normal_stop", "normal_stop", 5_999, 6_100),
+        ("normal_stop", "normal_stop", 6_100, 5_999),
+    ],
+)
+def test_session_drift_rate_requires_two_normal_streams_of_at_least_60_seconds(
+        render_status, microphone_status, render_frames, microphone_frames):
+    render = StreamStatistics("render-loopback", "speakers", 100, 2,
+                              total_input_frames=render_frames,
+                              terminal_status=render_status)
+    microphone = StreamStatistics("microphone", "mic", 100, 1,
+                                  total_input_frames=microphone_frames,
+                                  terminal_status=microphone_status)
+
+    assert session_timing_fields(render, microphone)[
+        "drift_rate_milliseconds_per_hour"] is None
+
+
+@pytest.mark.parametrize(
+    ("render_start", "microphone_start", "expected_offset"),
+    [(10.0, 10.25, 250.0), (10.25, 10.0, -250.0), (None, 10.0, None)],
+)
+def test_session_timing_reports_signed_microphone_start_offset(
+        render_start, microphone_start, expected_offset):
+    render = StreamStatistics("render-loopback", "speakers", 100, 2,
+                              capture_start_monotonic=render_start)
+    microphone = StreamStatistics("microphone", "mic", 100, 1,
+                                  capture_start_monotonic=microphone_start)
+
+    assert session_timing_fields(render, microphone)[
+        "microphone_start_offset_milliseconds"] == expected_offset
+
+
+def test_capture_start_precedes_first_read_and_first_latency_counts_as_gap(tmp_path):
+    class Backend(FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.opened = False
+
+        def open_input(self, endpoint, frames_per_buffer):
+            self.opened = True
+            return super().open_input(endpoint, frames_per_buffer)
+
+    backend = Backend()
+    output = tmp_path / "mic.wav"
+    clock_values = iter((10.0, 12.0, 12.5))
+
+    def diagnostics_clock():
+        # The first diagnostic timestamp must not precede endpoint/WAV setup.
+        assert backend.opened
+        assert output.exists()
+        return next(clock_values)
+
+    recorder = ConcurrentRecorder(
+        backend, frames_per_buffer=4, diagnostics_clock=diagnostics_clock,
+    )
+    recorder.stop_event.set()
+
+    recorder._capture(
+        Endpoint(1, "mic", 1, 8000, "microphone"), output)
+
+    statistics = recorder.stream_statistics["microphone"]
+    assert statistics.capture_start_monotonic == 10.0
+    assert statistics.last_successful_read_monotonic == 12.0
+    assert statistics.capture_end_monotonic == 12.5
+    assert statistics.longest_read_gap_seconds == 2.0
+
+
+def test_malformed_read_is_not_counted_as_successful(tmp_path):
+    class PartialFrameStream(FakeStream):
+        def read(self, frames, exception_on_overflow=False):
+            return b"\x01"
+
+    class Backend(FakeBackend):
+        def open_input(self, endpoint, frames_per_buffer):
+            return PartialFrameStream()
+
+    clock_values = iter((10.0, 11.0, 12.0))
+    recorder = ConcurrentRecorder(
+        Backend(), diagnostics_clock=lambda: next(clock_values))
+
+    recorder._capture(
+        Endpoint(1, "mic", 1, 8000, "microphone"), tmp_path / "mic.wav")
+
+    statistics = recorder.stream_statistics["microphone"]
+    assert statistics.terminal_status == "read_capture_failure"
+    assert statistics.total_input_frames == 0
+    assert statistics.last_successful_read_monotonic is None
+
+
+def test_capture_failure_emits_available_statistics(tmp_path, caplog):
+    class ReadFailureStream(FakeStream):
+        def read(self, frames, exception_on_overflow=False):
+            raise OSError(5, "endpoint lost")
+
+    class Backend(FakeBackend):
+        def open_input(self, endpoint, frames_per_buffer):
+            stream = ReadFailureStream()
+            self.streams.append(stream)
+            return stream
+
+    clock = iter((10.0, 12.0))
+    recorder = ConcurrentRecorder(Backend(), diagnostics_clock=lambda: next(clock))
+    endpoint = Endpoint(1, "mic", 1, 8000, "microphone")
+    caplog.set_level("INFO", logger="work_audio_capture")
+
+    recorder._capture(endpoint, tmp_path / "mic.wav")
+
+    statistics = recorder.stream_statistics["microphone"]
+    assert statistics.terminal_status == "read_capture_failure"
+    assert statistics.capture_end_monotonic == 12.0
+    assert "capture stream timing diagnostics" in caplog.text
+
+
+def test_diagnostics_failure_does_not_replace_capture_error(tmp_path, monkeypatch):
+    class ReadFailureStream(FakeStream):
+        def read(self, frames, exception_on_overflow=False):
+            raise OSError(5, "original capture error")
+
+    class Backend(FakeBackend):
+        def open_input(self, endpoint, frames_per_buffer):
+            return ReadFailureStream()
+
+    recorder = ConcurrentRecorder(Backend())
+    endpoint = Endpoint(1, "mic", 1, 8000, "microphone")
+    monkeypatch.setattr("audio_capture.recorder.LOGGER.info",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("log failed")))
+
+    recorder._capture(endpoint, tmp_path / "mic.wav")
+
+    assert "original capture error" in str(recorder.errors[0])
+    assert isinstance(recorder.errors[0].__cause__, OSError)
 
 
 @pytest.mark.parametrize(
