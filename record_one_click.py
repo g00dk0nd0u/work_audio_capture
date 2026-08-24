@@ -367,7 +367,7 @@ def _unique_recovered_path(session: Path) -> Path:
     base = OUTPUT_ROOT / f"recovered_{session.name}.mp3"
     candidate = base
     number = 2
-    while candidate.exists() or candidate.with_name(candidate.name + ".part").exists():
+    while candidate.exists() or candidate.with_name(candidate.stem + ".part" + candidate.suffix).exists():
         candidate = OUTPUT_ROOT / f"recovered_{session.name}_{number}.mp3"
         number += 1
     return candidate
@@ -483,7 +483,7 @@ def _mix_available_chunks(output: Path, logger: logging.Logger,
 
     final_path = final_path or output / "recording_0001.mp3"
     final_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = final_path.with_name(final_path.name + ".part")
+    temp_path = final_path.with_name(final_path.stem + ".part" + final_path.suffix)
     if temp_path.exists():
         temp_path.unlink()
 
