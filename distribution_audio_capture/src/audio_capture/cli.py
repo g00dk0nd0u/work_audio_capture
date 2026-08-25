@@ -61,9 +61,13 @@ def main() -> int:
         directory = args.output or Path(tempfile.mkdtemp(prefix="audio-capture-"))
         directory.mkdir(parents=True, exist_ok=True)
         print(f"Recording to {directory}; press Ctrl+C to stop")
+        render_path = directory / ("speaker_00-10min.wav" if args.mono_wav else "render_0001.wav")
+        microphone_path = directory / (
+            "mic_____00-10min.wav" if args.mono_wav else "microphone_0001.wav"
+        )
         ConcurrentRecorder(backend, mono_output=args.mono_wav).record(
             choose(render, args.render), choose(capture, args.microphone),
-            directory / "render_0001.wav", directory / "microphone_0001.wav")
+            render_path, microphone_path)
         return 0
     except (RuntimeError, ValueError, OSError) as exc:
         print(f"Audio backend error: {exc}", file=sys.stderr)
