@@ -9,10 +9,12 @@ import pytest
 
 from audio_capture.model import Endpoint
 from audio_capture.recorder import (
+    DEFAULT_CHUNK_DURATION_SECONDS,
     ConcurrentRecorder,
     StreamStatistics,
     downmix_pcm16_mono,
     session_timing_fields,
+    required_recovery_free_bytes,
 )
 
 
@@ -564,6 +566,86 @@ def test_shared_chunk_clock_catches_up_multiple_intervals_at_once():
     assert recorder._session_chunk_number() == 4
     assert recorder._chunk_deadline == 2400.0
     assert recorder._session_chunk_number() == 4
+
+
+@pytest.mark.parametrize(
+    ("render_rate", "microphone_rate", "duration"),
+    [(48000, 48000, 600), (48000, 44100, 600), (8000, 16000, 37)],
+)
+def test_required_recovery_space_is_two_mono_pcm16_chunk_pairs(
+        render_rate, microphone_rate, duration):
+    pair = (render_rate * 2 * duration) + (microphone_rate * 2 * duration)
+    assert required_recovery_free_bytes(render_rate, microphone_rate, duration) == pair * 2
+
+
+def test_default_recovery_chunk_duration_remains_ten_minutes():
+    assert DEFAULT_CHUNK_DURATION_SECONDS == 600
+    assert ConcurrentRecorder(FakeBackend()).chunk_duration_seconds == 600
+
+
+def test_disk_guard_makes_one_shared_sufficient_rollover_decision(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr("audio_capture.recorder.shutil.disk_usage", lambda path: (
+        calls.append(path) or type("Usage", (), {"free": 10**12})()))
+    recorder = ConcurrentRecorder(FakeBackend(), clock=lambda: 600.1,
+                                  recovery_disk_safety_path=tmp_path)
+    recorder._chunk_deadline = 600.0
+    recorder._required_recovery_free_bytes = 1
+
+    assert recorder._session_chunk_number() == 2
+    assert recorder._session_chunk_number() == 2
+    assert calls == [tmp_path]
+
+
+def test_disk_guard_low_space_stops_without_advancing_or_rechecking(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr("audio_capture.recorder.shutil.disk_usage", lambda path: (
+        calls.append(path) or type("Usage", (), {"free": 0})()))
+    recorder = ConcurrentRecorder(FakeBackend(), clock=lambda: 600.1,
+                                  recovery_disk_safety_path=tmp_path)
+    recorder._chunk_deadline = 600.0
+    recorder._required_recovery_free_bytes = 1
+
+    assert recorder._session_chunk_number() == 1
+    assert recorder._session_chunk_number() == 1
+    assert recorder.stop_event.is_set()
+    assert recorder.errors == []
+    assert calls == [tmp_path]
+
+
+def test_disk_guard_query_failure_warns_and_advances(tmp_path, monkeypatch, caplog):
+    def fail(_path):
+        raise RuntimeError("query unavailable")
+    monkeypatch.setattr("audio_capture.recorder.shutil.disk_usage", fail)
+    recorder = ConcurrentRecorder(FakeBackend(), clock=lambda: 600.1,
+                                  recovery_disk_safety_path=tmp_path)
+    recorder._chunk_deadline = 600.0
+    caplog.set_level("WARNING", logger="work_audio_capture")
+
+    assert recorder._session_chunk_number() == 2
+    assert recorder.errors == []
+    assert "query failed; continuing" in caplog.text
+
+
+def test_low_disk_rollover_closes_valid_current_wav_without_opening_next(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr("audio_capture.recorder.shutil.disk_usage", lambda _path: type(
+        "Usage", (), {"free": 0})())
+    recorder = ConcurrentRecorder(
+        FakeBackend(), frames_per_buffer=8, clock=lambda: 600.1,
+        recovery_disk_safety_path=tmp_path,
+    )
+    recorder._chunk_deadline = 600.0
+    recorder._required_recovery_free_bytes = 1
+    current = tmp_path / "microphone_0001.wav"
+
+    recorder._capture(Endpoint(1, "mic", 1, 8000, "microphone"), current)
+
+    assert recorder.errors == []
+    assert current.exists()
+    assert not (tmp_path / "microphone_0002.wav").exists()
+    with wave.open(str(current), "rb") as recording:
+        assert recording.getnframes() > 0
 
 
 @pytest.mark.parametrize(

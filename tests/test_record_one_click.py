@@ -626,6 +626,7 @@ def test_session_marker_is_written_only_after_recording_lock(monkeypatch, tmp_pa
         assert state["status"] == record_one_click.RECOVERY_PENDING
         assert "--mono-wav" in sys.argv
         assert "--time-slot-recovery-names" in sys.argv
+        assert "--recovery-disk-safety" in sys.argv
         events.append("record")
         return 1
 
@@ -634,6 +635,31 @@ def test_session_marker_is_written_only_after_recording_lock(monkeypatch, tmp_pa
 
     assert record_one_click.run() == 1
     assert events == ["lock", "record", "release"]
+
+
+def test_low_disk_preflight_does_not_create_timestamp_session(monkeypatch, tmp_path, capsys):
+    output = _prepare_recording_start(monkeypatch, tmp_path)
+    monkeypatch.setattr(record_one_click.shutil, "disk_usage", lambda _path: type(
+        "Usage", (), {"free": 0})())
+    monkeypatch.setattr(record_one_click, "main", lambda: pytest.fail("must not record"))
+
+    assert record_one_click.run() == 1
+    assert tmp_path.is_dir()
+    assert not output.exists()
+    assert "Not enough free disk space" in capsys.readouterr().err
+
+
+def test_disk_preflight_query_failure_is_fail_open(monkeypatch, tmp_path, caplog):
+    output = _prepare_recording_start(monkeypatch, tmp_path)
+    def fail(_path):
+        raise RuntimeError("query unavailable")
+    monkeypatch.setattr(record_one_click.shutil, "disk_usage", fail)
+    monkeypatch.setattr(record_one_click, "main", lambda: 1)
+    caplog.set_level("WARNING", logger="recording-start")
+
+    assert record_one_click.run() == 1
+    assert output.is_dir()
+    assert "preflight failed; continuing" in caplog.text
 
 
 def test_failed_recording_lock_does_not_overwrite_recovery_metadata(
