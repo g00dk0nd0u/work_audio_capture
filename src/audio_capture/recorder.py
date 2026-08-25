@@ -128,7 +128,8 @@ def _truncating_average(total: int, count: int) -> int:
     return -((-total) // count)
 
 
-def downmix_pcm16_mono(data: bytes, channels: int) -> bytes:
+def downmix_pcm16_mono(data: bytes, channels: int,
+                       channel_mask: int | None = None) -> bytes:
     """Downmix complete interleaved PCM16 frames to mono without changing frame count."""
     if channels < 1:
         raise ValueError("PCM16 downmix requires at least one input channel")
@@ -144,8 +145,13 @@ def downmix_pcm16_mono(data: bytes, channels: int) -> bytes:
         samples.byteswap()
 
     mono = array("h")
-    if channels == 2:
-        for index in range(0, len(samples), 2):
+    # Windows orders channels by ascending speaker-mask bit. Front L/R are
+    # therefore the first two samples when both mask bits are present. Avoid
+    # diluting them with silent surround/LFE channels. With no trustworthy
+    # layout metadata, retain the historical all-channel average.
+    front_stereo = channels > 2 and channel_mask is not None and channel_mask & 3 == 3
+    if channels == 2 or front_stereo:
+        for index in range(0, len(samples), channels):
             mono.append(_truncating_average(samples[index] + samples[index + 1], 2))
     else:
         for index in range(0, len(samples), channels):

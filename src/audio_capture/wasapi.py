@@ -9,7 +9,7 @@ import ctypes
 import os
 import struct
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 HRESULT = ctypes.c_int32
@@ -24,6 +24,8 @@ COINIT_MULTITHREADED = 0
 DEVICE_STATE_ACTIVE = 1
 eRender, eCapture = 0, 1
 eConsole = 0
+eMultimedia = 1
+eCommunications = 2
 STGM_READ = 0
 AUDCLNT_SHAREMODE_SHARED = 0
 AUDCLNT_STREAMFLAGS_LOOPBACK = 0x00020000
@@ -172,6 +174,7 @@ class AudioFormat:
     valid_bits: int
     kind: str
     block_align: int
+    channel_mask: int | None = field(default=None, compare=False)
 
 
 _WAVEFORMATEX_SIZE = 18
@@ -204,6 +207,7 @@ def interpret_format(source: Any) -> AudioFormat:
     kind = "pcm" if tag == WAVE_FORMAT_PCM else "float" if tag == WAVE_FORMAT_IEEE_FLOAT else None
     valid = bits
     extensible_details = ""
+    channel_mask = None
     if tag == WAVE_FORMAT_EXTENSIBLE:
         if cb_size < 22:
             raise ValueError(f"invalid WAVEFORMATEXTENSIBLE size: {details}")
@@ -231,7 +235,7 @@ def interpret_format(source: Any) -> AudioFormat:
     expected = channels * ((bits + 7) // 8)
     if not channels or block_align != expected:
         raise ValueError(f"invalid WASAPI channel/block alignment ({details}{extensible_details})")
-    return AudioFormat(channels, rate, bits, valid, kind, block_align)
+    return AudioFormat(channels, rate, bits, valid, kind, block_align, channel_mask)
 
 
 def pcm16(data: bytes, fmt: AudioFormat, frames: int, silent: bool = False) -> bytes:

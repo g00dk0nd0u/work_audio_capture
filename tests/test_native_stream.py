@@ -3,6 +3,7 @@ import ctypes
 import pytest
 
 import audio_capture.native_backend as native
+from audio_capture.model import Endpoint
 from audio_capture.wasapi import AudioFormat, LPVOID, WAIT_OBJECT_0, WAIT_TIMEOUT, eRender
 
 
@@ -143,8 +144,34 @@ def test_default_endpoint_failure_does_not_abort_endpoint_enumeration(monkeypatc
     monkeypatch.setattr(native, "_device_id", lambda _device: "endpoint-id")
     monkeypatch.setattr(native, "_friendly_name", lambda _device: "Speakers")
     monkeypatch.setattr(native, "release", lambda _pointer: None)
+    class _Apartment:
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+    monkeypatch.setattr(native, "ComApartment", _Apartment)
 
     endpoints = native.enumerate_endpoints(eRender)
 
     assert len(endpoints) == 1
     assert endpoints[0].endpoint.is_default is False
+
+
+@pytest.mark.parametrize("ids", [("a", "a", "a"), ("a", "b", "c"),
+                                  (None, None, None)])
+def test_default_render_roles_are_diagnostic_and_tolerate_failure(monkeypatch, ids):
+    class _Apartment:
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+    monkeypatch.setattr(native, "ComApartment", _Apartment)
+    endpoints = [Endpoint(value, f"device-{value}", 2, 48000, "render-loopback")
+                 for value in ("a", "b", "c")]
+    monkeypatch.setattr(native.NativeWasapiBackend, "endpoints",
+                        lambda _self: (endpoints, []))
+    monkeypatch.setattr(native, "_create_enumerator", lambda: native.LPVOID(1))
+    monkeypatch.setattr(native, "release", lambda _pointer: None)
+    monkeypatch.setattr(native, "_safe_default_device_id",
+                        lambda _enum, flow, role=0: ids[role] if flow == eRender else None)
+
+    defaults = native.NativeWasapiBackend().default_endpoints()
+
+    assert [defaults[f"{role}_render"].index if defaults[f"{role}_render"] else None
+            for role in ("console", "multimedia", "communications")] == list(ids)

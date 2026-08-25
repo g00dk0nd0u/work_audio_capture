@@ -15,7 +15,8 @@ from .wasapi import (
     LPVOID, PKEY_Device_FriendlyName, PROPVARIANT, STGM_READ, UINT32,
     VT_LPWSTR, WAIT_OBJECT_0, WAIT_TIMEOUT, WAVEFORMATEX, AudioFormat,
     ComApartment, WasapiUnavailable, _method, _require_windows, check_hresult,
-    WAVE_FORMAT_PCM, eCapture, eConsole, eRender, interpret_format, pcm16, release,
+    WAVE_FORMAT_PCM, eCapture, eConsole, eMultimedia, eCommunications, eRender,
+    interpret_format, pcm16, release,
 )
 
 
@@ -50,19 +51,21 @@ def _device_id(device: LPVOID) -> str:
         ctypes.windll.ole32.CoTaskMemFree(value)
 
 
-def _default_device_id(enumerator: LPVOID, flow: int) -> str:
+def _default_device_id(enumerator: LPVOID, flow: int, role: int = eConsole) -> str:
     device = LPVOID()
     check_hresult(_method(enumerator, 4, HRESULT, ctypes.c_int, ctypes.c_int, ctypes.POINTER(LPVOID))(
-        enumerator, flow, eConsole, ctypes.byref(device)), "IMMDeviceEnumerator.GetDefaultAudioEndpoint")
+        enumerator, flow, role, ctypes.byref(device)), "IMMDeviceEnumerator.GetDefaultAudioEndpoint")
     try:
         return _device_id(device)
     finally:
         release(device)
 
 
-def _safe_default_device_id(enumerator: LPVOID, flow: int) -> str | None:
+def _safe_default_device_id(enumerator: LPVOID, flow: int, role: int = eConsole) -> str | None:
     try:
-        return _default_device_id(enumerator, flow)
+        if role == eConsole:
+            return _default_device_id(enumerator, flow)
+        return _default_device_id(enumerator, flow, role)
     except OSError as exc:
         print(f"Could not determine default endpoint: {exc}", file=sys.stderr)
         return None
@@ -122,7 +125,8 @@ def enumerate_endpoints(flow: int) -> list[NativeEndpointInfo]:
                     continue
                 endpoint_id = _device_id(device)
                 endpoint = Endpoint(endpoint_id, _friendly_name(device), fmt.channels, fmt.sample_rate,
-                                    "render-loopback" if flow == eRender else "microphone", endpoint_id == default_id)
+                                    "render-loopback" if flow == eRender else "microphone", endpoint_id == default_id,
+                                    fmt.channel_mask)
                 results.append(NativeEndpointInfo(endpoint, flow))
             finally:
                 release(device)
@@ -163,7 +167,8 @@ class NativeWasapiStream:
                 # supplies a closest format, which is not safe to silently use.
                 requested = ctypes.pointer(pcm_format) if supported == 0 else raw
                 self.format = (AudioFormat(native_format.channels, native_format.sample_rate,
-                                           16, 16, "pcm", native_format.channels * 2)
+                                           16, 16, "pcm", native_format.channels * 2,
+                                           native_format.channel_mask)
                                if supported == 0 else native_format)
                 flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK | (AUDCLNT_STREAMFLAGS_LOOPBACK if flow == eRender else 0)
                 check_hresult(_method(self.client, 3, HRESULT, ctypes.c_int, DWORD, ctypes.c_longlong, ctypes.c_longlong,
@@ -255,6 +260,27 @@ class NativeWasapiBackend:
         with ComApartment():
             return ([item.endpoint for item in enumerate_endpoints(eRender)],
                     [item.endpoint for item in enumerate_endpoints(eCapture)])
+
+    def default_endpoints(self, renders: list[Endpoint] | None = None,
+                          captures: list[Endpoint] | None = None) -> dict[str, Endpoint | None]:
+        """Return role defaults for diagnostics without changing selection policy."""
+        if renders is None or captures is None:
+            renders, captures = self.endpoints()
+        by_flow = {eRender: renders, eCapture: captures}
+        roles = {"console": eConsole, "multimedia": eMultimedia,
+                 "communications": eCommunications}
+        result: dict[str, Endpoint | None] = {}
+        with ComApartment():
+            enumerator = _create_enumerator()
+            try:
+                for flow, prefix in ((eRender, "render"), (eCapture, "capture")):
+                    for label, role in roles.items():
+                        endpoint_id = _safe_default_device_id(enumerator, flow, role)
+                        result[f"{label}_{prefix}"] = next(
+                            (item for item in by_flow[flow] if str(item.index) == endpoint_id), None)
+            finally:
+                release(enumerator)
+        return result
 
     def open_input(self, endpoint: Endpoint, frames_per_buffer: int) -> NativeWasapiStream:
         expected = eRender if endpoint.kind == "render-loopback" else eCapture

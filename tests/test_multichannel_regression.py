@@ -32,6 +32,28 @@ def test_multichannel_average_truncates_negative_values_toward_zero():
     assert _samples(downmix_pcm16_mono(_pcm16([-100, -100, -101]), 3)) == [-100]
 
 
+@pytest.mark.parametrize("channels", [4, 6, 8])
+def test_layout_aware_downmix_does_not_dilute_front_stereo(channels):
+    frame = [1200, 1200] + [0] * (channels - 2)
+    # FL|FR mask. The old arithmetic mean produced 600, 400 and 300.
+    assert _samples(downmix_pcm16_mono(_pcm16(frame), channels, 0x3)) == [1200]
+
+
+@pytest.mark.parametrize("channels", [1, 2, 4, 6, 8])
+def test_downmix_all_channels_same_signal(channels):
+    assert _samples(downmix_pcm16_mono(_pcm16([1234] * channels), channels, 0x3)) == [1234]
+
+
+def test_downmix_mono_stereo_sides_boundaries_silence_and_partial_frame():
+    assert _samples(downmix_pcm16_mono(_pcm16([-32768, 32767]), 1)) == [-32768, 32767]
+    assert _samples(downmix_pcm16_mono(_pcm16([1000, 1000]), 2)) == [1000]
+    assert _samples(downmix_pcm16_mono(_pcm16([1000, 0]), 2)) == [500]
+    assert _samples(downmix_pcm16_mono(_pcm16([0, 1000]), 2)) == [500]
+    assert downmix_pcm16_mono(_pcm16([0, 0]), 2) == _pcm16([0])
+    with pytest.raises(ValueError, match="partial frame"):
+        downmix_pcm16_mono(b"\0\0", 2)
+
+
 class _FailingStream:
     def read(self, frames, exception_on_overflow=False):
         raise OSError("simulated read failure")

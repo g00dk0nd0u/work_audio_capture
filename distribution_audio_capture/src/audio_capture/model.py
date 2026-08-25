@@ -9,4 +9,4 @@ class Endpoint:
     sample_rate: int
     kind: str
     is_default: bool = False
-
+    channel_mask: int | None = None
