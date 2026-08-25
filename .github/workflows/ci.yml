@@ -14,71 +14,34 @@ jobs:
       - run: python run.py --help
       - name: Compile repository and distribution Python
         run: python -m compileall -q run.py record_one_click.py src tests distribution_audio_capture
-      - name: Verify distribution ZIP matches distribution directory
+      - name: Verify distribution runtime mirrors source
         shell: bash
         run: |
           python - <<'PY'
-          from pathlib import Path, PurePosixPath
-          from zipfile import ZipFile
+          from pathlib import Path
 
           dist = Path("distribution_audio_capture")
-          archive = Path("distribution_audio_capture.zip")
-
-          def is_distribution_file(path: Path) -> bool:
-              return (
-                  path.is_file()
-                  and "__pycache__" not in path.parts
-                  and path.suffix != ".pyc"
-              )
-
-          expected = {
-              path.relative_to(dist).as_posix(): path.read_bytes()
-              for path in dist.rglob("*")
-              if is_distribution_file(path)
+          mirrors = {
+              Path("run.py"): dist / "run.py",
+              Path("record_one_click.py"): dist / "record_one_click.py",
           }
+          mirrors.update({
+              path: dist / path
+              for path in Path("src/audio_capture").glob("*.py")
+          })
 
-          actual = {}
-          unexpected_roots = []
-          duplicates = []
-          with ZipFile(archive) as zf:
-              for info in zf.infolist():
-                  if info.is_dir():
-                      continue
-                  member = PurePosixPath(info.filename)
-                  if not member.parts or member.parts[0] != dist.name:
-                      unexpected_roots.append(info.filename)
-                      continue
-                  relative = PurePosixPath(*member.parts[1:]).as_posix()
-                  if relative in actual:
-                      duplicates.append(info.filename)
-                  actual[relative] = zf.read(info)
-
-          missing = sorted(set(expected) - set(actual))
-          extra = sorted(set(actual) - set(expected))
-          changed = sorted(
-              name for name in set(expected) & set(actual)
-              if expected[name] != actual[name]
-          )
-
-          problems = []
-          if unexpected_roots:
-              problems.append(f"unexpected ZIP roots: {unexpected_roots}")
-          if duplicates:
-              problems.append(f"duplicate ZIP files: {duplicates}")
-          if missing:
-              problems.append(f"missing from ZIP: {missing}")
-          if extra:
-              problems.append(f"extra in ZIP: {extra}")
-          if changed:
-              problems.append(f"byte mismatch: {changed}")
-
+          problems = [
+              f"{source} != {packaged}"
+              for source, packaged in mirrors.items()
+              if not packaged.is_file() or source.read_bytes() != packaged.read_bytes()
+          ]
           if problems:
               raise SystemExit(
-                  "distribution_audio_capture.zip is stale or inconsistent:\n- "
+                  "distribution runtime is stale or incomplete:\n- "
                   + "\n- ".join(problems)
               )
 
-          print(f"Distribution ZIP synchronized: {len(expected)} files")
+          print(f"Distribution runtime synchronized: {len(mirrors)} files")
           PY
       - run: git diff --check
   windows-native-smoke:
