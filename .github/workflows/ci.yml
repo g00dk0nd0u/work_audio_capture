@@ -22,25 +22,19 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
-
           root = Path('distribution_audio_capture')
           files = sorted(p for p in root.rglob('*') if p.is_file() and '__pycache__' not in p.parts)
           out = Path('distribution_audio_capture.zip')
           with ZipFile(out, 'w', compression=ZIP_DEFLATED, compresslevel=9) as zf:
               for path in files:
-                  arcname = path.as_posix()
-                  info = ZipInfo(arcname, date_time=(1980, 1, 1, 0, 0, 0))
+                  info = ZipInfo(path.as_posix(), date_time=(1980, 1, 1, 0, 0, 0))
                   info.compress_type = ZIP_DEFLATED
                   info.external_attr = 0o100644 << 16
                   zf.writestr(info, path.read_bytes(), compress_type=ZIP_DEFLATED, compresslevel=9)
-          print(f'ZIP files: {len(files)}')
-          assert len(files) == 12, [p.as_posix() for p in files]
+          assert len(files) == 12
           PY
           git diff --check
-          if git diff --quiet -- distribution_audio_capture.zip; then
-            echo "distribution_audio_capture.zip already current"
-            exit 0
-          fi
+          if git diff --quiet -- distribution_audio_capture.zip; then exit 0; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add distribution_audio_capture.zip
