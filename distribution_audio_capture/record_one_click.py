@@ -30,6 +30,7 @@ OUTPUT_ROOT = PROJECT_ROOT / "recordings"
 RECOVERY_ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "WorkAudioCapture"
 LOG_PATH = PROJECT_ROOT / "audio_capture.log"
 MIX_FRAMES = 262144
+RMS_SAMPLE_STRIDE_FRAMES = 16
 MP3_BITRATE_BPS = DEFAULT_MP3_BITRATE_BPS
 MP3_ENCODER_FACTORY = Mp3Encoder
 SESSION_FILE = "session.json"
@@ -87,6 +88,7 @@ _LOG_EXTRA_FIELDS = (
     "default_communications_capture_id", "default_communications_capture_name",
     "audio_stage", "rms", "rms_dbfs", "peak", "peak_dbfs",
     "channel_rms_dbfs", "channel_peak_dbfs", "clipped_samples",
+    "rms_sample_stride_frames",
 )
 
 
@@ -246,8 +248,8 @@ def _pcm16_samples(data: bytes) -> array:
     return samples
 
 
-def _mono_samples(data: bytes, channels: int, channel_mask: int | None = None) -> array:
-    return _pcm16_samples(downmix_pcm16_mono(data, channels, channel_mask))
+def _mono_samples(data: bytes, channels: int) -> array:
+    return _pcm16_samples(downmix_pcm16_mono(data, channels))
 
 
 class _LevelStatistics:
@@ -259,12 +261,18 @@ class _LevelStatistics:
         self.peaks = [0] * channels
 
     def add(self, samples: array) -> None:
-        for index, sample in enumerate(samples):
-            channel = index % self.channels
-            value = int(sample)
-            self.counts[channel] += 1
-            self.squares[channel] += value * value
-            self.peaks[channel] = max(self.peaks[channel], abs(value))
+        for channel in range(self.channels):
+            values = samples[channel::self.channels]
+            if not values:
+                continue
+            # Peak remains exact. RMS sampling bounds Python work while still
+            # covering the entire recording at a fixed, content-independent
+            # cadence (no level-dependent gain or pumping).
+            self.peaks[channel] = max(
+                self.peaks[channel], max(values), -min(values))
+            sampled = values[::RMS_SAMPLE_STRIDE_FRAMES]
+            self.counts[channel] += len(sampled)
+            self.squares[channel] += sum(int(value) * int(value) for value in sampled)
 
     @staticmethod
     def _dbfs(value: float) -> float | None:
@@ -278,7 +286,22 @@ class _LevelStatistics:
         return {"audio_stage": stage, "rms": rms, "rms_dbfs": self._dbfs(rms),
                 "peak": peak, "peak_dbfs": self._dbfs(peak),
                 "channel_rms_dbfs": [self._dbfs(value) for value in channel_rms],
-                "channel_peak_dbfs": [self._dbfs(value) for value in self.peaks]}
+                "channel_peak_dbfs": [self._dbfs(value) for value in self.peaks],
+                "rms_sample_stride_frames": RMS_SAMPLE_STRIDE_FRAMES}
+
+
+def _mix_mono_diagnostics(render_samples: array, microphone_samples: array,
+                          mixed_stats: _LevelStatistics) -> tuple[array, int]:
+    """Preserve the established mixer and collect bounded-cost diagnostics."""
+    common_count = min(len(render_samples), len(microphone_samples))
+    clipped = sum(
+        int(render_samples[index]) + int(microphone_samples[index]) > 32767 or
+        int(render_samples[index]) + int(microphone_samples[index]) < -32768
+        for index in range(common_count)
+    )
+    mixed = _mix_mono(render_samples, microphone_samples)
+    mixed_stats.add(mixed)
+    return mixed, clipped
 
 
 def _mix_mono(render_samples: array, microphone_samples: array) -> array:
@@ -314,15 +337,11 @@ def _encode_recordings_mp3(
     microphone_path: Path,
     output_path: Path,
     progress=None,
-    render_channel_mask=None,
-    microphone_channel_mask=None,
 ) -> None:
-    _encode_chunk_pairs_mp3([(render_path, microphone_path)], output_path, progress,
-                            render_channel_mask, microphone_channel_mask)
+    _encode_chunk_pairs_mp3([(render_path, microphone_path)], output_path, progress)
 
 
-def _encode_chunk_pairs_mp3(pairs, output_path: Path, progress=None,
-                            render_channel_mask=None, microphone_channel_mask=None) -> None:
+def _encode_chunk_pairs_mp3(pairs, output_path: Path, progress=None) -> None:
     """Encode ordered recovery pairs through one bounded-memory MP3 writer."""
     if not pairs:
         raise ValueError("no recording chunks were supplied")
@@ -336,13 +355,11 @@ def _encode_chunk_pairs_mp3(pairs, output_path: Path, progress=None,
         output_path, sample_rate=sample_rate, bitrate_bps=MP3_BITRATE_BPS
     ) as encoder:
         for render_path, microphone_path in pairs:
-            _write_recording_pair(encoder, render_path, microphone_path, sample_rate, progress,
-                                  render_channel_mask, microphone_channel_mask)
+            _write_recording_pair(encoder, render_path, microphone_path, sample_rate, progress)
 
 
 def _write_recording_pair(encoder, render_path: Path, microphone_path: Path,
-                          sample_rate: int, progress=None, render_channel_mask=None,
-                          microphone_channel_mask=None) -> None:
+                          sample_rate: int, progress=None) -> None:
     with wave.open(str(render_path), "rb") as render_file, wave.open(str(microphone_path), "rb") as microphone_file:
         render_params = render_file.getparams()
         microphone_params = microphone_file.getparams()
@@ -379,19 +396,16 @@ def _write_recording_pair(encoder, render_path: Path, microphone_path: Path,
             microphone_raw = _pcm16_samples(microphone_file.readframes(MIX_FRAMES))
             raw_render_stats.add(render_raw)
             raw_microphone_stats.add(microphone_raw)
-            render_samples = _pcm16_samples(downmix_pcm16_mono(
-                _pcm16_bytes(render_raw), render_params.nchannels, render_channel_mask))
-            microphone_samples = _pcm16_samples(downmix_pcm16_mono(
-                _pcm16_bytes(microphone_raw), microphone_params.nchannels, microphone_channel_mask))
+            render_samples = _mono_samples(_pcm16_bytes(render_raw), render_params.nchannels)
+            microphone_samples = _mono_samples(
+                _pcm16_bytes(microphone_raw), microphone_params.nchannels)
             if not render_samples and not microphone_samples:
                 break
             mono_render_stats.add(render_samples)
             mono_microphone_stats.add(microphone_samples)
-            common = min(len(render_samples), len(microphone_samples))
-            clipped_samples += sum(not -32768 <= render_samples[i] + microphone_samples[i] <= 32767
-                                   for i in range(common))
-            mixed = _mix_mono(render_samples, microphone_samples)
-            mixed_stats.add(mixed)
+            mixed, block_clipped = _mix_mono_diagnostics(
+                render_samples, microphone_samples, mixed_stats)
+            clipped_samples += block_clipped
             encoder.write_pcm(_pcm16_bytes(mixed))
             processed_frames += max(len(render_samples), len(microphone_samples))
             if progress is not None:
@@ -539,17 +553,7 @@ def _repair_all(sessions: list[Path], logger: logging.Logger) -> int:
 
 def _mix_available_chunks(output: Path, logger: logging.Logger,
                           final_path: Path | None = None,
-                          chunk_numbers: list[int] | None = None,
-                          render_channel_mask=None, microphone_channel_mask=None) -> Path:
-    if render_channel_mask is None or microphone_channel_mask is None:
-        try:
-            state = json.loads((output / SESSION_FILE).read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            state = {}
-        if render_channel_mask is None:
-            render_channel_mask = state.get("render_channel_mask")
-        if microphone_channel_mask is None:
-            microphone_channel_mask = state.get("microphone_channel_mask")
+                          chunk_numbers: list[int] | None = None) -> Path:
     render_chunks = _recording_chunks(output, "render")
     microphone_chunks = _recording_chunks(output, "microphone")
     common_chunks = sorted(render_chunks.keys() & microphone_chunks.keys())
@@ -586,15 +590,9 @@ def _mix_available_chunks(output: Path, logger: logging.Logger,
     try:
         pairs = [(render_chunks[number], microphone_chunks[number]) for number in common_chunks]
         if len(pairs) == 1:
-            kwargs = {}
-            if render_channel_mask is not None:
-                kwargs["render_channel_mask"] = render_channel_mask
-            if microphone_channel_mask is not None:
-                kwargs["microphone_channel_mask"] = microphone_channel_mask
-            _encode_recordings_mp3(*pairs[0], temp_path, report_progress, **kwargs)
+            _encode_recordings_mp3(*pairs[0], temp_path, report_progress)
         else:
-            _encode_chunk_pairs_mp3(pairs, temp_path, report_progress,
-                                    render_channel_mask, microphone_channel_mask)
+            _encode_chunk_pairs_mp3(pairs, temp_path, report_progress)
         print()
         if not temp_path.exists() or temp_path.stat().st_size <= 0:
             raise ValueError("MP3 encoder did not produce a non-empty output; source WAVs were kept")
@@ -632,10 +630,7 @@ def _finish_mp3(
     logger.info("MP3 post-processing started", extra=postprocess_log)
 
     try:
-        published = _mix_available_chunks(
-            output, logger, final_path,
-            render_channel_mask=diagnostic_log.get("render_channel_mask"),
-            microphone_channel_mask=diagnostic_log.get("microphone_channel_mask"))
+        published = _mix_available_chunks(output, logger, final_path)
     except KeyboardInterrupt:
         print("MP3 creation cancelled. Source WAV recordings were kept.")
         logger.warning(

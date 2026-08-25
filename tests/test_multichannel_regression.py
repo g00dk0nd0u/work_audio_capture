@@ -32,16 +32,28 @@ def test_multichannel_average_truncates_negative_values_toward_zero():
     assert _samples(downmix_pcm16_mono(_pcm16([-100, -100, -101]), 3)) == [-100]
 
 
-@pytest.mark.parametrize("channels", [4, 6, 8])
-def test_layout_aware_downmix_does_not_dilute_front_stereo(channels):
+@pytest.mark.parametrize(("channels", "expected"), [(4, 600), (6, 400), (8, 300)])
+def test_multichannel_front_stereo_retains_pre_pr_all_channel_average(channels, expected):
     frame = [1200, 1200] + [0] * (channels - 2)
-    # FL|FR mask. The old arithmetic mean produced 600, 400 and 300.
-    assert _samples(downmix_pcm16_mono(_pcm16(frame), channels, 0x3)) == [1200]
+    assert _samples(downmix_pcm16_mono(_pcm16(frame), channels)) == [expected]
 
 
 @pytest.mark.parametrize("channels", [1, 2, 4, 6, 8])
 def test_downmix_all_channels_same_signal(channels):
-    assert _samples(downmix_pcm16_mono(_pcm16([1234] * channels), channels, 0x3)) == [1234]
+    assert _samples(downmix_pcm16_mono(_pcm16([1234] * channels), channels)) == [1234]
+
+
+def test_six_channel_center_is_not_discarded():
+    assert _samples(downmix_pcm16_mono(_pcm16([0, 0, 6000, 0, 0, 0]), 6)) == [1000]
+
+
+def test_six_channel_front_left_right_and_center_are_all_included():
+    assert _samples(downmix_pcm16_mono(
+        _pcm16([600, 1200, 1800, 0, 0, 0]), 6)) == [600]
+
+
+def test_four_channel_microphone_retains_pre_pr_average_of_every_channel():
+    assert _samples(downmix_pcm16_mono(_pcm16([100, 200, 300, 400]), 4)) == [250]
 
 
 def test_downmix_mono_stereo_sides_boundaries_silence_and_partial_frame():

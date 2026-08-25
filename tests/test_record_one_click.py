@@ -97,6 +97,12 @@ def test_encode_four_channel_render_and_microphone_to_mono_mp3(tmp_path):
     assert output.exists()
 
 
+def test_four_channel_microphone_downmix_is_unchanged_from_pre_pr():
+    assert record_one_click._mono_samples(
+        record_one_click._pcm16_bytes(array("h", [100, 200, 300, 400])), 4
+    ).tolist() == [250]
+
+
 def test_encode_stereo_render_and_eight_channel_microphone(tmp_path):
     render = tmp_path / "render.wav"
     microphone = tmp_path / "microphone.wav"

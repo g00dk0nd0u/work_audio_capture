@@ -188,6 +188,17 @@ def test_extensible_float32_ctypes_compatibility():
         2, 48000, 32, 32, "float", 8)
 
 
+@pytest.mark.parametrize(("channels", "channel_mask"), [(6, 0x3F), (8, 0x63F)])
+def test_standard_surround_channel_masks_are_preserved(channels, channel_mask):
+    fmt = _extensible(KSDATAFORMAT_SUBTYPE_PCM)
+    fmt.Format.nChannels = channels
+    fmt.Format.nBlockAlign = channels * 4
+    fmt.Format.nAvgBytesPerSec = 48000 * channels * 4
+    fmt.dwChannelMask = channel_mask
+
+    assert interpret_format(fmt).channel_mask == channel_mask
+
+
 def test_extensible_unknown_subformat_ctypes_fails_clearly():
     unknown = GUID.from_string("12345678-1234-1234-1234-123456789abc")
     with pytest.raises(ValueError, match="unsupported WASAPI extensible format"):
