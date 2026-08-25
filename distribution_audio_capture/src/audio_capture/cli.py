@@ -40,6 +40,11 @@ def main() -> int:
         action="store_true",
         help="store intermediate record WAVs as mono PCM16 (used by one-click MP3 mode)",
     )
+    parser.add_argument(
+        "--time-slot-recovery-names",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args()
     if args.command == "doctor" and args.backend == "native":
         return 0 if run_doctor() else 1
@@ -61,9 +66,13 @@ def main() -> int:
         directory = args.output or Path(tempfile.mkdtemp(prefix="audio-capture-"))
         directory.mkdir(parents=True, exist_ok=True)
         print(f"Recording to {directory}; press Ctrl+C to stop")
-        render_path = directory / ("speaker_00-10min.wav" if args.mono_wav else "render_0001.wav")
+        render_path = directory / (
+            "speaker_00-10min.wav"
+            if args.time_slot_recovery_names else "render_0001.wav"
+        )
         microphone_path = directory / (
-            "mic_____00-10min.wav" if args.mono_wav else "microphone_0001.wav"
+            "mic_____00-10min.wav"
+            if args.time_slot_recovery_names else "microphone_0001.wav"
         )
         ConcurrentRecorder(backend, mono_output=args.mono_wav).record(
             choose(render, args.render), choose(capture, args.microphone),

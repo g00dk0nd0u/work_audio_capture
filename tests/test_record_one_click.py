@@ -624,7 +624,8 @@ def test_session_marker_is_written_only_after_recording_lock(monkeypatch, tmp_pa
     def recording_main():
         state = json.loads((output / record_one_click.SESSION_FILE).read_text())
         assert state["status"] == record_one_click.RECOVERY_PENDING
-        assert sys.argv[-1] == "--mono-wav"
+        assert "--mono-wav" in sys.argv
+        assert "--time-slot-recovery-names" in sys.argv
         events.append("record")
         return 1
 

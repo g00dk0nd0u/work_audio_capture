@@ -1,0 +1,65 @@
+import sys
+
+import pytest
+
+from audio_capture import cli
+
+
+class _Endpoint:
+    def __init__(self, index):
+        self.index = index
+        self.name = f"endpoint-{index}"
+        self.channels = 2
+        self.sample_rate = 48000
+        self.is_default = False
+
+
+class _Backend:
+    def __init__(self):
+        self.closed = False
+
+    def endpoints(self):
+        return [_Endpoint(1)], [_Endpoint(2)]
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "expected_names", "expected_mono"),
+    [
+        ([], ("render_0001.wav", "microphone_0001.wav"), False),
+        (["--mono-wav"], ("render_0001.wav", "microphone_0001.wav"), True),
+        (
+            ["--mono-wav", "--time-slot-recovery-names"],
+            ("speaker_00-10min.wav", "mic_____00-10min.wav"),
+            True,
+        ),
+    ],
+)
+def test_record_filename_style_is_independent_from_mono_output(
+        tmp_path, monkeypatch, extra_args, expected_names, expected_mono):
+    backend = _Backend()
+    captured = {}
+
+    class Recorder:
+        def __init__(self, selected_backend, mono_output=False):
+            assert selected_backend is backend
+            captured["mono_output"] = mono_output
+
+        def record(self, _render, _microphone, render_path, microphone_path):
+            captured["names"] = (render_path.name, microphone_path.name)
+
+    monkeypatch.setattr(cli, "_backend", lambda _name: backend)
+    monkeypatch.setattr(cli, "ConcurrentRecorder", Recorder)
+    monkeypatch.setattr(sys, "argv", [
+        "audio-capture", "record", "--render", "1", "--microphone", "2",
+        "--output", str(tmp_path), *extra_args,
+    ])
+
+    assert cli.main() == 0
+    assert captured == {
+        "mono_output": expected_mono,
+        "names": expected_names,
+    }
+    assert backend.closed

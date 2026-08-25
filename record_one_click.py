@@ -810,6 +810,7 @@ def run() -> int:
         "--output",
         str(output),
         "--mono-wav",
+        "--time-slot-recovery-names",
     ]
     recording_succeeded = False
     try:
