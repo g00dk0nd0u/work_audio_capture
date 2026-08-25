@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import threading
 import time
@@ -16,6 +17,7 @@ MAX_PCM_DATA_BYTES = (7 * 1024**3) // 2
 MAX_RECORDING_SECONDS = 12 * 60 * 60
 LOGGER = logging.getLogger("work_audio_capture")
 MIN_DRIFT_RATE_DURATION_SECONDS = 60.0
+_TIME_SLOT_STEM = re.compile(r"^(?P<prefix>.+_)(?P<start>\d+)-(?P<end>\d+)min$")
 
 
 @dataclass
@@ -282,6 +284,27 @@ class ConcurrentRecorder:
                 self._chunk_deadline += elapsed_chunks * self.chunk_duration_seconds
             return self._chunk_number
 
+    @staticmethod
+    def _chunk_path(path: Path, chunk_number: int) -> Path:
+        """Name either a legacy numbered chunk or a nominal time-slot chunk."""
+        slot = _TIME_SLOT_STEM.fullmatch(path.stem)
+        if slot:
+            slot_minutes = int(slot.group("end")) - int(slot.group("start"))
+            if slot_minutes <= 0:
+                raise ValueError("recovery WAV time slot must have a positive duration")
+            start = (chunk_number - 1) * slot_minutes
+            end = start + slot_minutes
+            return path.with_name(
+                f"{slot.group('prefix')}{start:02d}-{end:02d}min{path.suffix}"
+            )
+        if chunk_number == 1:
+            return path
+        return path.with_name(
+            f"{path.stem.rsplit('_', 1)[0]}_{chunk_number:04d}{path.suffix}"
+            if path.stem.rsplit("_", 1)[-1].isdigit() else
+            f"{path.stem}_{chunk_number:04d}{path.suffix}"
+        )
+
     def _capture(self, endpoint: Endpoint, path: Path) -> None:
         statistics = StreamStatistics(
             endpoint.kind, endpoint.name, endpoint.sample_rate, endpoint.channels,
@@ -306,11 +329,7 @@ class ConcurrentRecorder:
             chunk_number = 1
             capture_start_attempted = False
             while True:
-                chunk_path = path if chunk_number == 1 else path.with_name(
-                    f"{path.stem.rsplit('_', 1)[0]}_{chunk_number:04d}{path.suffix}"
-                    if path.stem.rsplit('_', 1)[-1].isdigit() else
-                    f"{path.stem}_{chunk_number:04d}{path.suffix}"
-                )
+                chunk_path = self._chunk_path(path, chunk_number)
                 try:
                     output = wave.open(str(chunk_path), "wb")
                     statistics.chunks_opened += 1

@@ -3,6 +3,7 @@ import threading
 import time
 import wave
 from array import array
+from pathlib import Path
 
 import pytest
 
@@ -426,6 +427,17 @@ def test_default_output_preserves_stereo_capture(tmp_path):
     with wave.open(str(output), "rb") as recording:
         assert recording.getnchannels() == 2
         assert recording.getnframes() == 4
+
+
+def test_time_slot_chunk_names_use_nominal_shared_chunk_index():
+    path = Path("speaker_00-10min.wav")
+
+    assert ConcurrentRecorder._chunk_path(path, 1).name == "speaker_00-10min.wav"
+    assert ConcurrentRecorder._chunk_path(path, 2).name == "speaker_10-20min.wav"
+    assert ConcurrentRecorder._chunk_path(path, 4).name == "speaker_30-40min.wav"
+    assert ConcurrentRecorder._chunk_path(
+        Path("mic_____00-10min.wav"), 3
+    ).name == "mic_____20-30min.wav"
 
 
 def test_chunk_rotation_keeps_capture_files_bounded(tmp_path):

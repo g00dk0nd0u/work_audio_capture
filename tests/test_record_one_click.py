@@ -253,6 +253,39 @@ def test_multiple_chunks_are_encoded_into_one_final_mp3(tmp_path):
     assert not list(tmp_path.glob("*.wav"))
 
 
+def test_new_time_slot_chunks_are_paired_and_encoded(tmp_path):
+    for slot, value in (((0, 10), 10), ((10, 20), 20)):
+        start, end = slot
+        _write(tmp_path / f"speaker_{start:02d}-{end:02d}min.wav", 1, 48000, [value])
+        _write(tmp_path / f"mic_____{start:02d}-{end:02d}min.wav", 1, 48000, [1])
+
+    record_one_click._mix_available_chunks(tmp_path, logging.getLogger("test-slots"))
+
+    assert _samples(bytes(_FakeEncoder.instances[0].data)) == [11, 21]
+    assert not list(tmp_path.glob("*.wav"))
+
+
+def test_new_and_legacy_chunk_names_are_not_cross_paired(tmp_path):
+    speaker = tmp_path / "speaker_00-10min.wav"
+    microphone = tmp_path / "microphone_0001.wav"
+    _write(speaker, 1, 48000, [10])
+    _write(microphone, 1, 48000, [1])
+
+    with pytest.raises(ValueError, match="mixed recovery"):
+        record_one_click._mix_available_chunks(tmp_path, logging.getLogger("test-unpaired"))
+
+    assert speaker.exists() and microphone.exists()
+
+
+def test_legacy_non_numbered_chunks_remain_repairable(tmp_path):
+    _write(tmp_path / "render.wav", 1, 48000, [10])
+    _write(tmp_path / "microphone.wav", 1, 48000, [1])
+
+    record_one_click._mix_available_chunks(tmp_path, logging.getLogger("test-legacy"))
+
+    assert _samples(bytes(_FakeEncoder.instances[0].data)) == [11]
+
+
 def test_recovery_root_is_outside_repository():
     assert not record_one_click.RECOVERY_ROOT.is_relative_to(record_one_click.PROJECT_ROOT)
 
@@ -448,6 +481,19 @@ def test_successful_repair_publishes_one_mp3_and_removes_session(tmp_path, monke
     assert not session.exists()
 
 
+def test_repair_recognizes_new_time_slot_filenames(tmp_path, monkeypatch):
+    session = _pending_session(tmp_path, "time-slots")
+    _write(session / "speaker_00-10min.wav", 1, 48000, [10])
+    _write(session / "mic_____00-10min.wav", 1, 48000, [1])
+    monkeypatch.setattr(record_one_click, "OUTPUT_ROOT", tmp_path / "recordings")
+
+    assert record_one_click._repair_session(
+        session, logging.getLogger("repair-slots")
+    ) == record_one_click.REPAIR_FULL
+    assert (tmp_path / "recordings" / "recovered_time-slots.mp3").exists()
+    assert not session.exists()
+
+
 def test_active_session_is_not_returned_by_recovery_detection(tmp_path):
     session = _pending_session(tmp_path, "active")
     lock = record_one_click._SessionLock(session)
@@ -578,6 +624,8 @@ def test_session_marker_is_written_only_after_recording_lock(monkeypatch, tmp_pa
     def recording_main():
         state = json.loads((output / record_one_click.SESSION_FILE).read_text())
         assert state["status"] == record_one_click.RECOVERY_PENDING
+        assert "--mono-wav" in sys.argv
+        assert "--time-slot-recovery-names" in sys.argv
         events.append("record")
         return 1
 

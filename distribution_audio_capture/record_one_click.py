@@ -8,6 +8,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import re
 import sys
 import wave
 
@@ -41,6 +42,9 @@ VALIDATION_FRAMES = 65536
 REPAIR_FULL = "full"
 REPAIR_PARTIAL = "partial"
 REPAIR_FAILED = "failed"
+_SLOT_WAV = re.compile(
+    r"^(?P<prefix>speaker_|mic_____)(?P<start>\d+)-(?P<end>\d+)min\.wav$"
+)
 _LOG_EXTRA_FIELDS = (
     "python_version",
     "python_implementation",
@@ -446,6 +450,31 @@ def _write_recording_pair(encoder, render_path: Path, microphone_path: Path,
 
 
 def _recording_chunks(directory: Path, stem: str) -> dict[int, Path]:
+    slot_files = [
+        path for path in directory.glob("*.wav")
+        if _SLOT_WAV.fullmatch(path.name)
+    ]
+    legacy_files = list(directory.glob("render_[0-9][0-9][0-9][0-9].wav"))
+    legacy_files += list(directory.glob("microphone_[0-9][0-9][0-9][0-9].wav"))
+    legacy_files += [
+        path for path in (directory / "render.wav", directory / "microphone.wav")
+        if path.exists()
+    ]
+    if slot_files and legacy_files:
+        raise ValueError("mixed recovery WAV filename formats; source WAVs were kept")
+
+    slot_prefix = "speaker_" if stem == "render" else "mic_____"
+    slot_chunks = {}
+    for path in directory.glob(f"{slot_prefix}*-*min.wav"):
+        match = _SLOT_WAV.fullmatch(path.name)
+        if match is None or match.group("prefix") != slot_prefix:
+            continue
+        start = int(match.group("start"))
+        end = int(match.group("end"))
+        if start % 10 or end != start + 10:
+            continue
+        slot_chunks[start // 10 + 1] = path
+
     chunks = {
         int(path.stem.rsplit("_", 1)[1]): path
         for path in directory.glob(f"{stem}_[0-9][0-9][0-9][0-9].wav")
@@ -454,7 +483,7 @@ def _recording_chunks(directory: Path, stem: str) -> dict[int, Path]:
         legacy_path = directory / f"{stem}.wav"
         if legacy_path.exists():
             chunks[1] = legacy_path
-    return chunks
+    return slot_chunks or chunks
 
 
 def _readable_pair(render_path: Path, microphone_path: Path) -> None:
@@ -780,6 +809,8 @@ def run() -> int:
         str(microphone.index),
         "--output",
         str(output),
+        "--mono-wav",
+        "--time-slot-recovery-names",
     ]
     recording_succeeded = False
     try:
