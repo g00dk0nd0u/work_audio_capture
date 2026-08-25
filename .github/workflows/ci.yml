@@ -23,10 +23,18 @@ jobs:
 
           dist = Path("distribution_audio_capture")
           archive = Path("distribution_audio_capture.zip")
+
+          def is_distribution_file(path: Path) -> bool:
+              return (
+                  path.is_file()
+                  and "__pycache__" not in path.parts
+                  and path.suffix != ".pyc"
+              )
+
           expected = {
               path.relative_to(dist).as_posix(): path.read_bytes()
               for path in dist.rglob("*")
-              if path.is_file()
+              if is_distribution_file(path)
           }
 
           actual = {}
