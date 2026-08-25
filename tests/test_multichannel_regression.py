@@ -32,6 +32,40 @@ def test_multichannel_average_truncates_negative_values_toward_zero():
     assert _samples(downmix_pcm16_mono(_pcm16([-100, -100, -101]), 3)) == [-100]
 
 
+@pytest.mark.parametrize(("channels", "expected"), [(4, 600), (6, 400), (8, 300)])
+def test_multichannel_front_stereo_retains_pre_pr_all_channel_average(channels, expected):
+    frame = [1200, 1200] + [0] * (channels - 2)
+    assert _samples(downmix_pcm16_mono(_pcm16(frame), channels)) == [expected]
+
+
+@pytest.mark.parametrize("channels", [1, 2, 4, 6, 8])
+def test_downmix_all_channels_same_signal(channels):
+    assert _samples(downmix_pcm16_mono(_pcm16([1234] * channels), channels)) == [1234]
+
+
+def test_six_channel_center_is_not_discarded():
+    assert _samples(downmix_pcm16_mono(_pcm16([0, 0, 6000, 0, 0, 0]), 6)) == [1000]
+
+
+def test_six_channel_front_left_right_and_center_are_all_included():
+    assert _samples(downmix_pcm16_mono(
+        _pcm16([600, 1200, 1800, 0, 0, 0]), 6)) == [600]
+
+
+def test_four_channel_microphone_retains_pre_pr_average_of_every_channel():
+    assert _samples(downmix_pcm16_mono(_pcm16([100, 200, 300, 400]), 4)) == [250]
+
+
+def test_downmix_mono_stereo_sides_boundaries_silence_and_partial_frame():
+    assert _samples(downmix_pcm16_mono(_pcm16([-32768, 32767]), 1)) == [-32768, 32767]
+    assert _samples(downmix_pcm16_mono(_pcm16([1000, 1000]), 2)) == [1000]
+    assert _samples(downmix_pcm16_mono(_pcm16([1000, 0]), 2)) == [500]
+    assert _samples(downmix_pcm16_mono(_pcm16([0, 1000]), 2)) == [500]
+    assert downmix_pcm16_mono(_pcm16([0, 0]), 2) == _pcm16([0])
+    with pytest.raises(ValueError, match="partial frame"):
+        downmix_pcm16_mono(b"\0\0", 2)
+
+
 class _FailingStream:
     def read(self, frames, exception_on_overflow=False):
         raise OSError("simulated read failure")

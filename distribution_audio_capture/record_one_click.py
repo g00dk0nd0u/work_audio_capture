@@ -4,6 +4,7 @@ from datetime import datetime
 from array import array
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import platform
@@ -29,6 +30,7 @@ OUTPUT_ROOT = PROJECT_ROOT / "recordings"
 RECOVERY_ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "WorkAudioCapture"
 LOG_PATH = PROJECT_ROOT / "audio_capture.log"
 MIX_FRAMES = 262144
+RMS_SAMPLE_STRIDE_FRAMES = 16
 MP3_BITRATE_BPS = DEFAULT_MP3_BITRATE_BPS
 MP3_ENCODER_FACTORY = Mp3Encoder
 SESSION_FILE = "session.json"
@@ -76,6 +78,17 @@ _LOG_EXTRA_FIELDS = (
     "duration_drift_milliseconds",
     "drift_rate_milliseconds_per_hour",
     "microphone_start_offset_milliseconds",
+    "selected_render_id", "selected_render_name", "selected_microphone_id",
+    "selected_microphone_name", "render_channel_mask", "microphone_channel_mask",
+    "default_console_render_id", "default_console_render_name",
+    "default_multimedia_render_id", "default_multimedia_render_name",
+    "default_communications_render_id", "default_communications_render_name",
+    "default_console_capture_id", "default_console_capture_name",
+    "default_multimedia_capture_id", "default_multimedia_capture_name",
+    "default_communications_capture_id", "default_communications_capture_name",
+    "audio_stage", "rms", "rms_dbfs", "peak", "peak_dbfs",
+    "channel_rms_dbfs", "channel_peak_dbfs", "clipped_samples",
+    "rms_sample_stride_frames",
 )
 
 
@@ -116,10 +129,13 @@ def _runtime_environment() -> dict[str, str]:
     }
 
 
-def _write_session_state(directory: Path, status: str, reason: str | None = None) -> None:
+def _write_session_state(directory: Path, status: str, reason: str | None = None,
+                         metadata: dict[str, object] | None = None) -> None:
     """Replace the small recovery marker without risking the previous marker."""
     directory.mkdir(parents=True, exist_ok=True)
     state = {"status": status}
+    if metadata:
+        state.update(metadata)
     if reason:
         state["reason"] = reason
     path = directory / SESSION_FILE
@@ -236,6 +252,83 @@ def _mono_samples(data: bytes, channels: int) -> array:
     return _pcm16_samples(downmix_pcm16_mono(data, channels))
 
 
+class _LevelStatistics:
+    """Constant-memory PCM16 level accumulator used only during post-processing."""
+    def __init__(self, channels: int = 1) -> None:
+        self.channels = channels
+        self.counts = [0] * channels
+        self.squares = [0] * channels
+        self.peaks = [0] * channels
+
+    def add(self, samples: array) -> None:
+        for channel in range(self.channels):
+            values = samples[channel::self.channels]
+            if not values:
+                continue
+            # Peak remains exact. RMS sampling bounds Python work while still
+            # covering the entire recording at a fixed, content-independent
+            # cadence (no level-dependent gain or pumping).
+            self.peaks[channel] = max(
+                self.peaks[channel], max(values), -min(values))
+            sampled = values[::RMS_SAMPLE_STRIDE_FRAMES]
+            self.counts[channel] += len(sampled)
+            self.squares[channel] += sum(int(value) * int(value) for value in sampled)
+
+    @staticmethod
+    def _dbfs(value: float) -> float | None:
+        return 20.0 * math.log10(value / 32768.0) if value else None
+
+    def fields(self, stage: str) -> dict[str, object]:
+        total_count = sum(self.counts)
+        rms = math.sqrt(sum(self.squares) / total_count) if total_count else 0.0
+        peak = max(self.peaks, default=0)
+        channel_rms = [math.sqrt(s / c) if c else 0.0 for s, c in zip(self.squares, self.counts)]
+        return {"audio_stage": stage, "rms": rms, "rms_dbfs": self._dbfs(rms),
+                "peak": peak, "peak_dbfs": self._dbfs(peak),
+                "channel_rms_dbfs": [self._dbfs(value) for value in channel_rms],
+                "channel_peak_dbfs": [self._dbfs(value) for value in self.peaks],
+                "rms_sample_stride_frames": RMS_SAMPLE_STRIDE_FRAMES}
+
+
+def _mix_mono_with_diagnostics(render_samples: array, microphone_samples: array,
+                               mixed_stats: _LevelStatistics) -> tuple[array, int]:
+    """Mix and count clipping in one pass, preserving `_mix_mono` output."""
+    common_count = min(len(render_samples), len(microphone_samples))
+    mixed = array("h")
+    append = mixed.append
+    clipped = 0
+    peak = mixed_stats.peaks[0]
+    squares = mixed_stats.squares[0]
+    count = mixed_stats.counts[0]
+    for index in range(common_count):
+        value = int(render_samples[index]) + int(microphone_samples[index])
+        if value > 32767:
+            value = 32767
+            clipped += 1
+        elif value < -32768:
+            value = -32768
+            clipped += 1
+        append(value)
+        peak = max(peak, abs(value))
+        if index % RMS_SAMPLE_STRIDE_FRAMES == 0:
+            count += 1
+            squares += value * value
+
+    tail = (render_samples[common_count:] if len(render_samples) > common_count
+            else microphone_samples[common_count:])
+    for offset, sample in enumerate(tail, common_count):
+        value = int(sample)
+        append(value)
+        peak = max(peak, abs(value))
+        if offset % RMS_SAMPLE_STRIDE_FRAMES == 0:
+            count += 1
+            squares += value * value
+    mixed_stats.peaks[0] = peak
+    mixed_stats.counts[0] = count
+    mixed_stats.squares[0] = squares
+    return mixed, clipped
+
+
 def _mix_mono(render_samples: array, microphone_samples: array) -> array:
     common_count = min(len(render_samples), len(microphone_samples))
     mixed = array("h")
@@ -316,20 +409,40 @@ def _write_recording_pair(encoder, render_path: Path, microphone_path: Path,
         processed_frames = 0
         if progress is not None:
             progress(0, total_frames)
+        raw_render_stats = _LevelStatistics(render_params.nchannels)
+        raw_microphone_stats = _LevelStatistics(microphone_params.nchannels)
+        mono_render_stats = _LevelStatistics()
+        mono_microphone_stats = _LevelStatistics()
+        mixed_stats = _LevelStatistics()
+        clipped_samples = 0
 
         while True:
-            render_samples = _mono_samples(
-                render_file.readframes(MIX_FRAMES), render_params.nchannels
-            )
+            render_raw = _pcm16_samples(render_file.readframes(MIX_FRAMES))
+            microphone_raw = _pcm16_samples(microphone_file.readframes(MIX_FRAMES))
+            raw_render_stats.add(render_raw)
+            raw_microphone_stats.add(microphone_raw)
+            render_samples = _mono_samples(_pcm16_bytes(render_raw), render_params.nchannels)
             microphone_samples = _mono_samples(
-                microphone_file.readframes(MIX_FRAMES), microphone_params.nchannels
-            )
+                _pcm16_bytes(microphone_raw), microphone_params.nchannels)
             if not render_samples and not microphone_samples:
                 break
-            encoder.write_pcm(_pcm16_bytes(_mix_mono(render_samples, microphone_samples)))
+            mono_render_stats.add(render_samples)
+            mono_microphone_stats.add(microphone_samples)
+            mixed, block_clipped = _mix_mono_with_diagnostics(
+                render_samples, microphone_samples, mixed_stats)
+            clipped_samples += block_clipped
+            encoder.write_pcm(_pcm16_bytes(mixed))
             processed_frames += max(len(render_samples), len(microphone_samples))
             if progress is not None:
                 progress(min(processed_frames, total_frames), total_frames)
+        logger = logging.getLogger("work_audio_capture")
+        for stats, stage in ((raw_render_stats, "raw_render"),
+                             (raw_microphone_stats, "raw_microphone"),
+                             (mono_render_stats, "downmixed_render"),
+                             (mono_microphone_stats, "downmixed_microphone")):
+            logger.info("audio level diagnostics", extra=stats.fields(stage))
+        logger.info("audio level diagnostics", extra={
+            **mixed_stats.fields("final_mix"), "clipped_samples": clipped_samples})
 
 
 def _recording_chunks(directory: Path, stem: str) -> dict[int, Path]:
@@ -600,6 +713,8 @@ def run() -> int:
         backend = NativeWasapiBackend()
         try:
             render_endpoints, microphone_endpoints = backend.endpoints()
+            role_defaults = (backend.default_endpoints(render_endpoints, microphone_endpoints)
+                             if hasattr(backend, "default_endpoints") else {})
         finally:
             backend.close()
     except Exception as exc:
@@ -615,13 +730,22 @@ def run() -> int:
         return 1
 
     endpoint_log = {
+        "selected_render_id": str(render.index),
+        "selected_render_name": render.name,
         "render_name": render.name,
         "render_channels": render.channels,
         "render_sample_rate": render.sample_rate,
+        "render_channel_mask": getattr(render, "channel_mask", None),
+        "selected_microphone_id": str(microphone.index),
+        "selected_microphone_name": microphone.name,
         "microphone_name": microphone.name,
         "microphone_channels": microphone.channels,
         "microphone_sample_rate": microphone.sample_rate,
+        "microphone_channel_mask": getattr(microphone, "channel_mask", None),
     }
+    for key, endpoint in role_defaults.items():
+        endpoint_log[f"default_{key}_id"] = str(endpoint.index) if endpoint else None
+        endpoint_log[f"default_{key}_name"] = endpoint.name if endpoint else None
     diagnostic_log = {**environment_log, **endpoint_log}
     logger.info("Selected audio endpoints", extra=diagnostic_log)
 
@@ -638,7 +762,10 @@ def run() -> int:
         print(f"Could not lock recording session: {output}", file=sys.stderr)
         return 1
     try:
-        _write_session_state(output, RECOVERY_PENDING)
+        _write_session_state(output, RECOVERY_PENDING, metadata={
+            "render_channel_mask": endpoint_log["render_channel_mask"],
+            "microphone_channel_mask": endpoint_log["microphone_channel_mask"],
+        })
     except BaseException:
         session_lock.release()
         raise
