@@ -121,6 +121,57 @@ def test_mix_clamps_pcm16_overflow():
     assert mixed.tolist() == [32767, -32768]
 
 
+def test_level_diagnostics_silent_pcm():
+    raw = record_one_click._LevelStatistics(2)
+    samples = array("h", [0, 0] * 32)
+    raw.add(samples)
+
+    assert raw.fields("raw")["rms"] == 0
+    assert raw.fields("raw")["peak"] == 0
+
+
+def test_level_diagnostics_known_amplitude_and_pcm16_peaks():
+    stats = record_one_click._LevelStatistics()
+    stats.add(array("h", [4096, 32767, -32768] + [4096] * 29))
+    fields = stats.fields("known")
+
+    assert fields["rms"] == 4096
+    assert fields["peak"] == 32768
+
+
+def test_level_diagnostics_tracks_each_channel_independently():
+    raw = record_one_click._LevelStatistics(3)
+    raw.add(array("h", [100, 200, -300] * 32))
+
+    fields = raw.fields("raw")
+    assert fields["channel_rms_dbfs"] == pytest.approx([
+        record_one_click._LevelStatistics._dbfs(100),
+        record_one_click._LevelStatistics._dbfs(200),
+        record_one_click._LevelStatistics._dbfs(300),
+    ])
+    assert fields["channel_peak_dbfs"] == pytest.approx(fields["channel_rms_dbfs"])
+
+
+@pytest.mark.parametrize(("render", "microphone", "clipped"), [
+    ([100, -100], [200, -200], 0),
+    ([32767], [1], 1),
+    ([-32768], [-1], 1),
+    ([1, 2, 3], [4], 0),
+    ([4], [1, 2, 3], 0),
+])
+def test_mix_diagnostics_is_bit_identical_and_counts_clipping(
+        render, microphone, clipped):
+    render_samples = array("h", render)
+    microphone_samples = array("h", microphone)
+    stats = record_one_click._LevelStatistics()
+
+    actual, actual_clipped = record_one_click._mix_mono_with_diagnostics(
+        render_samples, microphone_samples, stats)
+
+    assert actual == record_one_click._mix_mono(render_samples, microphone_samples)
+    assert actual_clipped == clipped
+
+
 def test_json_formatter_preserves_endpoint_and_runtime_diagnostics():
     record = logging.LogRecord("work_audio_capture", logging.INFO, __file__, 1, "Selected audio endpoints", (), None)
     record.python_version = "3.13.0"

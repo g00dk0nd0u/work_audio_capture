@@ -290,17 +290,42 @@ class _LevelStatistics:
                 "rms_sample_stride_frames": RMS_SAMPLE_STRIDE_FRAMES}
 
 
-def _mix_mono_diagnostics(render_samples: array, microphone_samples: array,
-                          mixed_stats: _LevelStatistics) -> tuple[array, int]:
-    """Preserve the established mixer and collect bounded-cost diagnostics."""
+def _mix_mono_with_diagnostics(render_samples: array, microphone_samples: array,
+                               mixed_stats: _LevelStatistics) -> tuple[array, int]:
+    """Mix and count clipping in one pass, preserving `_mix_mono` output."""
     common_count = min(len(render_samples), len(microphone_samples))
-    clipped = sum(
-        int(render_samples[index]) + int(microphone_samples[index]) > 32767 or
-        int(render_samples[index]) + int(microphone_samples[index]) < -32768
-        for index in range(common_count)
-    )
-    mixed = _mix_mono(render_samples, microphone_samples)
-    mixed_stats.add(mixed)
+    mixed = array("h")
+    append = mixed.append
+    clipped = 0
+    peak = mixed_stats.peaks[0]
+    squares = mixed_stats.squares[0]
+    count = mixed_stats.counts[0]
+    for index in range(common_count):
+        value = int(render_samples[index]) + int(microphone_samples[index])
+        if value > 32767:
+            value = 32767
+            clipped += 1
+        elif value < -32768:
+            value = -32768
+            clipped += 1
+        append(value)
+        peak = max(peak, abs(value))
+        if index % RMS_SAMPLE_STRIDE_FRAMES == 0:
+            count += 1
+            squares += value * value
+
+    tail = (render_samples[common_count:] if len(render_samples) > common_count
+            else microphone_samples[common_count:])
+    for offset, sample in enumerate(tail, common_count):
+        value = int(sample)
+        append(value)
+        peak = max(peak, abs(value))
+        if offset % RMS_SAMPLE_STRIDE_FRAMES == 0:
+            count += 1
+            squares += value * value
+    mixed_stats.peaks[0] = peak
+    mixed_stats.counts[0] = count
+    mixed_stats.squares[0] = squares
     return mixed, clipped
 
 
@@ -403,7 +428,7 @@ def _write_recording_pair(encoder, render_path: Path, microphone_path: Path,
                 break
             mono_render_stats.add(render_samples)
             mono_microphone_stats.add(microphone_samples)
-            mixed, block_clipped = _mix_mono_diagnostics(
+            mixed, block_clipped = _mix_mono_with_diagnostics(
                 render_samples, microphone_samples, mixed_stats)
             clipped_samples += block_clipped
             encoder.write_pcm(_pcm16_bytes(mixed))
