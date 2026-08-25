@@ -268,7 +268,7 @@ def test_publish_failure_keeps_wavs_and_existing_final(tmp_path, monkeypatch):
     real_replace = Path.replace
 
     def fail_publish(source, destination):
-        if str(source).endswith(".mp3.part"):
+        if str(source).endswith(".part.mp3"):
             raise PermissionError(13, "output directory became read-only")
         return real_replace(source, destination)
 
@@ -280,7 +280,7 @@ def test_publish_failure_keeps_wavs_and_existing_final(tmp_path, monkeypatch):
 
     assert render.exists() and microphone.exists()
     assert final.read_bytes() == b"existing recording"
-    assert not (tmp_path / "recording_0001.mp3.part").exists()
+    assert not (tmp_path / "recording_0001.part.mp3").exists()
 
 
 def test_unsupported_sample_rate_keeps_source_wavs(tmp_path):
