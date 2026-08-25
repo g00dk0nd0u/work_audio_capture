@@ -27,7 +27,9 @@ def _contains_mp3_frame_sync(data: bytes) -> bool:
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Media Foundation is Windows-only")
 def test_windows_media_foundation_mp3_smoke(tmp_path):
-    output = tmp_path / "smoke.mp3"
+    # Keep the transactional temporary marker before .mp3: Media Foundation
+    # selects the sink from the final extension passed to the Sink Writer.
+    output = tmp_path / "smoke.part.mp3"
     # Two seconds is long enough that an 80 kbps CBR output should be dominated by
     # audio frames rather than container/header overhead, while remaining a tiny CI test.
     with Mp3Encoder(output, sample_rate=48_000, bitrate_bps=80_000) as encoder:

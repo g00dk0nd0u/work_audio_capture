@@ -7,7 +7,7 @@ simultaneous WASAPI capture
   -> recovery WAV chunks (about 10 minutes each)
   -> Ctrl+C / capture stop
   -> validate and sequentially mix/downmix matched chunks
-  -> one Media Foundation MP3 written as <final-name>.mp3.part
+  -> one Media Foundation MP3 written as <final-name>.part.mp3
   -> finalize encoder
   -> atomic replace to <final-name>.mp3
   -> delete only the source WAVs incorporated into the published MP3
@@ -15,7 +15,7 @@ simultaneous WASAPI capture
 
 Recovery WAVs live under `%LOCALAPPDATA%\WorkAudioCapture\<session>` and the published normal MP3 lives in the repository/distribution `recordings` directory. Multiple WAV pairs are fed, in chunk-number order, through one bounded-memory encoder; they do not become multiple numbered MP3 outputs.
 
-The terminal reports `Creating final MP3: N%`. Publication is the transaction boundary: the final path is not exposed until the complete MP3 is finalized, non-empty, and renamed from `.part`.
+The terminal reports `Creating final MP3: N%`. Publication is the transaction boundary: the final path is not exposed until the complete MP3 is finalized, non-empty, and renamed from `<final-name>.part.mp3`.
 
 ## Cancellation and failure
 

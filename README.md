@@ -58,7 +58,7 @@ Choose [1]:
 
 ## データ保護と MP3 確定
 
-MP3 は最終名に `.part` を付けた一時ファイルへ生成し、全 chunk の encode / finalize が成功してから最終名へ atomic publish します。正常に取り込まれた source WAV を削除するのは publish 成功後だけです。
+MP3 は最終名の `.mp3` の直前に `.part` を付けた `<final-name>.part.mp3` へ生成し、全 chunk の encode / finalize が成功してから最終名へ atomic publish します。正常に取り込まれた source WAV を削除するのは publish 成功後だけです。
 
 MP3 生成中にもう一度 `Ctrl+C` を押すと後処理をキャンセルします。変換失敗・finalize 失敗・キャンセル時は `.part` を削除し、WAV と session metadata を復旧用に保持します。詳細は [`docs/POSTPROCESSING.md`](docs/POSTPROCESSING.md) を参照してください。
 
@@ -130,7 +130,7 @@ See [`docs/RECOVERY.md`](docs/RECOVERY.md) for details.
 
 ## Transactional publishing and data safety
 
-The MP3 is written to a temporary file whose name ends in `.part`, finalized, and atomically published to its final name. Incorporated source WAVs are deleted only after successful publication. A second `Ctrl+C` during MP3 creation cancels post-processing. Cancellation or failure removes the partial output while preserving WAVs and session metadata for recovery. See [`docs/POSTPROCESSING.md`](docs/POSTPROCESSING.md).
+The MP3 is written to `<final-name>.part.mp3` so that its temporary path retains the `.mp3` extension, finalized, and atomically published to its final name. Incorporated source WAVs are deleted only after successful publication. A second `Ctrl+C` during MP3 creation cancels post-processing. Cancellation or failure removes the partial output while preserving WAVs and session metadata for recovery. See [`docs/POSTPROCESSING.md`](docs/POSTPROCESSING.md).
 
 ## Diagnostics and current limitations
 
