@@ -21,27 +21,41 @@ jobs:
           from pathlib import Path
 
           dist = Path("distribution_audio_capture")
-          mirrors = {
+          entry_points = {
               Path("run.py"): dist / "run.py",
               Path("record_one_click.py"): dist / "record_one_click.py",
           }
-          mirrors.update({
-              path: dist / path
-              for path in Path("src/audio_capture").glob("*.py")
-          })
-
           problems = [
               f"{source} != {packaged}"
-              for source, packaged in mirrors.items()
+              for source, packaged in entry_points.items()
               if not packaged.is_file() or source.read_bytes() != packaged.read_bytes()
           ]
+
+          source_dir = Path("src/audio_capture")
+          packaged_dir = dist / source_dir
+          source_files = {path.name: path for path in source_dir.glob("*.py")}
+          packaged_files = {path.name: path for path in packaged_dir.glob("*.py")}
+
+          missing = sorted(source_files.keys() - packaged_files.keys())
+          extra = sorted(packaged_files.keys() - source_files.keys())
+          mismatched = sorted(
+              name for name in source_files.keys() & packaged_files.keys()
+              if source_files[name].read_bytes() != packaged_files[name].read_bytes()
+          )
+          problems.extend(f"missing in distribution: {name}" for name in missing)
+          problems.extend(f"extra/stale in distribution: {name}" for name in extra)
+          problems.extend(f"byte mismatch: {name}" for name in mismatched)
+
           if problems:
               raise SystemExit(
                   "distribution runtime is stale or incomplete:\n- "
                   + "\n- ".join(problems)
               )
 
-          print(f"Distribution runtime synchronized: {len(mirrors)} files")
+          print(
+              "Distribution runtime synchronized: "
+              f"{len(entry_points) + len(source_files)} files"
+          )
           PY
       - run: git diff --check
   windows-native-smoke:
