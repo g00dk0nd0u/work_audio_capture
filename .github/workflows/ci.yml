@@ -14,71 +14,48 @@ jobs:
       - run: python run.py --help
       - name: Compile repository and distribution Python
         run: python -m compileall -q run.py record_one_click.py src tests distribution_audio_capture
-      - name: Verify distribution ZIP matches distribution directory
+      - name: Verify distribution runtime mirrors source
         shell: bash
         run: |
           python - <<'PY'
-          from pathlib import Path, PurePosixPath
-          from zipfile import ZipFile
+          from pathlib import Path
 
           dist = Path("distribution_audio_capture")
-          archive = Path("distribution_audio_capture.zip")
-
-          def is_distribution_file(path: Path) -> bool:
-              return (
-                  path.is_file()
-                  and "__pycache__" not in path.parts
-                  and path.suffix != ".pyc"
-              )
-
-          expected = {
-              path.relative_to(dist).as_posix(): path.read_bytes()
-              for path in dist.rglob("*")
-              if is_distribution_file(path)
+          entry_points = {
+              Path("run.py"): dist / "run.py",
+              Path("record_one_click.py"): dist / "record_one_click.py",
           }
+          problems = [
+              f"{source} != {packaged}"
+              for source, packaged in entry_points.items()
+              if not packaged.is_file() or source.read_bytes() != packaged.read_bytes()
+          ]
 
-          actual = {}
-          unexpected_roots = []
-          duplicates = []
-          with ZipFile(archive) as zf:
-              for info in zf.infolist():
-                  if info.is_dir():
-                      continue
-                  member = PurePosixPath(info.filename)
-                  if not member.parts or member.parts[0] != dist.name:
-                      unexpected_roots.append(info.filename)
-                      continue
-                  relative = PurePosixPath(*member.parts[1:]).as_posix()
-                  if relative in actual:
-                      duplicates.append(info.filename)
-                  actual[relative] = zf.read(info)
+          source_dir = Path("src/audio_capture")
+          packaged_dir = dist / source_dir
+          source_files = {path.name: path for path in source_dir.glob("*.py")}
+          packaged_files = {path.name: path for path in packaged_dir.glob("*.py")}
 
-          missing = sorted(set(expected) - set(actual))
-          extra = sorted(set(actual) - set(expected))
-          changed = sorted(
-              name for name in set(expected) & set(actual)
-              if expected[name] != actual[name]
+          missing = sorted(source_files.keys() - packaged_files.keys())
+          extra = sorted(packaged_files.keys() - source_files.keys())
+          mismatched = sorted(
+              name for name in source_files.keys() & packaged_files.keys()
+              if source_files[name].read_bytes() != packaged_files[name].read_bytes()
           )
-
-          problems = []
-          if unexpected_roots:
-              problems.append(f"unexpected ZIP roots: {unexpected_roots}")
-          if duplicates:
-              problems.append(f"duplicate ZIP files: {duplicates}")
-          if missing:
-              problems.append(f"missing from ZIP: {missing}")
-          if extra:
-              problems.append(f"extra in ZIP: {extra}")
-          if changed:
-              problems.append(f"byte mismatch: {changed}")
+          problems.extend(f"missing in distribution: {name}" for name in missing)
+          problems.extend(f"extra/stale in distribution: {name}" for name in extra)
+          problems.extend(f"byte mismatch: {name}" for name in mismatched)
 
           if problems:
               raise SystemExit(
-                  "distribution_audio_capture.zip is stale or inconsistent:\n- "
+                  "distribution runtime is stale or incomplete:\n- "
                   + "\n- ".join(problems)
               )
 
-          print(f"Distribution ZIP synchronized: {len(expected)} files")
+          print(
+              "Distribution runtime synchronized: "
+              f"{len(entry_points) + len(source_files)} files"
+          )
           PY
       - run: git diff --check
   windows-native-smoke:

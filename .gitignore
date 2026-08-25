@@ -7,3 +7,4 @@ __pycache__/
 *.lnk
 /recordings/
 /distribution_audio_capture/recordings/
+/distribution_audio_capture.zip
