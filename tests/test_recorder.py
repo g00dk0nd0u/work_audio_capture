@@ -648,6 +648,98 @@ def test_low_disk_rollover_closes_valid_current_wav_without_opening_next(
         assert recording.getnframes() > 0
 
 
+def test_two_stream_low_disk_rollover_is_a_graceful_stop(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr("audio_capture.recorder.shutil.disk_usage", lambda path: (
+        calls.append(path) or type("Usage", (), {"free": 0})()))
+
+    class BoundaryClock:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self):
+            self.calls += 1
+            return 0.0 if self.calls == 1 else 2.0
+
+    backend = FakeBackend()
+    recorder = ConcurrentRecorder(
+        backend, frames_per_buffer=8, chunk_duration_seconds=1,
+        clock=BoundaryClock(), mono_output=True,
+        recovery_disk_safety_path=tmp_path,
+    )
+    render = Endpoint(1, "render", 2, 8000, "render-loopback")
+    microphone = Endpoint(2, "microphone", 1, 8000, "microphone")
+    render_path = tmp_path / "render_0001.wav"
+    microphone_path = tmp_path / "microphone_0001.wav"
+
+    recorder.record(render, microphone, render_path, microphone_path)
+
+    assert recorder.stop_event.is_set()
+    assert recorder.errors == []
+    assert calls == [tmp_path]
+    assert not (tmp_path / "render_0002.wav").exists()
+    assert not (tmp_path / "microphone_0002.wav").exists()
+    for current in (render_path, microphone_path):
+        with wave.open(str(current), "rb") as recording:
+            assert recording.getnframes() > 0
+
+
+def test_disk_query_failure_does_not_mask_original_capture_error(
+        tmp_path, monkeypatch, caplog):
+    query_calls = []
+
+    def query_failure(path):
+        query_calls.append(path)
+        raise OSError("disk query failed")
+
+    monkeypatch.setattr("audio_capture.recorder.shutil.disk_usage", query_failure)
+
+    class FailingReadStream(FakeStream):
+        def __init__(self):
+            super().__init__()
+            self.reads = 0
+
+        def read(self, frames, exception_on_overflow=False):
+            self.reads += 1
+            if self.reads == 2:
+                raise PermissionError(13, "capture access lost")
+            return super().read(frames, exception_on_overflow)
+
+    class ErrorBackend(FakeBackend):
+        def open_input(self, endpoint, frames_per_buffer):
+            stream = FailingReadStream() if endpoint.kind == "render-loopback" else FakeStream()
+            self.streams.append(stream)
+            return stream
+
+    class BoundaryClock:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self):
+            self.calls += 1
+            return 0.0 if self.calls == 1 else 2.0
+
+    recorder = ConcurrentRecorder(
+        ErrorBackend(), frames_per_buffer=8, chunk_duration_seconds=1,
+        clock=BoundaryClock(), mono_output=True,
+        recovery_disk_safety_path=tmp_path,
+    )
+    render = Endpoint(1, "render", 1, 8000, "render-loopback")
+    microphone = Endpoint(2, "microphone", 1, 8000, "microphone")
+    caplog.set_level("WARNING", logger="work_audio_capture")
+
+    with pytest.raises(RuntimeError, match="capture access lost") as raised:
+        recorder.record(render, microphone, tmp_path / "render_0001.wav",
+                        tmp_path / "microphone_0001.wav")
+
+    assert isinstance(raised.value.__cause__.__cause__, PermissionError)
+    assert query_calls == [tmp_path]
+    assert len(recorder.errors) == 1
+    assert "capture access lost" in str(recorder.errors[0])
+    assert all("disk query failed" not in str(error) for error in recorder.errors)
+    assert "query failed; continuing capture" in caplog.text
+
+
 @pytest.mark.parametrize(
     ("failing_kind", "failure"),
     [

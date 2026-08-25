@@ -47,6 +47,8 @@ def main() -> int:
     )
     parser.add_argument("--recovery-disk-safety", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.recovery_disk_safety and not args.mono_wav:
+        parser.error("--recovery-disk-safety requires --mono-wav")
     if args.command == "doctor" and args.backend == "native":
         return 0 if run_doctor() else 1
 
