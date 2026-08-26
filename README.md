@@ -4,7 +4,7 @@ Windows PC の再生音声（Teams / Zoom / YouTube など）とマイク音声�
 
 - Windows 専用、Python 3.10 以降
 - system playback + microphone の同時 native WASAPI capture
-- Media Foundation による mono / 80 kbps MP3（約 36 MB/時）
+- Media Foundation による mono MP3（通常は 48 kbps、明示指定で 80 kbps）
 - 約 10 分ごとの recovery WAV と 12 時間の録音安全上限
 
 ---
@@ -21,13 +21,22 @@ python record_one_click.py
 
 Windows の既定の再生デバイスとマイクが自動選択され、同時に録音されます。停止するにはコマンド画面で `Ctrl+C` を **1 回**押します（ウィンドウの X で閉じないでください）。
 
-停止後、保存済み recovery WAV を順番に mix / mono downmix し、1 本の MP3 を作ります。
+通常の one-click 表示は次のようになります。
 
 ```text
-Recording stopped. Creating MP3 now. Source WAV files are already safe; please wait.
-Press Ctrl+C again only if you want to cancel MP3 creation.
-Creating final MP3:  37%
+Session active.
 ```
+
+停止後、保存済み recovery WAV を順番に mix / mono downmix し、1 本の MP3 を作ります。進捗は同じ行で更新されます。
+
+```text
+Finalizing...   0%
+Finalizing...  37%
+Finalizing... 100%
+Completed.
+```
+
+通常の bitrate は 48 kbps です。必要な場合のみ `python record_one_click.py --mp3-bitrate 80000` で 80 kbps を明示指定できます。
 
 完了すると出力フォルダが開き、最終ファイルは実行したリポジトリまたは配布フォルダ直下の次の場所にあります。
 
@@ -44,8 +53,9 @@ recordings\YYYY-MM-DD_HH-MM-SS.mp3
 次回起動時に `recovery_pending` session があると表示されます。
 
 ```text
-[1] Start a new recording now
-[2] Repair all interrupted recordings
+Previous session(s) need attention.
+[1] Start a new session
+[2] Repair previous session(s)
 Choose [1]:
 ```
 
@@ -101,7 +111,22 @@ python record_one_click.py
 
 The Windows default playback device and microphone are selected automatically. Press `Ctrl+C` **once** in the console to stop (do not close the window with X).
 
-After capture stops, the saved recovery WAV chunks are mixed/downmixed sequentially into one MP3. Wait for `Creating final MP3: N%` to finish. The output folder then opens, and the final file is stored relative to the repository or distribution you ran:
+Normal one-click output starts with:
+
+```text
+Session active.
+```
+
+After capture stops, the saved recovery WAV chunks are mixed/downmixed sequentially into one MP3. Progress updates in place on one line:
+
+```text
+Finalizing...   0%
+Finalizing...  37%
+Finalizing... 100%
+Completed.
+```
+
+The normal default is 48 kbps. Use `python record_one_click.py --mp3-bitrate 80000` only when explicitly choosing 80 kbps. The output folder then opens, and the final file is stored relative to the repository or distribution you ran:
 
 ```text
 recordings\YYYY-MM-DD_HH-MM-SS.mp3
@@ -116,8 +141,9 @@ During capture, internal recovery WAVs are rotated approximately every 10 minute
 On startup, a `recovery_pending` session can show:
 
 ```text
-[1] Start a new recording now
-[2] Repair all interrupted recordings
+Previous session(s) need attention.
+[1] Start a new session
+[2] Repair previous session(s)
 Choose [1]:
 ```
 

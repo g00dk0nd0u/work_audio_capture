@@ -166,6 +166,32 @@ def test_successful_finalization_uses_one_neutral_zero_to_100_line(
     ))
 
 
+def test_cleanup_failure_does_not_report_100_percent(
+        tmp_path, monkeypatch, capsys):
+    render = tmp_path / "render_0001.wav"
+    microphone = tmp_path / "microphone_0001.wav"
+    _write_mono(render, [1, 2])
+    _write_mono(microphone, [3, 4])
+    monkeypatch.setattr(record_one_click, "MP3_ENCODER_FACTORY", _ProgressEncoder)
+    real_unlink = Path.unlink
+
+    def fail_cleanup(path, *args, **kwargs):
+        if path == microphone:
+            raise OSError("simulated recovery cleanup failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_cleanup)
+
+    with pytest.raises(OSError, match="recovery cleanup failure"):
+        record_one_click._mix_available_chunks(
+            tmp_path, logging.getLogger("test-cleanup-progress")
+        )
+
+    output = capsys.readouterr().out
+    assert "Finalizing... 100%" not in output
+    assert (tmp_path / "recording_0001.mp3").exists()
+
+
 def test_open_output_folder_uses_windows_startfile(tmp_path, monkeypatch, capsys, caplog):
     opened = []
     monkeypatch.setattr(os, "startfile", lambda path: opened.append(path), raising=False)

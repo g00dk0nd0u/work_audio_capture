@@ -3,7 +3,6 @@
 from datetime import datetime
 from array import array
 from contextlib import redirect_stdout
-import io
 import json
 import logging
 import math
@@ -707,8 +706,6 @@ def _mix_available_chunks(output: Path, logger: logging.Logger,
         if not temp_path.exists() or temp_path.stat().st_size <= 0:
             raise ValueError("MP3 encoder did not produce a non-empty output; source WAVs were kept")
         temp_path.replace(final_path)
-        report_progress(1, 1)
-        print()
     except BaseException:
         print()
         # Cleanup is best-effort: a second permissions error must not hide the
@@ -722,8 +719,14 @@ def _mix_available_chunks(output: Path, logger: logging.Logger,
 
     # Transaction boundary: sources survive until the complete MP3 is finalized
     # and atomically published.
-    for path in (path for pair in pairs for path in pair):
-        path.unlink()
+    try:
+        for path in (path for pair in pairs for path in pair):
+            path.unlink()
+    except BaseException:
+        print()
+        raise
+    report_progress(1, 1)
+    print()
     return final_path
 
 
@@ -918,8 +921,9 @@ def run(arguments: list[str] | None = None) -> int:
     try:
         try:
             print("Session active.")
-            with redirect_stdout(io.StringIO()):
-                result = main()
+            with open(os.devnull, "w", encoding="utf-8") as discarded_stdout:
+                with redirect_stdout(discarded_stdout):
+                    result = main()
         except Exception as exc:
             print(f"Recording command failed unexpectedly: {exc}", file=sys.stderr)
             logger.exception(
