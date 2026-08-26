@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Protocol
 
 from .model import Endpoint
+from .sparse_writer import SparseRecoveryWriter
+from .timeline import StreamTimelineMapper, query_performance_counter_100ns
 
 MAX_PCM_DATA_BYTES = (7 * 1024**3) // 2
 MAX_RECORDING_SECONDS = 12 * 60 * 60
@@ -46,6 +48,14 @@ class StreamStatistics:
     chunks_opened: int = 0
     chunks_completed: int = 0
     terminal_status: str = "normal_stop"
+    first_packet_session_offset_ms: float | None = None
+    trusted_timeline_frames: int = 0
+    untrusted_packet_count: int = 0
+    data_discontinuity_events: int = 0
+    timestamp_error_events: int = 0
+    device_position_regression_events: int = 0
+    timeline_gap_frames_filled: int = 0
+    occupied_recovery_slots: int = 0
 
     @property
     def audio_duration_seconds(self) -> float:
@@ -87,6 +97,14 @@ class StreamStatistics:
             "chunks_opened": self.chunks_opened,
             "chunks_completed": self.chunks_completed,
             "terminal_status": self.terminal_status,
+            "first_packet_session_offset_ms": self.first_packet_session_offset_ms,
+            "trusted_timeline_frames": self.trusted_timeline_frames,
+            "untrusted_packet_count": self.untrusted_packet_count,
+            "data_discontinuity_events": self.data_discontinuity_events,
+            "timestamp_error_events": self.timestamp_error_events,
+            "device_position_regression_events": self.device_position_regression_events,
+            "timeline_gap_frames_filled": self.timeline_gap_frames_filled,
+            "occupied_recovery_slots": self.occupied_recovery_slots,
         }
 
 
@@ -200,7 +218,8 @@ class ConcurrentRecorder:
                  max_recording_seconds: float = MAX_RECORDING_SECONDS,
                  shutdown_timeout_seconds: float = 5.0, clock=time.monotonic,
                  diagnostics_clock=time.monotonic,
-                 recovery_disk_safety_path: Path | None = None) -> None:
+                 recovery_disk_safety_path: Path | None = None,
+                 session_qpc_clock=query_performance_counter_100ns) -> None:
         self.backend = backend
         self.frames = frames_per_buffer
         self.chunk_duration_seconds = chunk_duration_seconds
@@ -210,6 +229,8 @@ class ConcurrentRecorder:
         self.clock = clock
         self.diagnostics_clock = diagnostics_clock
         self.recovery_disk_safety_path = recovery_disk_safety_path
+        self.session_qpc_clock = session_qpc_clock
+        self.session_qpc_origin_100ns: int | None = None
         self.stop_event = threading.Event()
         self.errors: list[BaseException] = []
         self._errors_lock = threading.Lock()
@@ -229,6 +250,9 @@ class ConcurrentRecorder:
         self._required_recovery_free_bytes = required_recovery_free_bytes(
             render.sample_rate, microphone.sample_rate, self.chunk_duration_seconds)
         started_at = self.clock()
+        self.session_qpc_origin_100ns = (
+            self.session_qpc_clock()
+            if getattr(self.backend, "packet_timestamps", False) else None)
         self._chunk_deadline = (started_at + self.chunk_duration_seconds
                                 if self.chunk_duration_seconds > 0 else float("inf"))
         threads = [
@@ -359,6 +383,11 @@ class ConcurrentRecorder:
             if endpoint.channels < 1:
                 raise ValueError("audio endpoint reported no input channels")
 
+            if hasattr(stream, "read_packet"):
+                self._capture_packets(stream, endpoint, path, statistics,
+                                      sample_width)
+                return
+
             input_block_align = endpoint.channels * sample_width
             output_channels = 1 if self.mono_output else endpoint.channels
             output_block_align = output_channels * sample_width
@@ -463,3 +492,56 @@ class ConcurrentRecorder:
                 LOGGER.info("capture stream timing diagnostics", extra=statistics.log_fields())
             except BaseException:
                 pass
+
+    def _check_sparse_disk(self) -> None:
+        if self.recovery_disk_safety_path is None:
+            return
+        try:
+            free = shutil.disk_usage(self.recovery_disk_safety_path).free
+        except Exception as exc:
+            LOGGER.warning("recovery disk-space query failed; continuing capture: %s", exc)
+            return
+        if free < self._required_recovery_free_bytes:
+            self._disk_space_stop_requested = True
+            self.stop_event.set()
+            raise RuntimeError("recovery disk space is below the safety threshold")
+
+    def _capture_packets(self, stream, endpoint: Endpoint, path: Path,
+                         statistics: StreamStatistics, sample_width: int) -> None:
+        """Place native packets; legacy streams continue through byte reads."""
+        if self.session_qpc_origin_100ns is None:
+            raise RuntimeError("timestamped capture has no shared session QPC origin")
+        output_channels = 1 if self.mono_output else endpoint.channels
+        mapper = StreamTimelineMapper(endpoint.sample_rate,
+                                      self.session_qpc_origin_100ns)
+        writer = SparseRecoveryWriter(
+            lambda slot: self._chunk_path(path, slot + 1), endpoint.sample_rate,
+            output_channels, sample_width, self.chunk_duration_seconds,
+            self._check_sparse_disk,
+        )
+        statistics.capture_start_monotonic = self._diagnostics_now()
+        try:
+            while not self.stop_event.is_set():
+                packet = stream.read_packet()
+                if packet is None:
+                    continue
+                if packet.frame_count > MAX_PCM_DATA_BYTES // (output_channels * sample_width):
+                    raise ValueError("audio packet exceeds the WAV data limit")
+                pcm = (downmix_pcm16_mono(packet.pcm, endpoint.channels)
+                       if self.mono_output else packet.pcm)
+                placed = mapper.place(type(packet)(
+                    pcm, packet.frame_count, packet.device_position,
+                    packet.qpc_position_100ns, packet.flags))
+                writer.write(placed)
+                statistics.successful_read(packet.frame_count,
+                                           self._diagnostics_now())
+                statistics.total_pcm_bytes_written += len(pcm)
+            statistics.chunks_opened = len(writer.occupied_slots)
+            statistics.chunks_completed = len(writer.occupied_slots)
+        finally:
+            writer.close()
+            diagnostics = mapper.diagnostics
+            for name, value in diagnostics.__dict__.items():
+                setattr(statistics, name, value)
+            statistics.timeline_gap_frames_filled = writer.timeline_gap_frames_filled
+            statistics.occupied_recovery_slots = len(writer.occupied_slots)

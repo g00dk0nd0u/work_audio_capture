@@ -3,6 +3,7 @@
 from datetime import datetime
 from array import array
 from contextlib import redirect_stdout
+from contextlib import ExitStack
 import json
 import logging
 import math
@@ -12,6 +13,8 @@ import platform
 import re
 import shutil
 import sys
+import time
+from types import SimpleNamespace
 import wave
 
 
@@ -86,6 +89,11 @@ _LOG_EXTRA_FIELDS = (
     "chunks_opened",
     "chunks_completed",
     "terminal_status",
+    "first_packet_session_offset_ms", "trusted_timeline_frames",
+    "untrusted_packet_count", "data_discontinuity_events",
+    "timestamp_error_events", "device_position_regression_events",
+    "timeline_gap_frames_filled", "occupied_recovery_slots",
+    "final_session_duration_seconds",
     "render_audio_duration_seconds",
     "microphone_audio_duration_seconds",
     "duration_delta_seconds",
@@ -407,14 +415,21 @@ def _encode_chunk_pairs_mp3(pairs, output_path: Path, progress=None) -> None:
     """Encode ordered recovery pairs through one bounded-memory MP3 writer."""
     if not pairs:
         raise ValueError("no recording chunks were supplied")
-    with wave.open(str(pairs[0][0]), "rb") as first:
+    normalized = [(*pair, None) if len(pair) == 2 else pair for pair in pairs]
+    first_path = next((path for pair in normalized for path in pair[:2]
+                       if path is not None), None)
+    if first_path is None:
+        raise ValueError("no recoverable audio chunks were supplied")
+    with wave.open(str(first_path), "rb") as first:
         sample_rate = first.getframerate()
     pair_frames = []
-    for render_path, microphone_path in pairs:
-        with wave.open(str(render_path), "rb") as render_file, wave.open(
-            str(microphone_path), "rb"
-        ) as microphone_file:
-            pair_frames.append(max(render_file.getnframes(), microphone_file.getnframes()))
+    for render_path, microphone_path, timeline_frames in normalized:
+        counts = []
+        for path in (render_path, microphone_path):
+            if path is not None:
+                with wave.open(str(path), "rb") as source:
+                    counts.append(source.getnframes())
+        pair_frames.append(timeline_frames if timeline_frames is not None else max(counts))
     total_frames = sum(pair_frames)
     if progress is not None:
         progress(0, total_frames)
@@ -426,23 +441,32 @@ def _encode_chunk_pairs_mp3(pairs, output_path: Path, progress=None) -> None:
         output_path, sample_rate=sample_rate, bitrate_bps=MP3_BITRATE_BPS
     ) as encoder:
         completed_frames = 0
-        for (render_path, microphone_path), frames in zip(pairs, pair_frames):
+        for (render_path, microphone_path, _timeline_frames), frames in zip(normalized, pair_frames):
             pair_progress = None
             if progress is not None:
                 pair_progress = lambda done, _total, offset=completed_frames: progress(
                     min(offset + done, total_frames), total_frames
                 )
             _write_recording_pair(
-                encoder, render_path, microphone_path, sample_rate, pair_progress
+                encoder, render_path, microphone_path, sample_rate, pair_progress,
+                frames,
             )
             completed_frames += frames
 
 
-def _write_recording_pair(encoder, render_path: Path, microphone_path: Path,
-                          sample_rate: int, progress=None) -> None:
-    with wave.open(str(render_path), "rb") as render_file, wave.open(str(microphone_path), "rb") as microphone_file:
-        render_params = render_file.getparams()
-        microphone_params = microphone_file.getparams()
+def _write_recording_pair(encoder, render_path: Path | None,
+                          microphone_path: Path | None, sample_rate: int,
+                          progress=None, timeline_frames: int | None = None) -> None:
+    with ExitStack() as stack:
+        render_file = stack.enter_context(wave.open(str(render_path), "rb")) if render_path else None
+        microphone_file = stack.enter_context(wave.open(str(microphone_path), "rb")) if microphone_path else None
+        existing = render_file or microphone_file
+        silent_params = SimpleNamespace(framerate=sample_rate, sampwidth=2,
+                                        nchannels=1, nframes=0)
+        render_params = (render_file.getparams() if render_file else
+                         existing.getparams() if existing else silent_params)
+        microphone_params = (microphone_file.getparams() if microphone_file else
+                             existing.getparams() if existing else silent_params)
         if render_params.framerate != microphone_params.framerate:
             raise ValueError(
                 f"sample rate mismatch: render={render_params.framerate}Hz, "
@@ -460,7 +484,8 @@ def _write_recording_pair(encoder, render_path: Path, microphone_path: Path,
         if render_params.nchannels < 1 or microphone_params.nchannels < 1:
             raise ValueError("render and microphone WAVs must contain at least one channel; source WAVs were kept")
 
-        total_frames = max(render_params.nframes, microphone_params.nframes)
+        total_frames = (timeline_frames if timeline_frames is not None else
+                        max(render_params.nframes, microphone_params.nframes))
         processed_frames = 0
         raw_render_stats = _LevelStatistics(render_params.nchannels)
         raw_microphone_stats = _LevelStatistics(microphone_params.nchannels)
@@ -470,15 +495,22 @@ def _write_recording_pair(encoder, render_path: Path, microphone_path: Path,
         clipped_samples = 0
 
         while True:
-            render_raw = _pcm16_samples(render_file.readframes(MIX_FRAMES))
-            microphone_raw = _pcm16_samples(microphone_file.readframes(MIX_FRAMES))
+            requested = min(MIX_FRAMES, total_frames - processed_frames)
+            if requested <= 0:
+                break
+            render_raw = _pcm16_samples(
+                render_file.readframes(requested) if render_file else bytes(requested * 2))
+            microphone_raw = _pcm16_samples(
+                microphone_file.readframes(requested) if microphone_file else bytes(requested * 2))
+            if len(render_raw) < requested * render_params.nchannels:
+                render_raw.extend([0] * (requested * render_params.nchannels - len(render_raw)))
+            if len(microphone_raw) < requested * microphone_params.nchannels:
+                microphone_raw.extend([0] * (requested * microphone_params.nchannels - len(microphone_raw)))
             raw_render_stats.add(render_raw)
             raw_microphone_stats.add(microphone_raw)
             render_samples = _mono_samples(_pcm16_bytes(render_raw), render_params.nchannels)
             microphone_samples = _mono_samples(
                 _pcm16_bytes(microphone_raw), microphone_params.nchannels)
-            if not render_samples and not microphone_samples:
-                break
             mono_render_stats.add(render_samples)
             mono_microphone_stats.add(microphone_samples)
             mixed, block_clipped = _mix_mono_with_diagnostics(
@@ -553,6 +585,10 @@ def _readable_pair(render_path: Path, microphone_path: Path) -> None:
                 raise ValueError(f"incomplete WAV chunk: {path.name}")
 
 
+def _readable_chunk(path: Path) -> None:
+    _readable_pair(path, path)
+
+
 def _unique_recovered_path(session: Path) -> Path:
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     base = OUTPUT_ROOT / f"recovered_{session.name}.mp3"
@@ -594,20 +630,26 @@ def _repair_session(session: Path, logger: logging.Logger) -> str:
 def _repair_locked_session(session: Path, logger: logging.Logger) -> str:
     render = _recording_chunks(session, "render")
     microphone = _recording_chunks(session, "microphone")
-    common = sorted(render.keys() & microphone.keys())
+    sparse = any(_SLOT_WAV.fullmatch(path.name)
+                 for path in (*render.values(), *microphone.values()))
+    available = sorted(render.keys() | microphone.keys()) if sparse else sorted(
+        render.keys() & microphone.keys())
     readable = []
     problem = None
-    for number in common:
+    for number in available:
         try:
-            _readable_pair(render[number], microphone[number])
+            for path in (render.get(number), microphone.get(number)):
+                if path is not None:
+                    _readable_chunk(path)
         except Exception as exc:
             problem = str(exc)
             continue
         readable.append(number)
 
     unpaired = sorted(render.keys() ^ microphone.keys())
-    if problem is None and unpaired:
+    if not sparse and problem is None and unpaired:
         problem = f"unpaired chunks remain: {unpaired}"
+
     try:
         if not readable:
             raise ValueError(problem or "no safely readable matched chunks were found")
@@ -659,18 +701,40 @@ def _mix_available_chunks(output: Path, logger: logging.Logger,
                           chunk_numbers: list[int] | None = None) -> Path:
     render_chunks = _recording_chunks(output, "render")
     microphone_chunks = _recording_chunks(output, "microphone")
-    common_chunks = sorted(render_chunks.keys() & microphone_chunks.keys())
+    all_chunk_numbers = render_chunks.keys() | microphone_chunks.keys()
+    sparse = any(_SLOT_WAV.fullmatch(path.name)
+                 for path in (*render_chunks.values(), *microphone_chunks.values()))
+    timeline_sparse = sparse and (
+        render_chunks.keys() != microphone_chunks.keys() or
+        bool(all_chunk_numbers and
+             (set(range(min(all_chunk_numbers), max(all_chunk_numbers) + 1))
+              - all_chunk_numbers))
+    )
+    state = {}
+    try:
+        state = json.loads((output / SESSION_FILE).read_text(encoding="utf-8"))
+        timeline_sparse = timeline_sparse or bool(state.get("session_timeline_capture"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        pass
+    available_chunks = sorted(
+        render_chunks.keys() | microphone_chunks.keys() if sparse else
+        render_chunks.keys() & microphone_chunks.keys())
     if chunk_numbers is not None:
-        common_chunks = [number for number in chunk_numbers if number in common_chunks]
-    missing_render = sorted(microphone_chunks.keys() - render_chunks.keys())
-    missing_microphone = sorted(render_chunks.keys() - microphone_chunks.keys())
-    if missing_render or missing_microphone:
-        logger.warning(
-            "Unpaired recording chunks kept: missing_render=%s missing_microphone=%s",
-            missing_render, missing_microphone,
-        )
-    if not common_chunks:
-        raise ValueError("no matching render/microphone chunks were found; source WAVs were kept")
+        available_chunks = [number for number in chunk_numbers if number in available_chunks]
+    if not available_chunks:
+        raise ValueError("no render/microphone chunks were found; source WAVs were kept")
+    if not sparse:
+        missing_render = sorted(microphone_chunks.keys() - render_chunks.keys())
+        missing_microphone = sorted(render_chunks.keys() - microphone_chunks.keys())
+        if missing_render or missing_microphone:
+            logger.warning(
+                "Unpaired recording chunks kept: missing_render=%s missing_microphone=%s",
+                missing_render, missing_microphone,
+            )
+    # Slot filenames encode a shared timeline. Include absent middle slots and
+    # treat a missing endpoint as silence rather than dropping valid speech.
+    timeline_chunks = (list(range(min(available_chunks), max(available_chunks) + 1))
+                       if timeline_sparse else available_chunks)
 
     final_path = final_path or output / "recording_0001.mp3"
     final_path.parent.mkdir(parents=True, exist_ok=True)
@@ -690,17 +754,43 @@ def _mix_available_chunks(output: Path, logger: logging.Logger,
             log_percent = (percent // 10) * 10
             last_logged_percent = log_percent
             logger.info("MP3 post-processing progress", extra={
-                "postprocess_chunks": len(common_chunks), "postprocess_percent": percent})
+                "postprocess_chunks": len(timeline_chunks), "postprocess_percent": percent})
 
     try:
-        pairs = [(render_chunks[number], microphone_chunks[number]) for number in common_chunks]
+        pairs = []
+        for number in timeline_chunks:
+            render_path = render_chunks.get(number)
+            microphone_path = microphone_chunks.get(number)
+            timeline_frames = None
+            if timeline_sparse and number != timeline_chunks[-1]:
+                existing = render_path or microphone_path
+                if existing is not None:
+                    with wave.open(str(existing), "rb") as source:
+                        timeline_frames = source.getframerate() * DEFAULT_CHUNK_DURATION_SECONDS
+                else:
+                    # A fully absent middle slot uses the sample rate already
+                    # validated by an adjacent occupied slot.
+                    adjacent = next(path for path in (*render_chunks.values(), *microphone_chunks.values()))
+                    with wave.open(str(adjacent), "rb") as source:
+                        timeline_frames = source.getframerate() * DEFAULT_CHUNK_DURATION_SECONDS
+            elif timeline_sparse and state.get("session_duration_seconds") is not None:
+                existing = render_path or microphone_path
+                if existing is not None:
+                    with wave.open(str(existing), "rb") as source:
+                        rate = source.getframerate()
+                        end_frame = int(float(state["session_duration_seconds"]) * rate)
+                        slot_start = (number - 1) * DEFAULT_CHUNK_DURATION_SECONDS * rate
+                        timeline_frames = max(source.getnframes(), end_frame - slot_start)
+            pairs.append((render_path, microphone_path, timeline_frames))
         def encoding_progress(done_frames: int, total_frames: int) -> None:
             # Publishing is part of finalization, so reserve 100% for the
             # successful atomic replace below.
             report_progress(min(done_frames, max(total_frames - 1, 0)), total_frames)
 
-        if len(pairs) == 1:
-            _encode_recordings_mp3(*pairs[0], temp_path, encoding_progress)
+        if (not sparse and len(pairs) == 1 and
+                pairs[0][0] is not None and pairs[0][1] is not None):
+            _encode_recordings_mp3(pairs[0][0], pairs[0][1], temp_path,
+                                   encoding_progress)
         else:
             _encode_chunk_pairs_mp3(pairs, temp_path, encoding_progress)
         if not temp_path.exists() or temp_path.stat().st_size <= 0:
@@ -710,7 +800,7 @@ def _mix_available_chunks(output: Path, logger: logging.Logger,
         # Transaction boundary: sources survive until the complete MP3 is
         # finalized and atomically published. Finalization is not complete
         # until cleanup of every incorporated source succeeds.
-        for path in (path for pair in pairs for path in pair):
+        for path in {path for pair in pairs for path in pair[:2] if path is not None}:
             path.unlink()
     except BaseException:
         print()
@@ -896,6 +986,7 @@ def run(arguments: list[str] | None = None) -> int:
         _write_session_state(output, RECOVERY_PENDING, metadata={
             "render_channel_mask": endpoint_log["render_channel_mask"],
             "microphone_channel_mask": endpoint_log["microphone_channel_mask"],
+            "session_timeline_capture": True,
         })
     except BaseException:
         session_lock.release()
@@ -916,6 +1007,7 @@ def run(arguments: list[str] | None = None) -> int:
         "--recovery-disk-safety",
     ]
     recording_succeeded = False
+    recording_started = time.monotonic()
     try:
         try:
             print("Session active.")
@@ -937,6 +1029,13 @@ def run(arguments: list[str] | None = None) -> int:
                 extra={**diagnostic_log, "output_directory": str(output)},
             )
             return result
+
+        _write_session_state(output, RECOVERY_PENDING, metadata={
+            "render_channel_mask": endpoint_log["render_channel_mask"],
+            "microphone_channel_mask": endpoint_log["microphone_channel_mask"],
+            "session_timeline_capture": True,
+            "session_duration_seconds": max(0.0, time.monotonic() - recording_started),
+        })
 
         postprocess_result = _finish_mp3(output, logger, diagnostic_log, final_path)
         if postprocess_result != 0:

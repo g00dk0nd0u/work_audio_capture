@@ -817,3 +817,28 @@ def test_successful_encoding_with_unexpected_file_retains_failed_metadata(
     state = json.loads((session / record_one_click.SESSION_FILE).read_text())
     assert state["status"] == record_one_click.RECOVERY_FAILED
     assert record_one_click._pending_sessions(tmp_path) == []
+
+
+def test_sparse_microphone_only_slot_is_encoded_as_render_silence(tmp_path):
+    microphone = tmp_path / "mic_____00-10min.wav"
+    _write(microphone, 1, 48000, [123])
+
+    record_one_click._mix_available_chunks(tmp_path, logging.getLogger("test-sparse"))
+
+    assert _samples(bytes(_FakeEncoder.instances[0].data)) == [123]
+    assert not microphone.exists()
+
+
+def test_sparse_missing_middle_slot_preserves_silent_interval(tmp_path, monkeypatch):
+    monkeypatch.setattr(record_one_click, "DEFAULT_CHUNK_DURATION_SECONDS", 1)
+    for start, end, value in ((0, 10, 11), (20, 30, 22)):
+        _write(tmp_path / f"speaker_{start:02d}-{end:02d}min.wav", 1, 48000, [value])
+        _write(tmp_path / f"mic_____{start:02d}-{end:02d}min.wav", 1, 48000, [0])
+
+    record_one_click._mix_available_chunks(tmp_path, logging.getLogger("test-sparse"))
+
+    samples = _samples(bytes(_FakeEncoder.instances[0].data))
+    assert len(samples) == 96_001
+    assert samples[0] == 11
+    assert samples[48_000:96_000] == [0] * 48_000
+    assert samples[-1] == 22

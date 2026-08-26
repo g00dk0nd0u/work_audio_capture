@@ -175,3 +175,47 @@ def test_default_render_roles_are_diagnostic_and_tolerate_failure(monkeypatch, i
 
     assert [defaults[f"{role}_render"].index if defaults[f"{role}_render"] else None
             for role in ("console", "multimedia", "communications")] == list(ids)
+
+
+def test_read_packet_copies_metadata_before_release(monkeypatch):
+    pcm = ctypes.create_string_buffer(b"\x01\x00\x02\x00")
+    released = []
+
+    class Kernel:
+        def WaitForSingleObject(self, _event, milliseconds):
+            assert milliseconds == 200
+            return WAIT_OBJECT_0
+
+    def fake_method(_pointer, index, _restype, *_argtypes):
+        if index == 5:
+            return lambda _capture, available: (setattr(available._obj, "value", 2) or 0)
+        if index == 3:
+            def get_buffer(_capture, data, frames, flags, device, qpc):
+                data._obj.value = ctypes.addressof(pcm)
+                frames._obj.value = 2
+                flags._obj.value = 0
+                device._obj.value = 123
+                qpc._obj.value = 456
+                return 0
+            return get_buffer
+        if index == 4:
+            def release_buffer(_capture, frames):
+                released.append(frames)
+                ctypes.memset(ctypes.addressof(pcm), 0, 4)
+                return 0
+            return release_buffer
+        raise AssertionError(index)
+
+    stream = native.NativeWasapiStream.__new__(native.NativeWasapiStream)
+    stream.format = AudioFormat(1, 48000, 16, 16, "pcm", 2)
+    stream.capture = LPVOID(1)
+    stream.event = 123
+    monkeypatch.setattr(native, "_require_windows", lambda: (object(), Kernel()))
+    monkeypatch.setattr(native, "_method", fake_method)
+
+    packet = stream.read_packet()
+
+    assert packet.pcm == b"\x01\x00\x02\x00"
+    assert (packet.frame_count, packet.device_position,
+            packet.qpc_position_100ns, packet.flags) == (2, 123, 456, 0)
+    assert released == [2]
