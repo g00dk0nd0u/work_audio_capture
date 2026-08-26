@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Protocol
 
 from .model import Endpoint
+from .sparse_writer import GracefulStopRequested, SparseRecoveryWriter
+from .timeline import StreamTimelineMapper, query_performance_counter_100ns
 
 MAX_PCM_DATA_BYTES = (7 * 1024**3) // 2
 MAX_RECORDING_SECONDS = 12 * 60 * 60
@@ -46,6 +48,14 @@ class StreamStatistics:
     chunks_opened: int = 0
     chunks_completed: int = 0
     terminal_status: str = "normal_stop"
+    first_packet_session_offset_ms: float | None = None
+    trusted_timeline_frames: int = 0
+    untrusted_packet_count: int = 0
+    data_discontinuity_events: int = 0
+    timestamp_error_events: int = 0
+    device_position_regression_events: int = 0
+    timeline_gap_frames_filled: int = 0
+    occupied_recovery_slots: int = 0
 
     @property
     def audio_duration_seconds(self) -> float:
@@ -87,11 +97,22 @@ class StreamStatistics:
             "chunks_opened": self.chunks_opened,
             "chunks_completed": self.chunks_completed,
             "terminal_status": self.terminal_status,
+            "first_packet_session_offset_ms": self.first_packet_session_offset_ms,
+            "trusted_timeline_frames": self.trusted_timeline_frames,
+            "untrusted_packet_count": self.untrusted_packet_count,
+            "data_discontinuity_events": self.data_discontinuity_events,
+            "timestamp_error_events": self.timestamp_error_events,
+            "device_position_regression_events": self.device_position_regression_events,
+            "timeline_gap_frames_filled": self.timeline_gap_frames_filled,
+            "occupied_recovery_slots": self.occupied_recovery_slots,
         }
 
 
 def session_timing_fields(render: StreamStatistics,
-                          microphone: StreamStatistics) -> dict[str, float | None]:
+                          microphone: StreamStatistics,
+                          timestamped_timeline: bool = False,
+                          final_session_duration_seconds: float | None = None,
+                          ) -> dict[str, float | None]:
     render_duration = render.audio_duration_seconds
     microphone_duration = microphone.audio_duration_seconds
     # Positive means the microphone accumulated more audio than render.
@@ -112,7 +133,7 @@ def session_timing_fields(render: StreamStatistics,
         start_offset = (
             microphone.capture_start_monotonic - render.capture_start_monotonic
         ) * 1000.0
-    return {
+    fields = {
         "render_audio_duration_seconds": render_duration,
         "microphone_audio_duration_seconds": microphone_duration,
         "duration_delta_seconds": delta,
@@ -120,7 +141,12 @@ def session_timing_fields(render: StreamStatistics,
         "duration_drift_milliseconds": delta * 1000.0,
         "drift_rate_milliseconds_per_hour": drift_rate,
         "microphone_start_offset_milliseconds": start_offset,
+        "final_session_duration_seconds": final_session_duration_seconds,
     }
+    if timestamped_timeline:
+        fields["duration_drift_milliseconds"] = None
+        fields["drift_rate_milliseconds_per_hour"] = None
+    return fields
 
 
 class InputStream(Protocol):
@@ -200,7 +226,8 @@ class ConcurrentRecorder:
                  max_recording_seconds: float = MAX_RECORDING_SECONDS,
                  shutdown_timeout_seconds: float = 5.0, clock=time.monotonic,
                  diagnostics_clock=time.monotonic,
-                 recovery_disk_safety_path: Path | None = None) -> None:
+                 recovery_disk_safety_path: Path | None = None,
+                 session_qpc_clock=query_performance_counter_100ns) -> None:
         self.backend = backend
         self.frames = frames_per_buffer
         self.chunk_duration_seconds = chunk_duration_seconds
@@ -210,6 +237,10 @@ class ConcurrentRecorder:
         self.clock = clock
         self.diagnostics_clock = diagnostics_clock
         self.recovery_disk_safety_path = recovery_disk_safety_path
+        self.session_qpc_clock = session_qpc_clock
+        self.session_qpc_origin_100ns: int | None = None
+        self.session_duration_100ns: int | None = None
+        self._session_end_lock = threading.Lock()
         self.stop_event = threading.Event()
         self.errors: list[BaseException] = []
         self._errors_lock = threading.Lock()
@@ -226,9 +257,13 @@ class ConcurrentRecorder:
         self.stream_statistics.clear()
         self._chunk_number = 1
         self._disk_space_stop_requested = False
+        self.session_duration_100ns = None
         self._required_recovery_free_bytes = required_recovery_free_bytes(
             render.sample_rate, microphone.sample_rate, self.chunk_duration_seconds)
         started_at = self.clock()
+        self.session_qpc_origin_100ns = (
+            self.session_qpc_clock()
+            if getattr(self.backend, "packet_timestamps", False) else None)
         self._chunk_deadline = (started_at + self.chunk_duration_seconds
                                 if self.chunk_duration_seconds > 0 else float("inf"))
         threads = [
@@ -247,12 +282,12 @@ class ConcurrentRecorder:
                         self.clock() - started_at >= self.max_recording_seconds):
                     LOGGER.info("recording time limit reached (%gs); stopping capture gracefully",
                                 self.max_recording_seconds)
-                    self.stop_event.set()
+                    self._request_stop()
                     break
         except KeyboardInterrupt:
-            self.stop_event.set()
+            self._request_stop()
         finally:
-            self.stop_event.set()
+            self._request_stop()
             shutdown_deadline = time.monotonic() + self.shutdown_timeout_seconds
             for thread in threads:
                 remaining = max(0.0, shutdown_deadline - time.monotonic())
@@ -268,7 +303,11 @@ class ConcurrentRecorder:
         try:
             if render.kind in self.stream_statistics and microphone.kind in self.stream_statistics:
                 LOGGER.info("capture session timing diagnostics", extra=session_timing_fields(
-                    self.stream_statistics[render.kind], self.stream_statistics[microphone.kind]))
+                    self.stream_statistics[render.kind], self.stream_statistics[microphone.kind],
+                    timestamped_timeline=self.session_qpc_origin_100ns is not None,
+                    final_session_duration_seconds=(
+                        self.session_duration_100ns / 10_000_000
+                        if self.session_duration_100ns is not None else None)))
         except BaseException:
             # Instrumentation must never alter capture success or the original error.
             pass
@@ -281,6 +320,19 @@ class ConcurrentRecorder:
             self.errors.append(error)
 
     def stop(self) -> None:
+        self._request_stop()
+
+    def _request_stop(self) -> None:
+        if self.session_qpc_origin_100ns is not None:
+            with self._session_end_lock:
+                if self.session_duration_100ns is None:
+                    try:
+                        end = self.session_qpc_clock()
+                    except BaseException as exc:
+                        LOGGER.warning("session QPC end query failed: %s", exc)
+                    else:
+                        self.session_duration_100ns = max(
+                            0, end - self.session_qpc_origin_100ns)
         self.stop_event.set()
 
     def _diagnostics_now(self) -> float | None:
@@ -358,6 +410,11 @@ class ConcurrentRecorder:
                 raise ValueError("mono WAV capture requires PCM16 input")
             if endpoint.channels < 1:
                 raise ValueError("audio endpoint reported no input channels")
+
+            if hasattr(stream, "read_packet"):
+                self._capture_packets(stream, endpoint, path, statistics,
+                                      sample_width)
+                return
 
             input_block_align = endpoint.channels * sample_width
             output_channels = 1 if self.mono_output else endpoint.channels
@@ -463,3 +520,63 @@ class ConcurrentRecorder:
                 LOGGER.info("capture stream timing diagnostics", extra=statistics.log_fields())
             except BaseException:
                 pass
+
+    def _check_sparse_disk(self) -> None:
+        if self.recovery_disk_safety_path is None:
+            return
+        try:
+            free = shutil.disk_usage(self.recovery_disk_safety_path).free
+        except Exception as exc:
+            LOGGER.warning("recovery disk-space query failed; continuing capture: %s", exc)
+            return
+        if free < self._required_recovery_free_bytes:
+            self._disk_space_stop_requested = True
+            self._request_stop()
+            raise GracefulStopRequested
+
+    def _capture_packets(self, stream, endpoint: Endpoint, path: Path,
+                         statistics: StreamStatistics, sample_width: int) -> None:
+        """Place native packets; legacy streams continue through byte reads."""
+        if self.session_qpc_origin_100ns is None:
+            raise RuntimeError("timestamped capture has no shared session QPC origin")
+        output_channels = 1 if self.mono_output else endpoint.channels
+        mapper = StreamTimelineMapper(endpoint.sample_rate,
+                                      self.session_qpc_origin_100ns)
+        writer = SparseRecoveryWriter(
+            lambda slot: self._chunk_path(path, slot + 1), endpoint.sample_rate,
+            output_channels, sample_width, self.chunk_duration_seconds,
+            self._check_sparse_disk,
+        )
+        statistics.capture_start_monotonic = self._diagnostics_now()
+        try:
+            while not self.stop_event.is_set():
+                packet = stream.read_packet()
+                if packet is None:
+                    current_frame = max(
+                        0, (self.session_qpc_clock() - self.session_qpc_origin_100ns)
+                        * endpoint.sample_rate // 10_000_000)
+                    writer.advance_session_frame(current_frame)
+                    continue
+                if packet.frame_count > MAX_PCM_DATA_BYTES // (output_channels * sample_width):
+                    raise ValueError("audio packet exceeds the WAV data limit")
+                pcm = (downmix_pcm16_mono(packet.pcm, endpoint.channels)
+                       if self.mono_output else packet.pcm)
+                placed = mapper.place(type(packet)(
+                    pcm, packet.frame_count, packet.device_position,
+                    packet.qpc_position_100ns, packet.flags))
+                try:
+                    writer.write(placed)
+                except GracefulStopRequested:
+                    return
+                statistics.successful_read(packet.frame_count,
+                                           self._diagnostics_now())
+                statistics.total_pcm_bytes_written += len(pcm)
+        finally:
+            writer.close()
+            statistics.chunks_opened = len(writer.occupied_slots)
+            statistics.chunks_completed = len(writer.occupied_slots)
+            diagnostics = mapper.diagnostics
+            for name, value in diagnostics.__dict__.items():
+                setattr(statistics, name, value)
+            statistics.timeline_gap_frames_filled = writer.timeline_gap_frames_filled
+            statistics.occupied_recovery_slots = len(writer.occupied_slots)

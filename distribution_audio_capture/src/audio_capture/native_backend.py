@@ -6,7 +6,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
-from .model import Endpoint
+from .model import CapturePacket, Endpoint
 from .wasapi import (
     AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
     AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
@@ -225,6 +225,46 @@ class NativeWasapiStream:
         del self.pending[:target]
         return result
 
+    def read_packet(self) -> CapturePacket | None:
+        """Return one copied WASAPI packet without interpreting its timeline."""
+        _, kernel32 = _require_windows()
+        available = UINT32()
+        check_hresult(_method(self.capture, 5, HRESULT, ctypes.POINTER(UINT32))(
+            self.capture, ctypes.byref(available)), "IAudioCaptureClient.GetNextPacketSize")
+        if not available.value:
+            wait = kernel32.WaitForSingleObject(self.event, 200)
+            if wait == WAIT_TIMEOUT:
+                return None
+            if wait != WAIT_OBJECT_0:
+                raise ctypes.WinError()
+            check_hresult(_method(self.capture, 5, HRESULT, ctypes.POINTER(UINT32))(
+                self.capture, ctypes.byref(available)),
+                "IAudioCaptureClient.GetNextPacketSize")
+            if not available.value:
+                return None
+        data, packet_frames, flags = LPVOID(), UINT32(), DWORD()
+        device_position = ctypes.c_ulonglong()
+        qpc_position = ctypes.c_ulonglong()
+        check_hresult(_method(
+            self.capture, 3, HRESULT, ctypes.POINTER(LPVOID),
+            ctypes.POINTER(UINT32), ctypes.POINTER(DWORD),
+            ctypes.POINTER(ctypes.c_ulonglong), ctypes.POINTER(ctypes.c_ulonglong),
+        )(self.capture, ctypes.byref(data), ctypes.byref(packet_frames),
+          ctypes.byref(flags), ctypes.byref(device_position),
+          ctypes.byref(qpc_position)), "IAudioCaptureClient.GetBuffer")
+        try:
+            silent = bool(flags.value & AUDCLNT_BUFFERFLAGS_SILENT)
+            raw = b"" if silent else ctypes.string_at(
+                data, packet_frames.value * self.format.block_align)
+            pcm = pcm16(raw, self.format, packet_frames.value, silent)
+            return CapturePacket(bytes(pcm), packet_frames.value,
+                                 device_position.value, qpc_position.value,
+                                 flags.value)
+        finally:
+            check_hresult(_method(self.capture, 4, HRESULT, UINT32)(
+                self.capture, packet_frames.value),
+                "IAudioCaptureClient.ReleaseBuffer")
+
     def stop_stream(self) -> None:
         if self.started:
             check_hresult(_method(self.client, 11, HRESULT)(self.client), "IAudioClient.Stop")
@@ -256,6 +296,7 @@ class NativeWasapiStream:
 
 class NativeWasapiBackend:
     """Shared-mode endpoint loopback/capture backend with PCM16 output."""
+    packet_timestamps = True
     def endpoints(self) -> tuple[list[Endpoint], list[Endpoint]]:
         with ComApartment():
             return ([item.endpoint for item in enumerate_endpoints(eRender)],

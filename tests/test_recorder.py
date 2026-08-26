@@ -854,3 +854,54 @@ def test_wav_close_failure_preserves_current_and_previous_files(tmp_path, monkey
     with real_open(str(previous), "rb") as completed:
         assert completed.getnframes() == 1
     assert backend.streams[0].closed
+
+
+def test_timestamped_session_duration_uses_shared_qpc_origin_only():
+    class PacketBackend(FakeBackend):
+        packet_timestamps = True
+
+    qpc = iter((1_000_000, 1_250_000))
+    recorder = ConcurrentRecorder(PacketBackend(), session_qpc_clock=lambda: next(qpc))
+    recorder.session_qpc_origin_100ns = recorder.session_qpc_clock()
+
+    recorder.stop()
+
+    assert recorder.session_duration_100ns == 250_000
+
+
+def test_sparse_confirmed_low_disk_is_graceful_and_keeps_completed_audio(tmp_path, monkeypatch):
+    from audio_capture.model import CapturePacket
+
+    class PacketStream:
+        def __init__(self):
+            self.packets = iter((
+                CapturePacket(b"\x01\x00", 1, 0, 0, 0),
+                CapturePacket(b"\x02\x00", 1, 10, 10_000_000, 0),
+            ))
+
+        def read_packet(self):
+            return next(self.packets)
+
+    free = iter((10**9, 0))
+    monkeypatch.setattr("audio_capture.recorder.shutil.disk_usage", lambda _path: type(
+        "Usage", (), {"free": next(free)})())
+    recorder = ConcurrentRecorder(
+        FakeBackend(), chunk_duration_seconds=1,
+        recovery_disk_safety_path=tmp_path,
+        session_qpc_clock=lambda: 10_000_000,
+    )
+    recorder.session_qpc_origin_100ns = 0
+    recorder._required_recovery_free_bytes = 1
+    statistics = StreamStatistics("microphone", "mic", 10, 1)
+
+    recorder._capture_packets(
+        PacketStream(), Endpoint(1, "mic", 1, 10, "microphone"),
+        tmp_path / "mic_____00-10min.wav", statistics, 2,
+    )
+
+    assert recorder.stop_event.is_set()
+    assert statistics.terminal_status == "normal_stop"
+    assert not recorder.errors
+    with wave.open(str(tmp_path / "mic_____00-10min.wav"), "rb") as source:
+        assert source.getnframes() == 1
+    assert not (tmp_path / "mic_____10-20min.wav").exists()
