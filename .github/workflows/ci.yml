@@ -22,7 +22,6 @@ jobs:
 
           dist = Path("distribution_audio_capture")
           entry_points = {
-              Path("run.py"): dist / "run.py",
               Path("record_one_click.py"): dist / "record_one_click.py",
           }
           problems = [
@@ -76,7 +75,7 @@ jobs:
         shell: bash
         run: |
           python -c "import runpy; runpy.run_path('run.py'); runpy.run_path('record_one_click.py')"
-          python -c "import runpy; runpy.run_path('distribution_audio_capture/run.py'); runpy.run_path('distribution_audio_capture/record_one_click.py')"
+          python -c "import runpy; runpy.run_path('distribution_audio_capture/record_one_click.py')"
       - name: Compile one-click and distribution Python
         run: python -m compileall -q run.py record_one_click.py src tests distribution_audio_capture
       - name: COM and MMDevice smoke (endpoints are not required on hosted CI)
