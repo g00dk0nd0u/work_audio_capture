@@ -68,6 +68,24 @@ def _samples(data: bytes) -> list[int]:
 
 def test_one_click_default_bitrate_remains_80_kbps():
     assert record_one_click.MP3_BITRATE_BPS == 80_000
+    assert record_one_click._validation_mp3_bitrate([]) == (80_000, False)
+
+
+@pytest.mark.parametrize("bitrate_bps", [48_000, 64_000, 80_000])
+def test_hidden_validation_bitrate_is_accepted(bitrate_bps):
+    assert record_one_click._validation_mp3_bitrate([
+        record_one_click._VALIDATE_MP3_BITRATE_OPTION, str(bitrate_bps)
+    ]) == (bitrate_bps, True)
+
+
+@pytest.mark.parametrize("arguments", [
+    ["--validate-mp3-bitrate", "56000"],
+    ["--validate-mp3-bitrate", "not-a-number"],
+    ["--validate-mp3-bitrate"],
+])
+def test_hidden_validation_bitrate_rejects_unsupported_values(arguments):
+    with pytest.raises(ValueError):
+        record_one_click._validation_mp3_bitrate(arguments)
 
 
 def test_hidden_validation_option_lists_bitrates_without_recording(monkeypatch, capsys):
@@ -81,6 +99,36 @@ def test_hidden_validation_option_lists_bitrates_without_recording(monkeypatch, 
     assert capsys.readouterr().out.splitlines() == [
         "Available mono 48000 Hz MP3 bitrates:", "64000", "80000"
     ]
+
+
+def test_unavailable_validation_bitrate_fails_before_recording(monkeypatch, capsys):
+    monkeypatch.setattr(record_one_click, "available_mp3_bitrates", lambda _rate: [80_000])
+    monkeypatch.setattr(
+        record_one_click, "_configure_logging",
+        lambda: pytest.fail("unavailable bitrate must fail before recording startup"),
+    )
+
+    assert record_one_click.run(["--validate-mp3-bitrate", "48000"]) == 1
+    assert "no exact mono 48000 Hz / 48000 bps" in capsys.readouterr().err
+
+
+def test_selected_validation_bitrate_is_added_to_log_diagnostics(monkeypatch):
+    entries = []
+
+    class Logger:
+        def info(self, event, extra):
+            entries.append((event, extra))
+
+    monkeypatch.setattr(record_one_click, "MP3_BITRATE_BPS", 80_000)
+    monkeypatch.setattr(record_one_click, "available_mp3_bitrates", lambda _rate: [48_000])
+    monkeypatch.setattr(record_one_click, "_configure_logging", Logger)
+    monkeypatch.setattr(record_one_click, "_pending_sessions", lambda: [Path("pending")])
+    monkeypatch.setattr(record_one_click, "_choose_startup_action", lambda _pending: "repair")
+    monkeypatch.setattr(record_one_click, "_repair_all", lambda _pending, _logger: 0)
+
+    assert record_one_click.run(["--validate-mp3-bitrate", "48000"]) == 0
+    assert entries
+    assert all(extra["mp3_bitrate_bps"] == 48_000 for _event, extra in entries)
 
 
 def test_encode_stereo_render_and_mono_microphone_to_mono_mp3(tmp_path, monkeypatch):
@@ -201,6 +249,7 @@ def test_json_formatter_preserves_endpoint_and_runtime_diagnostics():
     record.microphone_name = "Microphone Array"
     record.microphone_channels = 4
     record.microphone_sample_rate = 48000
+    record.mp3_bitrate_bps = 64_000
 
     payload = json.loads(record_one_click._JsonFormatter().format(record))
 
@@ -213,6 +262,7 @@ def test_json_formatter_preserves_endpoint_and_runtime_diagnostics():
     assert payload["render_sample_rate"] == 48000
     assert payload["microphone_channels"] == 4
     assert payload["microphone_sample_rate"] == 48000
+    assert payload["mp3_bitrate_bps"] == 64_000
 
 
 def test_runtime_environment_contains_log_only_diagnostics():

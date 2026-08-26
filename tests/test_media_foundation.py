@@ -7,6 +7,7 @@ import audio_capture.media_foundation as media_foundation
 from audio_capture.media_foundation import (
     DEFAULT_MP3_BITRATE_BPS,
     Mp3Encoder,
+    VALIDATION_MP3_BITRATES_BPS,
     _available_mp3_bitrates,
     _require_supported_target,
     available_mp3_bitrates,
@@ -19,10 +20,19 @@ def test_80_kbps_is_10000_bytes_per_second():
     assert bitrate_bytes_per_second(DEFAULT_MP3_BITRATE_BPS) == 10_000
 
 
-def test_production_target_remains_80_kbps_only():
-    _require_supported_target(48_000, 80_000)
-    with pytest.raises(ValueError, match="80000 bps only"):
-        _require_supported_target(48_000, 40_000)
+def test_production_default_remains_80_kbps():
+    assert DEFAULT_MP3_BITRATE_BPS == 80_000
+
+
+@pytest.mark.parametrize("bitrate_bps", [48_000, 64_000, 80_000])
+def test_validation_targets_are_explicitly_supported(bitrate_bps):
+    assert bitrate_bps in VALIDATION_MP3_BITRATES_BPS
+    _require_supported_target(48_000, bitrate_bps)
+
+
+def test_unsupported_target_is_rejected():
+    with pytest.raises(ValueError, match="must be one of"):
+        _require_supported_target(48_000, 56_000)
 
 
 def test_available_bitrates_filters_deduplicates_and_sorts(monkeypatch):
@@ -105,3 +115,14 @@ def test_windows_media_foundation_mp3_smoke(tmp_path):
     # Keep deliberately broad bounds for encoder delay,
     # metadata and frame quantization while still catching a bits-vs-bytes mistake.
     assert 30_000 <= len(data) <= 55_000
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Media Foundation is Windows-only")
+@pytest.mark.parametrize("bitrate_bps", [48_000, 64_000])
+def test_windows_media_foundation_validation_bitrate_smoke(tmp_path, bitrate_bps):
+    if bitrate_bps not in available_mp3_bitrates(48_000):
+        pytest.skip(f"runner has no exact mono 48000 Hz / {bitrate_bps} bps output type")
+    output = tmp_path / f"validation-{bitrate_bps}.mp3"
+    with Mp3Encoder(output, sample_rate=48_000, bitrate_bps=bitrate_bps) as encoder:
+        encoder.write_pcm(b"\x00\x00" * 96_000)
+    assert _contains_mp3_frame_sync(output.read_bytes())
