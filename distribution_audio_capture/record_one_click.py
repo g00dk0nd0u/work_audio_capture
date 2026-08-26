@@ -21,8 +21,8 @@ sys.path.insert(0, str(SOURCE))
 from audio_capture.cli import main  # noqa: E402
 from audio_capture.media_foundation import (  # noqa: E402
     DEFAULT_MP3_BITRATE_BPS,
+    SUPPORTED_MP3_BITRATES_BPS,
     SUPPORTED_MP3_SAMPLE_RATES,
-    VALIDATION_MP3_BITRATES_BPS,
     Mp3Encoder,
     available_mp3_bitrates,
 )
@@ -41,7 +41,7 @@ MIX_FRAMES = 262144
 RMS_SAMPLE_STRIDE_FRAMES = 16
 MP3_BITRATE_BPS = DEFAULT_MP3_BITRATE_BPS
 _LIST_MP3_BITRATES_OPTION = "--list-mp3-bitrates"
-_VALIDATE_MP3_BITRATE_OPTION = "--validate-mp3-bitrate"
+_MP3_BITRATE_OPTION = "--mp3-bitrate"
 MP3_ENCODER_FACTORY = Mp3Encoder
 SESSION_FILE = "session.json"
 SESSION_LOCK_FILE = "session.lock"
@@ -121,29 +121,26 @@ class _JsonFormatter(logging.Formatter):
         return json.dumps(entry, ensure_ascii=False)
 
 
-def _validation_mp3_bitrate(arguments: list[str]) -> tuple[int, bool]:
-    """Parse the hidden validation override, leaving normal startup at 80 kbps."""
+def _requested_mp3_bitrate(arguments: list[str]) -> int:
+    """Parse the optional bitrate, defaulting normal one-click startup to 48 kbps."""
     indexes = [
         index for index, argument in enumerate(arguments)
-        if argument == _VALIDATE_MP3_BITRATE_OPTION
+        if argument == _MP3_BITRATE_OPTION
     ]
     if not indexes:
-        return DEFAULT_MP3_BITRATE_BPS, False
+        return DEFAULT_MP3_BITRATE_BPS
     if len(indexes) != 1 or indexes[0] + 1 >= len(arguments):
-        raise ValueError(
-            f"{_VALIDATE_MP3_BITRATE_OPTION} requires exactly one bitrate value"
-        )
+        raise ValueError(f"{_MP3_BITRATE_OPTION} requires exactly one bitrate value")
     value = arguments[indexes[0] + 1]
     try:
         bitrate_bps = int(value)
     except ValueError as exc:
         raise ValueError(f"invalid MP3 bitrate: {value}") from exc
-    if bitrate_bps not in VALIDATION_MP3_BITRATES_BPS:
+    if bitrate_bps not in SUPPORTED_MP3_BITRATES_BPS:
         raise ValueError(
-            f"validation MP3 bitrate must be one of "
-            f"{sorted(VALIDATION_MP3_BITRATES_BPS)} bps"
+            f"MP3 bitrate must be one of {sorted(SUPPORTED_MP3_BITRATES_BPS)} bps"
         )
-    return bitrate_bps, True
+    return bitrate_bps
 
 
 def _configure_logging() -> logging.Logger:
@@ -775,23 +772,22 @@ def run(arguments: list[str] | None = None) -> int:
             print(bitrate)
         return 0
     try:
-        requested_bitrate, is_validation = _validation_mp3_bitrate(arguments)
+        requested_bitrate = _requested_mp3_bitrate(arguments)
     except ValueError as exc:
-        print(f"Could not start MP3 bitrate validation: {exc}", file=sys.stderr)
+        print(f"Could not start recording: {exc}", file=sys.stderr)
         return 2
-    if is_validation:
-        try:
-            available_bitrates = available_mp3_bitrates(48_000)
-        except Exception as exc:
-            print(f"Could not validate Media Foundation MP3 bitrate: {exc}", file=sys.stderr)
-            return 1
-        if requested_bitrate not in available_bitrates:
-            print(
-                f"Media Foundation has no exact mono 48000 Hz / "
-                f"{requested_bitrate} bps MP3 output type.",
-                file=sys.stderr,
-            )
-            return 1
+    try:
+        available_bitrates = available_mp3_bitrates(48_000)
+    except Exception as exc:
+        print(f"Could not validate Media Foundation MP3 bitrate: {exc}", file=sys.stderr)
+        return 1
+    if requested_bitrate not in available_bitrates:
+        print(
+            f"Media Foundation has no exact mono 48000 Hz / "
+            f"{requested_bitrate} bps MP3 output type.",
+            file=sys.stderr,
+        )
+        return 1
     MP3_BITRATE_BPS = requested_bitrate
     logger = _configure_logging()
     environment_log = {

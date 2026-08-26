@@ -30,8 +30,8 @@ MFT_ENUM_FLAG_SORTANDFILTER = 0x00000040
 MFT_ENUM_FLAGS_SAFE = (MFT_ENUM_FLAG_ALL & ~MFT_ENUM_FLAG_FIELDOFUSE) | MFT_ENUM_FLAG_SORTANDFILTER
 
 SUPPORTED_MP3_SAMPLE_RATES = (32000, 44100, 48000)
-VALIDATION_MP3_BITRATES_BPS = frozenset((48_000, 64_000, 80_000))
-DEFAULT_MP3_BITRATE_BPS = 80_000
+SUPPORTED_MP3_BITRATES_BPS = frozenset((48_000, 80_000))
+DEFAULT_MP3_BITRATE_BPS = 48_000
 
 IID_IMFMediaType = GUID.from_string("44ae0fa8-ea31-4109-8d2e-4cae4997c555")
 MFMediaType_Audio = GUID.from_string("73647561-0000-0010-8000-00aa00389b71")
@@ -62,9 +62,9 @@ def _require_supported_target(sample_rate: int, bitrate_bps: int) -> None:
             f"Media Foundation MP3 requires one of {SUPPORTED_MP3_SAMPLE_RATES} Hz; "
             f"got {sample_rate} Hz"
         )
-    if bitrate_bps not in VALIDATION_MP3_BITRATES_BPS:
+    if bitrate_bps not in SUPPORTED_MP3_BITRATES_BPS:
         raise ValueError(
-            f"MP3 bitrate must be one of {sorted(VALIDATION_MP3_BITRATES_BPS)} bps; "
+            f"MP3 bitrate must be one of {sorted(SUPPORTED_MP3_BITRATES_BPS)} bps; "
             f"got {bitrate_bps} bps"
         )
 
