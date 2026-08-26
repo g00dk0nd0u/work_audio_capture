@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import shutil
 import sys
 import wave
 
@@ -23,7 +24,11 @@ from audio_capture.media_foundation import (  # noqa: E402
     SUPPORTED_MP3_SAMPLE_RATES,
     Mp3Encoder,
 )
-from audio_capture.recorder import downmix_pcm16_mono  # noqa: E402
+from audio_capture.recorder import (  # noqa: E402
+    DEFAULT_CHUNK_DURATION_SECONDS,
+    downmix_pcm16_mono,
+    required_recovery_free_bytes,
+)
 
 
 BACKEND = "native"
@@ -778,6 +783,23 @@ def run() -> int:
     diagnostic_log = {**environment_log, **endpoint_log}
     logger.info("Selected audio endpoints", extra=diagnostic_log)
 
+    RECOVERY_ROOT.mkdir(parents=True, exist_ok=True)
+    required_free = required_recovery_free_bytes(
+        render.sample_rate, microphone.sample_rate, DEFAULT_CHUNK_DURATION_SECONDS)
+    try:
+        free = shutil.disk_usage(RECOVERY_ROOT).free
+    except Exception as exc:
+        # Fail open so a broken disk query never prevents otherwise viable capture.
+        logger.warning("Recovery disk-space preflight failed; continuing: %s", exc)
+    else:
+        if free < required_free:
+            print("Not enough free disk space to start recording.", file=sys.stderr)
+            logger.warning(
+                "Recovery disk space is low; recording not started (%d bytes free; %d required)",
+                free, required_free,
+            )
+            return 1
+
     session_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     output = RECOVERY_ROOT / session_name
     final_path = OUTPUT_ROOT / f"{session_name}.mp3"
@@ -811,6 +833,7 @@ def run() -> int:
         str(output),
         "--mono-wav",
         "--time-slot-recovery-names",
+        "--recovery-disk-safety",
     ]
     recording_succeeded = False
     try:

@@ -45,7 +45,10 @@ def main() -> int:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument("--recovery-disk-safety", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.recovery_disk_safety and not args.mono_wav:
+        parser.error("--recovery-disk-safety requires --mono-wav")
     if args.command == "doctor" and args.backend == "native":
         return 0 if run_doctor() else 1
 
@@ -74,7 +77,10 @@ def main() -> int:
             "mic_____00-10min.wav"
             if args.time_slot_recovery_names else "microphone_0001.wav"
         )
-        ConcurrentRecorder(backend, mono_output=args.mono_wav).record(
+        recorder_options = {"mono_output": args.mono_wav}
+        if args.recovery_disk_safety:
+            recorder_options["recovery_disk_safety_path"] = directory
+        ConcurrentRecorder(backend, **recorder_options).record(
             choose(render, args.render), choose(capture, args.microphone),
             render_path, microphone_path)
         return 0

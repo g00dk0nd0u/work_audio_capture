@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import sys
 import threading
 import time
@@ -15,9 +16,19 @@ from .model import Endpoint
 
 MAX_PCM_DATA_BYTES = (7 * 1024**3) // 2
 MAX_RECORDING_SECONDS = 12 * 60 * 60
+DEFAULT_CHUNK_DURATION_SECONDS = 10 * 60
 LOGGER = logging.getLogger("work_audio_capture")
 MIN_DRIFT_RATE_DURATION_SECONDS = 60.0
 _TIME_SLOT_STEM = re.compile(r"^(?P<prefix>.+_)(?P<start>\d+)-(?P<end>\d+)min$")
+
+
+def required_recovery_free_bytes(render_sample_rate: int,
+                                 microphone_sample_rate: int,
+                                 chunk_duration_seconds: int) -> int:
+    """Return space for the next mono PCM16 chunk pair plus one pair reserve."""
+    pair_bytes = (render_sample_rate + microphone_sample_rate) * 2 * chunk_duration_seconds
+    # Budget the pair about to be opened and one additional pair as safety reserve.
+    return pair_bytes * 2
 
 
 @dataclass
@@ -184,10 +195,12 @@ def _wav_error(endpoint: Endpoint, stage: str, path: Path,
 
 class ConcurrentRecorder:
     def __init__(self, backend: Backend, frames_per_buffer: int = 1024,
-                 chunk_duration_seconds: int = 600, mono_output: bool = False,
+                 chunk_duration_seconds: int = DEFAULT_CHUNK_DURATION_SECONDS,
+                 mono_output: bool = False,
                  max_recording_seconds: float = MAX_RECORDING_SECONDS,
                  shutdown_timeout_seconds: float = 5.0, clock=time.monotonic,
-                 diagnostics_clock=time.monotonic) -> None:
+                 diagnostics_clock=time.monotonic,
+                 recovery_disk_safety_path: Path | None = None) -> None:
         self.backend = backend
         self.frames = frames_per_buffer
         self.chunk_duration_seconds = chunk_duration_seconds
@@ -196,6 +209,7 @@ class ConcurrentRecorder:
         self.shutdown_timeout_seconds = shutdown_timeout_seconds
         self.clock = clock
         self.diagnostics_clock = diagnostics_clock
+        self.recovery_disk_safety_path = recovery_disk_safety_path
         self.stop_event = threading.Event()
         self.errors: list[BaseException] = []
         self._errors_lock = threading.Lock()
@@ -203,12 +217,17 @@ class ConcurrentRecorder:
         self._chunk_number = 1
         self._chunk_deadline = 0.0
         self.stream_statistics: dict[str, StreamStatistics] = {}
+        self._required_recovery_free_bytes = 0
+        self._disk_space_stop_requested = False
 
     def record(self, render: Endpoint, microphone: Endpoint, render_path: Path, microphone_path: Path) -> None:
         self.stop_event.clear()
         self.errors.clear()
         self.stream_statistics.clear()
         self._chunk_number = 1
+        self._disk_space_stop_requested = False
+        self._required_recovery_free_bytes = required_recovery_free_bytes(
+            render.sample_rate, microphone.sample_rate, self.chunk_duration_seconds)
         started_at = self.clock()
         self._chunk_deadline = (started_at + self.chunk_duration_seconds
                                 if self.chunk_duration_seconds > 0 else float("inf"))
@@ -275,8 +294,27 @@ class ConcurrentRecorder:
         if self.chunk_duration_seconds <= 0:
             return self._chunk_number
         with self._chunk_lock:
+            if self._disk_space_stop_requested:
+                return self._chunk_number
             now = self.clock()
             if now >= self._chunk_deadline:
+                if self.recovery_disk_safety_path is not None:
+                    try:
+                        free = shutil.disk_usage(self.recovery_disk_safety_path).free
+                    except Exception as exc:
+                        # The guard must fail open: its failure must not stop a recording
+                        # that could otherwise continue or obscure a capture/WAV error.
+                        LOGGER.warning("recovery disk-space query failed; continuing capture: %s", exc)
+                    else:
+                        if free < self._required_recovery_free_bytes:
+                            LOGGER.warning(
+                                "recovery disk space is low (%d bytes free; %d required); "
+                                "stopping capture gracefully",
+                                free, self._required_recovery_free_bytes,
+                            )
+                            self._disk_space_stop_requested = True
+                            self.stop_event.set()
+                            return self._chunk_number
                 elapsed_chunks = int(
                     (now - self._chunk_deadline) // self.chunk_duration_seconds
                 ) + 1

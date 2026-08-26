@@ -63,3 +63,41 @@ def test_record_filename_style_is_independent_from_mono_output(
         "names": expected_names,
     }
     assert backend.closed
+
+
+def test_recovery_disk_safety_requires_mono_wav(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", [
+        "audio-capture", "record", "--render", "1", "--microphone", "2",
+        "--recovery-disk-safety",
+    ])
+
+    with pytest.raises(SystemExit, match="2"):
+        cli.main()
+
+    assert "--recovery-disk-safety requires --mono-wav" in capsys.readouterr().err
+
+
+def test_recovery_disk_safety_accepts_mono_wav(tmp_path, monkeypatch):
+    backend = _Backend()
+    captured = {}
+
+    class Recorder:
+        def __init__(self, selected_backend, **options):
+            assert selected_backend is backend
+            captured.update(options)
+
+        def record(self, *_args):
+            pass
+
+    monkeypatch.setattr(cli, "_backend", lambda _name: backend)
+    monkeypatch.setattr(cli, "ConcurrentRecorder", Recorder)
+    monkeypatch.setattr(sys, "argv", [
+        "audio-capture", "record", "--render", "1", "--microphone", "2",
+        "--output", str(tmp_path), "--mono-wav", "--recovery-disk-safety",
+    ])
+
+    assert cli.main() == 0
+    assert captured == {
+        "mono_output": True,
+        "recovery_disk_safety_path": tmp_path,
+    }
