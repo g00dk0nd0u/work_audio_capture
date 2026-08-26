@@ -46,6 +46,12 @@ class StreamStatistics:
     chunks_opened: int = 0
     chunks_completed: int = 0
     terminal_status: str = "normal_stop"
+    inserted_silence_frames: int = 0
+    device_position_gap_events: int = 0
+    largest_device_position_gap_frames: int = 0
+    data_discontinuity_events: int = 0
+    timestamp_error_events: int = 0
+    device_position_regression_events: int = 0
 
     @property
     def audio_duration_seconds(self) -> float:
@@ -87,6 +93,16 @@ class StreamStatistics:
             "chunks_opened": self.chunks_opened,
             "chunks_completed": self.chunks_completed,
             "terminal_status": self.terminal_status,
+            "inserted_silence_frames": self.inserted_silence_frames,
+            "inserted_silence_seconds": (
+                self.inserted_silence_frames / self.sample_rate
+                if self.sample_rate else 0.0
+            ),
+            "device_position_gap_events": self.device_position_gap_events,
+            "largest_device_position_gap_frames": self.largest_device_position_gap_frames,
+            "data_discontinuity_events": self.data_discontinuity_events,
+            "timestamp_error_events": self.timestamp_error_events,
+            "device_position_regression_events": self.device_position_regression_events,
         }
 
 
@@ -363,6 +379,14 @@ class ConcurrentRecorder:
             output_channels = 1 if self.mono_output else endpoint.channels
             output_block_align = output_channels * sample_width
             max_chunk_frames = MAX_PCM_DATA_BYTES // output_block_align
+            if self.chunk_duration_seconds > 0:
+                # Recovery chunks represent nominal sample-timeline slots.  In
+                # particular, delayed gap silence must be split at the slot
+                # boundary rather than assigned using its later write time.
+                max_chunk_frames = min(
+                    max_chunk_frames,
+                    endpoint.sample_rate * self.chunk_duration_seconds,
+                )
             frames_in_chunk = 0
             chunk_number = 1
             capture_start_attempted = False
@@ -409,11 +433,15 @@ class ConcurrentRecorder:
                         frames_in_chunk += input_frames
                         if self.stop_event.is_set():
                             return
-                        session_chunk = self._session_chunk_number()
-                        time_limit = session_chunk > chunk_number
+                        # Keep wall-clock rollover observation for the shared
+                        # disk-space guard. File placement itself follows the
+                        # sample timeline so delayed silence cannot move slots.
+                        self._session_chunk_number()
+                        if self.stop_event.is_set():
+                            return
                         size_limit = frames_in_chunk >= max_chunk_frames
-                        if time_limit or size_limit:
-                            chunk_number = max(chunk_number + 1, session_chunk)
+                        if size_limit:
+                            chunk_number += 1
                             break
                 except BaseException as exc:
                     chunk_error = exc
@@ -458,6 +486,15 @@ class ConcurrentRecorder:
                     statistics.terminal_status = "shutdown_cleanup_failure"
                     self._add_error(_endpoint_error(endpoint, "cleanup", cleanup_error))
                     self.stop_event.set()
+                try:
+                    for field in (
+                        "inserted_silence_frames", "device_position_gap_events",
+                        "largest_device_position_gap_frames", "data_discontinuity_events",
+                        "timestamp_error_events", "device_position_regression_events",
+                    ):
+                        setattr(statistics, field, int(getattr(stream, field, 0)))
+                except BaseException:
+                    pass
             statistics.capture_end_monotonic = self._diagnostics_now()
             try:
                 LOGGER.info("capture stream timing diagnostics", extra=statistics.log_fields())

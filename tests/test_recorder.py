@@ -460,6 +460,49 @@ def test_chunk_rotation_keeps_capture_files_bounded(tmp_path):
     assert (tmp_path / "microphone_0002.wav").exists()
 
 
+@pytest.mark.parametrize(
+    ("timeline", "expected_chunks"),
+    [
+        ([1] * 8 + [0] * 4 + [2] * 3,
+         [[1] * 8 + [0] * 2, [0] * 2 + [2] * 3]),
+        ([1] * 8 + [0] * 25 + [2] * 2,
+         [[1] * 8 + [0] * 2, [0] * 10, [0] * 10, [0] * 3 + [2] * 2]),
+        ([1] * 8 + [0] * 2 + [2] * 3,
+         [[1] * 8 + [0] * 2, [2] * 3]),
+    ],
+)
+def test_timeline_data_is_split_across_nominal_chunk_slots(
+        tmp_path, timeline, expected_chunks):
+    class FiniteStream(FakeStream):
+        def __init__(self):
+            super().__init__()
+            self.data = _pcm16(timeline)
+
+        def read(self, frames, exception_on_overflow=False):
+            if not self.data:
+                raise EOFError("synthetic capture complete")
+            count = min(len(self.data), frames * 2)
+            result, self.data = self.data[:count], self.data[count:]
+            return result
+
+    class Backend(FakeBackend):
+        def open_input(self, endpoint, frames_per_buffer):
+            return FiniteStream()
+
+    recorder = ConcurrentRecorder(
+        Backend(), frames_per_buffer=4, chunk_duration_seconds=10,
+    )
+    recorder._capture(
+        Endpoint(1, "synthetic", 1, 1, "render-loopback"),
+        tmp_path / "speaker_00-10min.wav",
+    )
+
+    for number, expected in enumerate(expected_chunks, 1):
+        path = recorder._chunk_path(tmp_path / "speaker_00-10min.wav", number)
+        with wave.open(str(path), "rb") as recording:
+            assert _samples(recording.readframes(recording.getnframes())) == expected
+
+
 def test_chunk_rotation_also_obeys_pcm_data_limit(tmp_path, monkeypatch):
     monkeypatch.setattr("audio_capture.recorder.MAX_PCM_DATA_BYTES", 16)
     backend = FakeBackend()

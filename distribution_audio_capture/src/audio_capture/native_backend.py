@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import ctypes
 import sys
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
 from .model import Endpoint
 from .wasapi import (
-    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
+    AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT,
+    AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR, AUDCLNT_SHAREMODE_SHARED,
     AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
     CLSCTX_ALL, CLSID_MMDeviceEnumerator, DEVICE_STATE_ACTIVE, DWORD,
     HRESULT, IID_IAudioCaptureClient, IID_IAudioClient, IID_IMMDeviceEnumerator,
@@ -143,6 +145,17 @@ class NativeWasapiStream:
         self.enumerator = self.device = self.client = self.capture = LPVOID()
         self.event: int | None = None
         self.pending = bytearray()
+        self.pending_segments: deque[bytes | int] = deque()
+        self.expected_next_device_position: int | None = None
+        self.first_packet_device_position: int | None = None
+        self.first_packet_qpc_position: int | None = None
+        self.last_packet_qpc_position: int | None = None
+        self.inserted_silence_frames = 0
+        self.device_position_gap_events = 0
+        self.largest_device_position_gap_frames = 0
+        self.data_discontinuity_events = 0
+        self.timestamp_error_events = 0
+        self.device_position_regression_events = 0
         self.started = False
         try:
             self.enumerator = _create_enumerator()
@@ -194,36 +207,98 @@ class NativeWasapiStream:
 
     def read(self, frames: int, exception_on_overflow: bool = False) -> bytes:
         target = frames * self.format.channels * 2
+        frame_bytes = self.format.channels * 2
+        if not hasattr(self, "pending_segments"):
+            # Compatibility for lightweight test doubles and older callers.
+            self.pending_segments = deque([bytes(self.pending)] if self.pending else [])
+            self.pending.clear()
+            self.expected_next_device_position = None
+            self.first_packet_device_position = None
+            self.first_packet_qpc_position = None
+            self.last_packet_qpc_position = None
+            self.inserted_silence_frames = 0
+            self.device_position_gap_events = 0
+            self.largest_device_position_gap_frames = 0
+            self.data_discontinuity_events = 0
+            self.timestamp_error_events = 0
+            self.device_position_regression_events = 0
+        result = bytearray()
+
+        def drain() -> None:
+            while self.pending_segments and len(result) < target:
+                segment = self.pending_segments[0]
+                wanted_frames = (target - len(result)) // frame_bytes
+                if isinstance(segment, int):
+                    take = min(segment, wanted_frames)
+                    result.extend(bytes(take * frame_bytes))
+                    if take == segment:
+                        self.pending_segments.popleft()
+                    else:
+                        self.pending_segments[0] = segment - take
+                else:
+                    take_bytes = min(len(segment), target - len(result))
+                    result.extend(segment[:take_bytes])
+                    if take_bytes == len(segment):
+                        self.pending_segments.popleft()
+                    else:
+                        self.pending_segments[0] = segment[take_bytes:]
+
         _, kernel32 = _require_windows()
-        while len(self.pending) < target:
+        drain()
+        while len(result) < target:
             wait = kernel32.WaitForSingleObject(self.event, 200)
             if wait == WAIT_TIMEOUT:
                 # The timeout exists only to return control to the recorder so
                 # it can observe shutdown. WASAPI packet frame counts, including
                 # SILENT packets, are the sole source of recorded duration.
-                return b""
+                return bytes(result)
             if wait != WAIT_OBJECT_0:
                 raise ctypes.WinError()
-            while len(self.pending) < target:
+            while len(result) < target:
                 available = UINT32()
                 check_hresult(_method(self.capture, 5, HRESULT, ctypes.POINTER(UINT32))(self.capture, ctypes.byref(available)), "IAudioCaptureClient.GetNextPacketSize")
                 if not available.value:
                     break
                 data, packet_frames, flags = LPVOID(), UINT32(), DWORD()
-                check_hresult(_method(self.capture, 3, HRESULT, ctypes.POINTER(LPVOID), ctypes.POINTER(UINT32), ctypes.POINTER(DWORD), LPVOID, LPVOID)(
-                    self.capture, ctypes.byref(data), ctypes.byref(packet_frames), ctypes.byref(flags), None, None), "IAudioCaptureClient.GetBuffer")
+                device_position = ctypes.c_uint64()
+                qpc_position = ctypes.c_uint64()
+                check_hresult(_method(self.capture, 3, HRESULT, ctypes.POINTER(LPVOID), ctypes.POINTER(UINT32), ctypes.POINTER(DWORD), ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_uint64))(
+                    self.capture, ctypes.byref(data), ctypes.byref(packet_frames), ctypes.byref(flags), ctypes.byref(device_position), ctypes.byref(qpc_position)), "IAudioCaptureClient.GetBuffer")
                 try:
+                    if flags.value & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY:
+                        self.data_discontinuity_events += 1
+                    timestamp_valid = not flags.value & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR
+                    if not timestamp_valid:
+                        self.timestamp_error_events += 1
+                        self.expected_next_device_position = None
+                    else:
+                        position = device_position.value
+                        if self.first_packet_device_position is None:
+                            self.first_packet_device_position = position
+                            self.first_packet_qpc_position = qpc_position.value
+                        self.last_packet_qpc_position = qpc_position.value
+                        expected = self.expected_next_device_position
+                        if expected is not None and position > expected:
+                            gap = position - expected
+                            self.pending_segments.append(gap)
+                            self.inserted_silence_frames += gap
+                            self.device_position_gap_events += 1
+                            self.largest_device_position_gap_frames = max(
+                                self.largest_device_position_gap_frames, gap)
+                        elif expected is not None and position < expected:
+                            self.device_position_regression_events += 1
+                        self.expected_next_device_position = position + packet_frames.value
                     silent = bool(flags.value & AUDCLNT_BUFFERFLAGS_SILENT)
                     raw = b"" if silent else ctypes.string_at(
                         data, packet_frames.value * self.format.block_align)
                     # Exact PCM16 negotiation makes this a single native copy.
                     # Conversion remains available for endpoints that reject it.
-                    self.pending.extend(pcm16(raw, self.format, packet_frames.value, silent))
+                    self.pending_segments.append(
+                        pcm16(raw, self.format, packet_frames.value, silent))
                 finally:
                     check_hresult(_method(self.capture, 4, HRESULT, UINT32)(self.capture, packet_frames.value), "IAudioCaptureClient.ReleaseBuffer")
-        result = bytes(self.pending[:target])
-        del self.pending[:target]
-        return result
+                drain()
+        return bytes(result)
 
     def stop_stream(self) -> None:
         if self.started:

@@ -4,7 +4,11 @@ import pytest
 
 import audio_capture.native_backend as native
 from audio_capture.model import Endpoint
-from audio_capture.wasapi import AudioFormat, LPVOID, WAIT_OBJECT_0, WAIT_TIMEOUT, eRender
+from audio_capture.wasapi import (
+    AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT,
+    AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR, AudioFormat, LPVOID, WAIT_OBJECT_0,
+    WAIT_TIMEOUT, eRender,
+)
 
 
 class TimeoutKernel:
@@ -62,10 +66,12 @@ def test_read_stops_draining_packets_once_one_read_is_buffered(monkeypatch):
                 return 0
             return next_packet
         if index == 3:
-            def get_buffer(_capture, data, frames, flags, *_unused):
+            def get_buffer(_capture, data, frames, flags, position, qpc):
                 data._obj.value = ctypes.addressof(pcm)
                 frames._obj.value = 4
                 flags._obj.value = 0
+                position._obj.value = 0
+                qpc._obj.value = 1
                 return 0
             return get_buffer
         if index == 4:
@@ -81,8 +87,89 @@ def test_read_stops_draining_packets_once_one_read_is_buffered(monkeypatch):
     monkeypatch.setattr(native, "_method", fake_method)
 
     assert len(stream.read(2)) == 8
-    assert len(stream.pending) == 8
+    assert sum(len(item) if isinstance(item, bytes) else item * 4
+               for item in stream.pending_segments) == 8
     assert calls["next"] == 1
+
+
+def packet_stream(monkeypatch, packets):
+    buffers = [ctypes.create_string_buffer(packet[2]) for packet in packets]
+    state = {"index": 0}
+
+    class Kernel:
+        def WaitForSingleObject(self, _event, _milliseconds):
+            return WAIT_OBJECT_0 if state["index"] < len(packets) else WAIT_TIMEOUT
+
+    def fake_method(_pointer, index, _restype, *_argtypes):
+        if index == 5:
+            return lambda _capture, available: (
+                setattr(available._obj, "value", packets[state["index"]][1]) or 0
+                if state["index"] < len(packets) else
+                setattr(available._obj, "value", 0) or 0
+            )
+        if index == 3:
+            def get_buffer(_capture, data, frames, flags, position, qpc):
+                packet_position, count, _raw, packet_flags = packets[state["index"]]
+                data._obj.value = ctypes.addressof(buffers[state["index"]])
+                frames._obj.value = count
+                flags._obj.value = packet_flags
+                position._obj.value = packet_position
+                qpc._obj.value = packet_position * 10
+                return 0
+            return get_buffer
+        if index == 4:
+            def release(*_args):
+                state["index"] += 1
+                return 0
+            return release
+        raise AssertionError(index)
+
+    stream = native.NativeWasapiStream.__new__(native.NativeWasapiStream)
+    stream.format = AudioFormat(1, 48000, 16, 16, "pcm", 2)
+    stream.pending = bytearray()
+    stream.capture = LPVOID(1)
+    stream.event = 123
+    monkeypatch.setattr(native, "_require_windows", lambda: (object(), Kernel()))
+    monkeypatch.setattr(native, "_method", fake_method)
+    return stream
+
+
+def test_device_position_gap_preserves_packet_order(monkeypatch):
+    stream = packet_stream(monkeypatch, [
+        (0, 2, b"\x01\x00\x02\x00", 0),
+        (6, 2, b"\x03\x00\x04\x00", 0),
+    ])
+
+    assert stream.read(8) == b"\x01\x00\x02\x00" + bytes(8) + b"\x03\x00\x04\x00"
+    assert stream.inserted_silence_frames == 4
+    assert stream.device_position_gap_events == 1
+
+
+def test_large_gap_is_held_as_frame_count_and_read_is_bounded(monkeypatch):
+    stream = packet_stream(monkeypatch, [
+        (0, 1, b"\x01\x00", 0), (48_000 * 300, 1, b"\x02\x00", 0),
+    ])
+
+    assert len(stream.read(8)) == 16
+    assert isinstance(stream.pending_segments[0], int)
+    assert stream.pending_segments[0] > 48_000 * 299
+
+
+def test_silent_discontinuity_timestamp_error_and_regression(monkeypatch):
+    stream = packet_stream(monkeypatch, [
+        (0, 2, b"xxxx", AUDCLNT_BUFFERFLAGS_SILENT),
+        (4, 1, b"\x03\x00", AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY),
+        (100, 1, b"\x04\x00", AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR),
+        (3, 1, b"\x05\x00", 0),
+        (2, 1, b"\x06\x00", 0),
+    ])
+
+    data = stream.read(9)
+    assert data == bytes(8) + b"\x03\x00\x04\x00\x05\x00\x06\x00"
+    assert stream.inserted_silence_frames == 2
+    assert stream.data_discontinuity_events == 1
+    assert stream.timestamp_error_events == 1
+    assert stream.device_position_regression_events == 1
 
 
 def test_close_releases_every_resource_even_when_stop_fails(monkeypatch):
