@@ -6,12 +6,16 @@ One-click capture stores internal working data here:
 %LOCALAPPDATA%\WorkAudioCapture\<session>\
   session.json
   session.lock
-  render_0001.wav
-  microphone_0001.wav
+  speaker_00-10min.wav
+  mic_____00-10min.wav
+  speaker_10-20min.wav
+  mic_____10-20min.wav
   ...
 ```
 
 WAV pairs rotate approximately every 10 minutes. They are recovery inputs, not the normal user-facing result; successful normal and recovered MP3s are published in the repository/distribution `recordings` directory.
+
+Repair remains compatible with legacy `render_0001.wav` / `microphone_0001.wav` recovery chunks.
 
 - `session.json` uses `recovery_pending` while a session may need repair. An unlocked pending session can trigger the startup choice to record now (Enter/default) or repair all pending sessions.
 - `session.lock` is OS-backed. A held lock identifies an active session and prevents concurrent repair; the file's mere presence is not used as proof that a process is active.

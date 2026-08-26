@@ -38,7 +38,7 @@ class _Backend:
     ],
 )
 def test_record_filename_style_is_independent_from_mono_output(
-        tmp_path, monkeypatch, extra_args, expected_names, expected_mono):
+        tmp_path, monkeypatch, capsys, extra_args, expected_names, expected_mono):
     backend = _Backend()
     captured = {}
 
@@ -62,6 +62,7 @@ def test_record_filename_style_is_independent_from_mono_output(
         "mono_output": expected_mono,
         "names": expected_names,
     }
+    assert f"Recording to {tmp_path}; press Ctrl+C to stop" in capsys.readouterr().out
     assert backend.closed
 
 

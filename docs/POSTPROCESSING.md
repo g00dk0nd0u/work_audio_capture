@@ -15,7 +15,16 @@ simultaneous WASAPI capture
 
 Recovery WAVs live under `%LOCALAPPDATA%\WorkAudioCapture\<session>` and the published normal MP3 lives in the repository/distribution `recordings` directory. Multiple WAV pairs are fed, in chunk-number order, through one bounded-memory encoder; they do not become multiple numbered MP3 outputs.
 
-The terminal reports `Creating final MP3: N%`. Publication is the transaction boundary: the final path is not exposed until the complete MP3 is finalized, non-empty, and renamed from `<final-name>.part.mp3`.
+The one-click terminal overwrites one line while finalizing, then reports completion:
+
+```text
+Finalizing...   0%
+...
+Finalizing... 100%
+Completed.
+```
+
+Progress is global and monotonic across all recovery chunks in the session; it does not reset to 0% at chunk boundaries. Publication is the transaction boundary: the final path is not exposed until the complete MP3 is finalized, non-empty, and renamed from `<final-name>.part.mp3`.
 
 ## Cancellation and failure
 

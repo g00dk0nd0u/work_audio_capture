@@ -493,12 +493,17 @@ def test_pending_detection_ignores_failed_and_reads_only_metadata(tmp_path, monk
     assert (failed / record_one_click.SESSION_FILE).read_bytes() == failed_marker
 
 
-def test_startup_default_does_not_repair(monkeypatch, tmp_path):
+def test_startup_default_does_not_repair(monkeypatch, tmp_path, capsys):
     pending = _pending_session(tmp_path, "old")
     monkeypatch.setattr("builtins.input", lambda _prompt: "")
 
     assert record_one_click._choose_startup_action([pending]) == "record"
     assert (pending / record_one_click.SESSION_FILE).exists()
+    output = capsys.readouterr().out
+    assert "Previous session(s) need attention." in output
+    assert "Start a new session" in output
+    assert "Repair previous session(s)" in output
+    assert "Recording" not in output
 
 
 def test_no_pending_session_starts_without_prompt(monkeypatch):

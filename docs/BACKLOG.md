@@ -12,7 +12,7 @@ This document separates the implemented baseline from work that still requires e
 - OS-backed `session.lock` protection so active recording and repair cannot operate on the same session concurrently
 - `session.json` interrupted-session tracking, repair-all startup choice, `recovery_pending` discovery, and `recovery_failed` prompt suppression
 - Validation and partial repair of readable matched chunks even when a crash-tail or unpaired chunk cannot be used
-- Sequential mix/downmix of all usable recovery chunks into one mono 80 kbps Media Foundation MP3 per session
+- Sequential mix/downmix of all usable recovery chunks into one mono Media Foundation MP3 per session: 48 kbps by default for normal one-click use, with an explicit optional 80 kbps setting and no silent bitrate fallback
 - Transactional `.part` output, atomic publication, and cleanup only after successful finalize/publish; cancellation and failures preserve recovery inputs
 - Normal MP3 output in the repository/distribution `recordings` directory
 - JSONL diagnostics and repository/distribution synchronization tests
