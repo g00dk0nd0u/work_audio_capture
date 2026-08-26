@@ -75,3 +75,36 @@ def test_trusted_overlap_is_an_invariant_violation(tmp_path):
     with pytest.raises(ValueError, match="trusted placed audio overlaps"):
         output.write(PlacedAudio(b"b\0", 1, 12, True))
     output.close()
+
+
+def test_untrusted_audio_after_silence_rebases_to_observed_session_floor(tmp_path):
+    output = writer(tmp_path)
+    output.write(PlacedAudio(b"a\0" * 80, 80, 0, True))
+    output.advance_session_frame(250)
+    slot0 = tmp_path / "slot0.wav"
+    original = slot0.read_bytes()
+
+    output.write(PlacedAudio(b"b\0" * 10, 10, 80, False))
+    output.close()
+
+    assert slot0.read_bytes() == original
+    assert not (tmp_path / "slot1.wav").exists()
+    count, data = frames(tmp_path / "slot2.wav")
+    assert count == 60
+    assert data[:100] == bytes(100)
+    assert data[-20:] == b"b\0" * 10
+
+
+def test_closed_slot_cannot_be_reopened_or_truncated(tmp_path):
+    import pytest
+    output = writer(tmp_path)
+    output.write(PlacedAudio(b"a\0" * 80, 80, 0, True))
+    output.advance_session_frame(150)
+    slot0 = tmp_path / "slot0.wav"
+    original = slot0.read_bytes()
+
+    with pytest.raises(ValueError, match="closed and immutable"):
+        output.write(PlacedAudio(b"b\0" * 5, 5, 90, True))
+
+    assert slot0.read_bytes() == original
+    assert frames(slot0)[0] == 80
