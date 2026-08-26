@@ -491,7 +491,9 @@ def test_timeline_data_is_split_across_nominal_chunk_slots(
 
     recorder = ConcurrentRecorder(
         Backend(), frames_per_buffer=4, chunk_duration_seconds=10,
+        clock=lambda: 0.0,
     )
+    recorder._chunk_deadline = float("inf")
     recorder._capture(
         Endpoint(1, "synthetic", 1, 1, "render-loopback"),
         tmp_path / "speaker_00-10min.wav",

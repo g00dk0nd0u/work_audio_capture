@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from array import array
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 import json
 import logging
 import math
@@ -395,8 +395,8 @@ def _pcm16_bytes(samples: array) -> bytes:
 
 
 def _encode_recordings_mp3(
-    render_path: Path,
-    microphone_path: Path,
+    render_path: Path | None,
+    microphone_path: Path | None,
     output_path: Path,
     progress=None,
 ) -> None:
@@ -407,14 +407,17 @@ def _encode_chunk_pairs_mp3(pairs, output_path: Path, progress=None) -> None:
     """Encode ordered recovery pairs through one bounded-memory MP3 writer."""
     if not pairs:
         raise ValueError("no recording chunks were supplied")
-    with wave.open(str(pairs[0][0]), "rb") as first:
+    first_path = next(path for pair in pairs for path in pair if path is not None)
+    with wave.open(str(first_path), "rb") as first:
         sample_rate = first.getframerate()
     pair_frames = []
     for render_path, microphone_path in pairs:
-        with wave.open(str(render_path), "rb") as render_file, wave.open(
-            str(microphone_path), "rb"
-        ) as microphone_file:
-            pair_frames.append(max(render_file.getnframes(), microphone_file.getnframes()))
+        counts = []
+        for path in (render_path, microphone_path):
+            if path is not None:
+                with wave.open(str(path), "rb") as source:
+                    counts.append(source.getnframes())
+        pair_frames.append(max(counts))
     total_frames = sum(pair_frames)
     if progress is not None:
         progress(0, total_frames)
@@ -438,45 +441,56 @@ def _encode_chunk_pairs_mp3(pairs, output_path: Path, progress=None) -> None:
             completed_frames += frames
 
 
-def _write_recording_pair(encoder, render_path: Path, microphone_path: Path,
+def _write_recording_pair(encoder, render_path: Path | None,
+                          microphone_path: Path | None,
                           sample_rate: int, progress=None) -> None:
-    with wave.open(str(render_path), "rb") as render_file, wave.open(str(microphone_path), "rb") as microphone_file:
-        render_params = render_file.getparams()
-        microphone_params = microphone_file.getparams()
-        if render_params.framerate != microphone_params.framerate:
+    with ExitStack() as stack:
+        render_file = (stack.enter_context(wave.open(str(render_path), "rb"))
+                       if render_path is not None else None)
+        microphone_file = (stack.enter_context(wave.open(str(microphone_path), "rb"))
+                           if microphone_path is not None else None)
+        existing = [source for source in (render_file, microphone_file)
+                    if source is not None]
+        params = [source.getparams() for source in existing]
+        if len(params) == 2 and params[0].framerate != params[1].framerate:
             raise ValueError(
-                f"sample rate mismatch: render={render_params.framerate}Hz, "
-                f"microphone={microphone_params.framerate}Hz; source WAVs were kept"
+                f"sample rate mismatch: render={params[0].framerate}Hz, "
+                f"microphone={params[1].framerate}Hz; source WAVs were kept"
             )
-        if render_params.framerate != sample_rate:
+        if params[0].framerate != sample_rate:
             raise ValueError("sample rate changed between recovery chunks; source WAVs were kept")
-        if render_params.framerate not in SUPPORTED_MP3_SAMPLE_RATES:
+        if params[0].framerate not in SUPPORTED_MP3_SAMPLE_RATES:
             raise ValueError(
-                f"MP3 encoder does not support {render_params.framerate}Hz without resampling; "
+                f"MP3 encoder does not support {params[0].framerate}Hz without resampling; "
                 "source WAVs were kept"
             )
-        if render_params.sampwidth != 2 or microphone_params.sampwidth != 2:
+        if any(item.sampwidth != 2 for item in params):
             raise ValueError("render and microphone WAVs must be PCM16; source WAVs were kept")
-        if render_params.nchannels < 1 or microphone_params.nchannels < 1:
+        if any(item.nchannels < 1 for item in params):
             raise ValueError("render and microphone WAVs must contain at least one channel; source WAVs were kept")
 
-        total_frames = max(render_params.nframes, microphone_params.nframes)
+        total_frames = max(item.nframes for item in params)
         processed_frames = 0
-        raw_render_stats = _LevelStatistics(render_params.nchannels)
-        raw_microphone_stats = _LevelStatistics(microphone_params.nchannels)
+        raw_render_stats = _LevelStatistics(params[0].nchannels if render_file else 1)
+        raw_microphone_stats = _LevelStatistics(
+            (microphone_file.getnchannels() if microphone_file else 1))
         mono_render_stats = _LevelStatistics()
         mono_microphone_stats = _LevelStatistics()
         mixed_stats = _LevelStatistics()
         clipped_samples = 0
 
         while True:
-            render_raw = _pcm16_samples(render_file.readframes(MIX_FRAMES))
-            microphone_raw = _pcm16_samples(microphone_file.readframes(MIX_FRAMES))
+            render_raw = _pcm16_samples(
+                render_file.readframes(MIX_FRAMES) if render_file else b"")
+            microphone_raw = _pcm16_samples(
+                microphone_file.readframes(MIX_FRAMES) if microphone_file else b"")
             raw_render_stats.add(render_raw)
             raw_microphone_stats.add(microphone_raw)
-            render_samples = _mono_samples(_pcm16_bytes(render_raw), render_params.nchannels)
+            render_samples = _mono_samples(
+                _pcm16_bytes(render_raw), render_file.getnchannels() if render_file else 1)
             microphone_samples = _mono_samples(
-                _pcm16_bytes(microphone_raw), microphone_params.nchannels)
+                _pcm16_bytes(microphone_raw),
+                microphone_file.getnchannels() if microphone_file else 1)
             if not render_samples and not microphone_samples:
                 break
             mono_render_stats.add(render_samples)
@@ -535,9 +549,9 @@ def _recording_chunks(directory: Path, stem: str) -> dict[int, Path]:
     return slot_chunks or chunks
 
 
-def _readable_pair(render_path: Path, microphone_path: Path) -> None:
-    """Fully validate a pair so a truncated crash tail is never consumed."""
-    for path in (render_path, microphone_path):
+def _readable_chunks(*paths: Path | None) -> None:
+    """Fully validate present chunks so a truncated crash tail is never consumed."""
+    for path in (path for path in paths if path is not None):
         with wave.open(str(path), "rb") as source:
             frame_bytes = source.getnchannels() * source.getsampwidth()
             remaining = source.getnframes()
@@ -551,6 +565,11 @@ def _readable_pair(render_path: Path, microphone_path: Path) -> None:
                 remaining -= requested
             if source.readframes(1):
                 raise ValueError(f"incomplete WAV chunk: {path.name}")
+
+
+def _readable_pair(render_path: Path, microphone_path: Path) -> None:
+    """Backward-compatible validator for a complete recovery pair."""
+    _readable_chunks(render_path, microphone_path)
 
 
 def _unique_recovered_path(session: Path) -> Path:
@@ -594,23 +613,20 @@ def _repair_session(session: Path, logger: logging.Logger) -> str:
 def _repair_locked_session(session: Path, logger: logging.Logger) -> str:
     render = _recording_chunks(session, "render")
     microphone = _recording_chunks(session, "microphone")
-    common = sorted(render.keys() & microphone.keys())
+    available = sorted(render.keys() | microphone.keys())
     readable = []
     problem = None
-    for number in common:
+    for number in available:
         try:
-            _readable_pair(render[number], microphone[number])
+            _readable_chunks(render.get(number), microphone.get(number))
         except Exception as exc:
             problem = str(exc)
             continue
         readable.append(number)
 
-    unpaired = sorted(render.keys() ^ microphone.keys())
-    if problem is None and unpaired:
-        problem = f"unpaired chunks remain: {unpaired}"
     try:
         if not readable:
-            raise ValueError(problem or "no safely readable matched chunks were found")
+            raise ValueError(problem or "no safely readable recording chunks were found")
         _mix_available_chunks(
             session, logger, _unique_recovered_path(session), chunk_numbers=readable
         )
@@ -659,18 +675,20 @@ def _mix_available_chunks(output: Path, logger: logging.Logger,
                           chunk_numbers: list[int] | None = None) -> Path:
     render_chunks = _recording_chunks(output, "render")
     microphone_chunks = _recording_chunks(output, "microphone")
-    common_chunks = sorted(render_chunks.keys() & microphone_chunks.keys())
+    available_chunks = sorted(render_chunks.keys() | microphone_chunks.keys())
     if chunk_numbers is not None:
-        common_chunks = [number for number in chunk_numbers if number in common_chunks]
+        available_chunks = [number for number in chunk_numbers
+                            if number in available_chunks]
     missing_render = sorted(microphone_chunks.keys() - render_chunks.keys())
     missing_microphone = sorted(render_chunks.keys() - microphone_chunks.keys())
     if missing_render or missing_microphone:
         logger.warning(
-            "Unpaired recording chunks kept: missing_render=%s missing_microphone=%s",
+            "Unpaired recording chunks encoded with the missing side as silence: "
+            "missing_render=%s missing_microphone=%s",
             missing_render, missing_microphone,
         )
-    if not common_chunks:
-        raise ValueError("no matching render/microphone chunks were found; source WAVs were kept")
+    if not available_chunks:
+        raise ValueError("no recording chunks were found; source WAVs were kept")
 
     final_path = final_path or output / "recording_0001.mp3"
     final_path.parent.mkdir(parents=True, exist_ok=True)
@@ -690,10 +708,11 @@ def _mix_available_chunks(output: Path, logger: logging.Logger,
             log_percent = (percent // 10) * 10
             last_logged_percent = log_percent
             logger.info("MP3 post-processing progress", extra={
-                "postprocess_chunks": len(common_chunks), "postprocess_percent": percent})
+                "postprocess_chunks": len(available_chunks), "postprocess_percent": percent})
 
     try:
-        pairs = [(render_chunks[number], microphone_chunks[number]) for number in common_chunks]
+        pairs = [(render_chunks.get(number), microphone_chunks.get(number))
+                 for number in available_chunks]
         def encoding_progress(done_frames: int, total_frames: int) -> None:
             # Publishing is part of finalization, so reserve 100% for the
             # successful atomic replace below.
@@ -710,7 +729,7 @@ def _mix_available_chunks(output: Path, logger: logging.Logger,
         # Transaction boundary: sources survive until the complete MP3 is
         # finalized and atomically published. Finalization is not complete
         # until cleanup of every incorporated source succeeds.
-        for path in (path for pair in pairs for path in pair):
+        for path in (path for pair in pairs for path in pair if path is not None):
             path.unlink()
     except BaseException:
         print()

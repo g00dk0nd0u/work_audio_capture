@@ -297,7 +297,7 @@ def test_encode_keeps_sources_when_sample_rates_differ(tmp_path):
     assert not output.exists()
 
 
-def test_mix_common_chunks_promotes_mp3_and_keeps_unpaired_final_chunk(tmp_path, caplog):
+def test_mix_includes_unpaired_final_chunk_as_one_sided_audio(tmp_path, caplog):
     caplog.set_level(logging.WARNING)
     render = tmp_path / "render_0001.wav"
     microphone = tmp_path / "microphone_0001.wav"
@@ -312,8 +312,9 @@ def test_mix_common_chunks_promotes_mp3_and_keeps_unpaired_final_chunk(tmp_path,
     assert not (tmp_path / "recording_0001.part.mp3").exists()
     assert not render.exists()
     assert not microphone.exists()
-    assert unpaired.exists()
-    assert "Unpaired recording chunks kept" in caplog.text
+    assert not unpaired.exists()
+    assert _samples(bytes(_FakeEncoder.instances[0].data)) == [4, 4]
+    assert "missing side as silence" in caplog.text
 
 
 def test_multiple_chunks_are_encoded_into_one_final_mp3(tmp_path):
@@ -327,6 +328,32 @@ def test_multiple_chunks_are_encoded_into_one_final_mp3(tmp_path):
     assert len(_FakeEncoder.instances) == 1
     assert _samples(bytes(_FakeEncoder.instances[0].data)) == [11, 21]
     assert not list(tmp_path.glob("*.wav"))
+
+
+def test_microphone_only_later_slots_are_preserved_in_final_mp3(tmp_path):
+    _write(tmp_path / "speaker_00-10min.wav", 1, 48000, [10])
+    for start, value in ((0, 1), (10, 2), (20, 3)):
+        _write(tmp_path / f"mic_____{start:02d}-{start + 10:02d}min.wav",
+               1, 48000, [value])
+
+    record_one_click._mix_available_chunks(tmp_path, logging.getLogger("one-sided"))
+
+    assert _samples(bytes(_FakeEncoder.instances[0].data)) == [11, 2, 3]
+    assert not list(tmp_path.glob("*.wav"))
+
+
+def test_repair_preserves_microphone_only_later_slots(tmp_path, monkeypatch):
+    session = _pending_session(tmp_path, "one-sided-repair")
+    _write(session / "speaker_00-10min.wav", 1, 48000, [10])
+    for start, value in ((0, 1), (10, 2), (20, 3)):
+        _write(session / f"mic_____{start:02d}-{start + 10:02d}min.wav",
+               1, 48000, [value])
+    monkeypatch.setattr(record_one_click, "OUTPUT_ROOT", tmp_path / "recovered")
+
+    assert record_one_click._repair_session(
+        session, logging.getLogger("one-sided-repair")) == record_one_click.REPAIR_FULL
+    assert _samples(bytes(_FakeEncoder.instances[0].data)) == [11, 2, 3]
+    assert not session.exists()
 
 
 def test_new_time_slot_chunks_are_paired_and_encoded(tmp_path):

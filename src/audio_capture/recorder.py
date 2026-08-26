@@ -388,6 +388,7 @@ class ConcurrentRecorder:
                     endpoint.sample_rate * self.chunk_duration_seconds,
                 )
             frames_in_chunk = 0
+            timeline_frames_represented = 0
             chunk_number = 1
             capture_start_attempted = False
             while True:
@@ -407,7 +408,23 @@ class ConcurrentRecorder:
                     # a structurally useful WAV, even when stop races startup.
                     while True:
                         remaining_frames = max_chunk_frames - frames_in_chunk
-                        read_frames = min(self.frames, remaining_frames)
+                        advance_silence = getattr(
+                            stream, "advance_pending_silence", None)
+                        if advance_silence is not None and self.chunk_duration_seconds > 0:
+                            nominal_position = (
+                                (chunk_number - 1) * endpoint.sample_rate *
+                                self.chunk_duration_seconds + frames_in_chunk
+                            )
+                            already_represented = max(
+                                0, nominal_position - statistics.total_input_frames -
+                                timeline_frames_represented)
+                            timeline_frames_represented += int(
+                                advance_silence(already_represented))
+                        hinted_frames = self.frames
+                        hint = getattr(stream, "read_size_hint", None)
+                        if hint is not None:
+                            hinted_frames = max(self.frames, int(hint(self.frames)))
+                        read_frames = min(hinted_frames, remaining_frames)
                         if not capture_start_attempted:
                             capture_start_attempted = True
                             statistics.capture_start_monotonic = self._diagnostics_now()
@@ -433,15 +450,13 @@ class ConcurrentRecorder:
                         frames_in_chunk += input_frames
                         if self.stop_event.is_set():
                             return
-                        # Keep wall-clock rollover observation for the shared
-                        # disk-space guard. File placement itself follows the
-                        # sample timeline so delayed silence cannot move slots.
-                        self._session_chunk_number()
+                        session_chunk = self._session_chunk_number()
                         if self.stop_event.is_set():
                             return
+                        time_limit = session_chunk > chunk_number
                         size_limit = frames_in_chunk >= max_chunk_frames
-                        if size_limit:
-                            chunk_number += 1
+                        if time_limit or size_limit:
+                            chunk_number = max(chunk_number + 1, session_chunk)
                             break
                 except BaseException as exc:
                     chunk_error = exc

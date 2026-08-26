@@ -205,6 +205,27 @@ class NativeWasapiStream:
                 raise exc from cleanup_error
             raise
 
+    def read_size_hint(self, default_frames: int) -> int:
+        """Use bounded larger writes while catching up known silence."""
+        if (self.pending_segments and
+                isinstance(self.pending_segments[0], int)):
+            return max(default_frames, self.format.sample_rate * 10)
+        return default_frames
+
+    def advance_pending_silence(self, frames: int) -> int:
+        """Consume only confirmed leading gap silence represented by closed slots."""
+        if frames <= 0 or not self.pending_segments:
+            return 0
+        segment = self.pending_segments[0]
+        if not isinstance(segment, int):
+            return 0
+        consumed = min(frames, segment)
+        if consumed == segment:
+            self.pending_segments.popleft()
+        else:
+            self.pending_segments[0] = segment - consumed
+        return consumed
+
     def read(self, frames: int, exception_on_overflow: bool = False) -> bytes:
         target = frames * self.format.channels * 2
         frame_bytes = self.format.channels * 2
@@ -265,9 +286,12 @@ class NativeWasapiStream:
                 check_hresult(_method(self.capture, 3, HRESULT, ctypes.POINTER(LPVOID), ctypes.POINTER(UINT32), ctypes.POINTER(DWORD), ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_uint64))(
                     self.capture, ctypes.byref(data), ctypes.byref(packet_frames), ctypes.byref(flags), ctypes.byref(device_position), ctypes.byref(qpc_position)), "IAudioCaptureClient.GetBuffer")
                 try:
-                    if flags.value & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY:
+                    discontinuity = bool(
+                        flags.value & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY)
+                    if discontinuity:
                         self.data_discontinuity_events += 1
-                    timestamp_valid = not flags.value & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR
+                    timestamp_valid = not (
+                        flags.value & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR)
                     if not timestamp_valid:
                         self.timestamp_error_events += 1
                         self.expected_next_device_position = None
@@ -278,7 +302,12 @@ class NativeWasapiStream:
                             self.first_packet_qpc_position = qpc_position.value
                         self.last_packet_qpc_position = qpc_position.value
                         expected = self.expected_next_device_position
-                        if expected is not None and position > expected:
+                        if discontinuity:
+                            # The current position is not correlated with the
+                            # previous packet. Keep its audio, but require the
+                            # following valid packet to establish continuity.
+                            self.expected_next_device_position = None
+                        elif expected is not None and position > expected:
                             gap = position - expected
                             self.pending_segments.append(gap)
                             self.inserted_silence_frames += gap
@@ -287,7 +316,10 @@ class NativeWasapiStream:
                                 self.largest_device_position_gap_frames, gap)
                         elif expected is not None and position < expected:
                             self.device_position_regression_events += 1
-                        self.expected_next_device_position = position + packet_frames.value
+                            self.expected_next_device_position = None
+                        else:
+                            self.expected_next_device_position = (
+                                position + packet_frames.value)
                     silent = bool(flags.value & AUDCLNT_BUFFERFLAGS_SILENT)
                     raw = b"" if silent else ctypes.string_at(
                         data, packet_frames.value * self.format.block_align)

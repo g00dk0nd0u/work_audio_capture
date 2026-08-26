@@ -153,6 +153,9 @@ def test_large_gap_is_held_as_frame_count_and_read_is_bounded(monkeypatch):
     assert len(stream.read(8)) == 16
     assert isinstance(stream.pending_segments[0], int)
     assert stream.pending_segments[0] > 48_000 * 299
+    remaining = stream.pending_segments[0]
+    assert stream.advance_pending_silence(48_000 * 120) == 48_000 * 120
+    assert stream.pending_segments[0] == remaining - 48_000 * 120
 
 
 def test_silent_discontinuity_timestamp_error_and_regression(monkeypatch):
@@ -165,10 +168,25 @@ def test_silent_discontinuity_timestamp_error_and_regression(monkeypatch):
     ])
 
     data = stream.read(9)
-    assert data == bytes(8) + b"\x03\x00\x04\x00\x05\x00\x06\x00"
-    assert stream.inserted_silence_frames == 2
+    assert data == bytes(4) + b"\x03\x00\x04\x00\x05\x00\x06\x00"
+    assert stream.inserted_silence_frames == 0
     assert stream.data_discontinuity_events == 1
     assert stream.timestamp_error_events == 1
+    assert stream.device_position_regression_events == 1
+
+
+def test_discontinuity_jump_and_regression_do_not_create_phantom_gaps(monkeypatch):
+    stream = packet_stream(monkeypatch, [
+        (0, 2, b"\x01\x00\x02\x00", 0),
+        (1_000_000, 1, b"\x03\x00", AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY),
+        (1_000_001, 1, b"\x04\x00", 0),
+        (10, 1, b"\x05\x00", 0),
+        (11, 1, b"\x06\x00", 0),
+    ])
+
+    assert stream.read(6) == b"\x01\x00\x02\x00\x03\x00\x04\x00\x05\x00\x06\x00"
+    assert stream.inserted_silence_frames == 0
+    assert stream.data_discontinuity_events == 1
     assert stream.device_position_regression_events == 1
 
 
