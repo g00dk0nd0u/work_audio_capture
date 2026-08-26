@@ -168,9 +168,12 @@ def test_distribution_runtime_files_match_repository_runtime():
             repository_package / relative_path
         ).read_bytes(), relative_path
 
-    for launcher in ("record_one_click.py", "run.py"):
+    for launcher in ("record_one_click.py",):
         assert (
             DISTRIBUTION_ROOT / launcher
         ).read_bytes() == (
             PROJECT_ROOT / launcher
         ).read_bytes(), launcher
+
+    # run.py is the repository-only advanced/developer CLI, not an end-user launcher.
+    assert not (DISTRIBUTION_ROOT / "run.py").exists()
