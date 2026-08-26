@@ -32,13 +32,18 @@ class SparseRecoveryWriter:
         self.written_in_slot = 0
         self.timeline_gap_frames_filled = 0
         self.occupied_slots: set[int] = set()
+        self.closed_slots: set[int] = set()
         self.sequential_session_frame = 0
+        self.observed_session_frame = 0
 
     def _open(self, slot: int, prefix_frames: int) -> None:
         self.close()
+        path = self.path_for_slot(slot)
+        if slot in self.closed_slots or path.exists():
+            raise ValueError("recovery slot is already closed and immutable")
         if self.before_open is not None:
             self.before_open()
-        output = wave.open(str(self.path_for_slot(slot)), "wb")
+        output = wave.open(str(path), "wb")
         try:
             output.setnchannels(self.channels)
             output.setsampwidth(self.sample_width)
@@ -51,6 +56,8 @@ class SparseRecoveryWriter:
         except BaseException:
             output.close()
             self.output = None
+            self.slot = None
+            self.closed_slots.add(slot)
             raise
 
     def _zeros(self, frames: int) -> None:
@@ -68,10 +75,14 @@ class SparseRecoveryWriter:
         if len(placed.pcm) != placed.frame_count * self.block_align:
             raise ValueError("placed PCM byte count does not match its frame count")
         frame = placed.session_start_frame
-        if frame < self.sequential_session_frame:
-            if placed.timing_trusted:
+        if placed.timing_trusted:
+            if frame < self.sequential_session_frame:
                 raise ValueError("trusted placed audio overlaps recovery timeline")
-            frame = self.sequential_session_frame
+        else:
+            # Untrusted packets preserve speech order and may not move behind a
+            # QPC-observed session position after a silent interval.
+            frame = max(frame, self.sequential_session_frame,
+                        self.observed_session_frame)
         source_frame = 0
         while source_frame < placed.frame_count:
             slot = max(0, frame // self.slot_frames)
@@ -94,7 +105,11 @@ class SparseRecoveryWriter:
             self.sequential_session_frame = frame
 
     def advance_session_frame(self, current_session_frame: int) -> None:
-        """Close an occupied slot after its QPC-derived deadline, without filling it."""
+        """Advance the observed QPC timeline and close expired occupied slots."""
+        if current_session_frame < 0:
+            raise ValueError("session frame must not be negative")
+        self.observed_session_frame = max(
+            self.observed_session_frame, current_session_frame)
         if (self.output is not None and self.slot is not None and
                 current_session_frame >= (self.slot + 1) * self.slot_frames):
             self.close()
@@ -102,5 +117,12 @@ class SparseRecoveryWriter:
     def close(self) -> None:
         if self.output is not None:
             output = self.output
+            slot = self.slot
             self.output = None
-            output.close()
+            self.slot = None
+            self.written_in_slot = 0
+            try:
+                output.close()
+            finally:
+                if slot is not None:
+                    self.closed_slots.add(slot)
