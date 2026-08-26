@@ -842,3 +842,40 @@ def test_sparse_missing_middle_slot_preserves_silent_interval(tmp_path, monkeypa
     assert samples[0] == 11
     assert samples[48_000:96_000] == [0] * 48_000
     assert samples[-1] == 22
+
+
+def test_repair_keeps_corrupt_side_but_recovers_valid_opposite_audio(tmp_path, monkeypatch):
+    session = tmp_path / "session"
+    session.mkdir()
+    monkeypatch.setattr(record_one_click, "OUTPUT_ROOT", tmp_path / "recovered")
+    monkeypatch.setattr(record_one_click, "DEFAULT_CHUNK_DURATION_SECONDS", 1)
+    for number, value in ((1, 10), (2, 20), (3, 30)):
+        start = (number - 1) * 10
+        _write(session / f"speaker_{start:02d}-{start + 10:02d}min.wav", 1, 48000, [value])
+        _write(session / f"mic_____{start:02d}-{start + 10:02d}min.wav", 1, 48000, [1])
+    corrupt = session / "mic_____10-20min.wav"
+    corrupt.write_bytes(b"corrupt")
+
+    result = record_one_click._repair_locked_session(
+        session, logging.getLogger("test-independent-repair"))
+
+    assert result == record_one_click.REPAIR_PARTIAL
+    assert corrupt.read_bytes() == b"corrupt"
+    encoded = _samples(bytes(_FakeEncoder.instances[0].data))
+    assert 20 in encoded
+
+
+def test_timeline_session_preserves_leading_fully_silent_slots(tmp_path, monkeypatch):
+    monkeypatch.setattr(record_one_click, "DEFAULT_CHUNK_DURATION_SECONDS", 1)
+    _write(tmp_path / "speaker_20-30min.wav", 1, 48000, [7])
+    (tmp_path / record_one_click.SESSION_FILE).write_text(json.dumps({
+        "status": record_one_click.RECOVERY_PENDING,
+        "session_timeline_capture": True,
+    }), encoding="utf-8")
+
+    record_one_click._mix_available_chunks(tmp_path, logging.getLogger("test-leading"))
+
+    samples = _samples(bytes(_FakeEncoder.instances[0].data))
+    assert len(samples) == 96_001
+    assert samples[:96_000] == [0] * 96_000
+    assert samples[-1] == 7

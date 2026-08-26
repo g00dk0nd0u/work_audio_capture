@@ -10,6 +10,10 @@ from .model import PlacedAudio
 ZERO_BLOCK_FRAMES = 32_768
 
 
+class GracefulStopRequested(Exception):
+    """Internal control flow for a confirmed recovery disk-space stop."""
+
+
 class SparseRecoveryWriter:
     def __init__(self, path_for_slot: Callable[[int], Path], sample_rate: int,
                  channels: int, sample_width: int, slot_seconds: int,
@@ -28,6 +32,7 @@ class SparseRecoveryWriter:
         self.written_in_slot = 0
         self.timeline_gap_frames_filled = 0
         self.occupied_slots: set[int] = set()
+        self.sequential_session_frame = 0
 
     def _open(self, slot: int, prefix_frames: int) -> None:
         self.close()
@@ -63,6 +68,10 @@ class SparseRecoveryWriter:
         if len(placed.pcm) != placed.frame_count * self.block_align:
             raise ValueError("placed PCM byte count does not match its frame count")
         frame = placed.session_start_frame
+        if frame < self.sequential_session_frame:
+            if placed.timing_trusted:
+                raise ValueError("trusted placed audio overlaps recovery timeline")
+            frame = self.sequential_session_frame
         source_frame = 0
         while source_frame < placed.frame_count:
             slot = max(0, frame // self.slot_frames)
@@ -75,15 +84,20 @@ class SparseRecoveryWriter:
             if offset > self.written_in_slot:
                 self._zeros(offset - self.written_in_slot)
             elif offset < self.written_in_slot:
-                # TimelineMapper normally prevents this. Preserve speech order
-                # rather than replacing already written audio on uncertainty.
-                offset = self.written_in_slot
+                raise ValueError("placed audio overlaps the open recovery slot")
             data = placed.pcm[source_frame * self.block_align:
                               (source_frame + count) * self.block_align]
             self.output.writeframesraw(data)
             self.written_in_slot += count
             source_frame += count
             frame += count
+            self.sequential_session_frame = frame
+
+    def advance_session_frame(self, current_session_frame: int) -> None:
+        """Close an occupied slot after its QPC-derived deadline, without filling it."""
+        if (self.output is not None and self.slot is not None and
+                current_session_frame >= (self.slot + 1) * self.slot_frames):
+            self.close()
 
     def close(self) -> None:
         if self.output is not None:

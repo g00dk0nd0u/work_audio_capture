@@ -14,6 +14,11 @@ from .recorder import ConcurrentRecorder
 
 
 LOGGER = logging.getLogger("work_audio_capture")
+_LAST_SESSION_DURATION_100NS: int | None = None
+
+
+def last_session_duration_100ns() -> int | None:
+    return _LAST_SESSION_DURATION_100NS
 
 
 def _print_group(title: str, endpoints: list[Endpoint]) -> None:
@@ -28,6 +33,8 @@ def _backend(name: str):
 
 
 def main() -> int:
+    global _LAST_SESSION_DURATION_100NS
+    _LAST_SESSION_DURATION_100NS = None
     parser = argparse.ArgumentParser(description="WASAPI loopback + microphone recorder")
     parser.add_argument("command", choices=("doctor", "list", "record"))
     parser.add_argument("--backend", choices=("native", "pyaudio"), default="native",
@@ -80,9 +87,11 @@ def main() -> int:
         recorder_options = {"mono_output": args.mono_wav}
         if args.recovery_disk_safety:
             recorder_options["recovery_disk_safety_path"] = directory
-        ConcurrentRecorder(backend, **recorder_options).record(
+        recorder = ConcurrentRecorder(backend, **recorder_options)
+        recorder.record(
             choose(render, args.render), choose(capture, args.microphone),
             render_path, microphone_path)
+        _LAST_SESSION_DURATION_100NS = getattr(recorder, "session_duration_100ns", None)
         return 0
     except (RuntimeError, ValueError, OSError) as exc:
         print(f"Audio backend error: {exc}", file=sys.stderr)

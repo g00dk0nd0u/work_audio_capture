@@ -228,16 +228,20 @@ class NativeWasapiStream:
     def read_packet(self) -> CapturePacket | None:
         """Return one copied WASAPI packet without interpreting its timeline."""
         _, kernel32 = _require_windows()
-        wait = kernel32.WaitForSingleObject(self.event, 200)
-        if wait == WAIT_TIMEOUT:
-            return None
-        if wait != WAIT_OBJECT_0:
-            raise ctypes.WinError()
         available = UINT32()
         check_hresult(_method(self.capture, 5, HRESULT, ctypes.POINTER(UINT32))(
             self.capture, ctypes.byref(available)), "IAudioCaptureClient.GetNextPacketSize")
         if not available.value:
-            return None
+            wait = kernel32.WaitForSingleObject(self.event, 200)
+            if wait == WAIT_TIMEOUT:
+                return None
+            if wait != WAIT_OBJECT_0:
+                raise ctypes.WinError()
+            check_hresult(_method(self.capture, 5, HRESULT, ctypes.POINTER(UINT32))(
+                self.capture, ctypes.byref(available)),
+                "IAudioCaptureClient.GetNextPacketSize")
+            if not available.value:
+                return None
         data, packet_frames, flags = LPVOID(), UINT32(), DWORD()
         device_position = ctypes.c_ulonglong()
         qpc_position = ctypes.c_ulonglong()

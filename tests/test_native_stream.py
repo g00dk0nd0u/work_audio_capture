@@ -219,3 +219,70 @@ def test_read_packet_copies_metadata_before_release(monkeypatch):
     assert (packet.frame_count, packet.device_position,
             packet.qpc_position_100ns, packet.flags) == (2, 123, 456, 0)
     assert released == [2]
+
+
+def test_read_packet_drains_queued_packets_without_waiting_for_another_event(monkeypatch):
+    payloads = [ctypes.create_string_buffer(b"\x01\x00"),
+                ctypes.create_string_buffer(b"\x02\x00")]
+    available = iter((0, 1, 1))
+    waits = []
+    released = []
+    packet_index = 0
+
+    class Kernel:
+        def WaitForSingleObject(self, _event, milliseconds):
+            waits.append(milliseconds)
+            return WAIT_OBJECT_0
+
+    def fake_method(_pointer, index, _restype, *_argtypes):
+        if index == 5:
+            return lambda _capture, result: (setattr(result._obj, "value", next(available)) or 0)
+        if index == 3:
+            def get_buffer(_capture, data, frames, flags, device, qpc):
+                nonlocal packet_index
+                data._obj.value = ctypes.addressof(payloads[packet_index])
+                frames._obj.value = 1
+                flags._obj.value = 0
+                device._obj.value = packet_index
+                qpc._obj.value = 100 + packet_index
+                packet_index += 1
+                return 0
+            return get_buffer
+        if index == 4:
+            return lambda _capture, frames: (released.append(frames) or 0)
+        raise AssertionError(index)
+
+    stream = native.NativeWasapiStream.__new__(native.NativeWasapiStream)
+    stream.format = AudioFormat(1, 48000, 16, 16, "pcm", 2)
+    stream.capture = LPVOID(1)
+    stream.event = 123
+    monkeypatch.setattr(native, "_require_windows", lambda: (object(), Kernel()))
+    monkeypatch.setattr(native, "_method", fake_method)
+
+    assert stream.read_packet().pcm == b"\x01\x00"
+    assert stream.read_packet().pcm == b"\x02\x00"
+    assert waits == [200]
+    assert released == [1, 1]
+
+
+def test_read_packet_timeout_occurs_only_after_no_packet_is_queued(monkeypatch):
+    checks = []
+
+    class Kernel:
+        def WaitForSingleObject(self, _event, milliseconds):
+            assert checks == [0]
+            assert milliseconds == 200
+            return WAIT_TIMEOUT
+
+    def fake_method(_pointer, index, _restype, *_argtypes):
+        assert index == 5
+        return lambda _capture, result: (checks.append(0) or setattr(result._obj, "value", 0) or 0)
+
+    stream = native.NativeWasapiStream.__new__(native.NativeWasapiStream)
+    stream.capture = LPVOID(1)
+    stream.event = 123
+    monkeypatch.setattr(native, "_require_windows", lambda: (object(), Kernel()))
+    monkeypatch.setattr(native, "_method", fake_method)
+
+    assert stream.read_packet() is None
+    assert checks == [0]

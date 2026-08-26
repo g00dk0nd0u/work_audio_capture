@@ -13,7 +13,6 @@ import platform
 import re
 import shutil
 import sys
-import time
 from types import SimpleNamespace
 import wave
 
@@ -22,7 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 SOURCE = PROJECT_ROOT / "src"
 sys.path.insert(0, str(SOURCE))
 
-from audio_capture.cli import main  # noqa: E402
+from audio_capture.cli import last_session_duration_100ns, main  # noqa: E402
 from audio_capture.media_foundation import (  # noqa: E402
     DEFAULT_MP3_BITRATE_BPS,
     SUPPORTED_MP3_BITRATES_BPS,
@@ -634,36 +633,42 @@ def _repair_locked_session(session: Path, logger: logging.Logger) -> str:
                  for path in (*render.values(), *microphone.values()))
     available = sorted(render.keys() | microphone.keys()) if sparse else sorted(
         render.keys() & microphone.keys())
-    readable = []
-    problem = None
+    safe_render: dict[int, Path] = {}
+    safe_microphone: dict[int, Path] = {}
+    problems = []
     for number in available:
-        try:
-            for path in (render.get(number), microphone.get(number)):
-                if path is not None:
-                    _readable_chunk(path)
-        except Exception as exc:
-            problem = str(exc)
-            continue
-        readable.append(number)
+        for label, source, safe in (("render", render, safe_render),
+                                    ("microphone", microphone, safe_microphone)):
+            path = source.get(number)
+            if path is None:
+                continue
+            try:
+                _readable_chunk(path)
+            except Exception as exc:
+                problems.append(f"{label} slot {number}: {exc}")
+            else:
+                safe[number] = path
 
     unpaired = sorted(render.keys() ^ microphone.keys())
-    if not sparse and problem is None and unpaired:
-        problem = f"unpaired chunks remain: {unpaired}"
+    if not sparse and unpaired:
+        problems.append(f"unpaired chunks remain: {unpaired}")
 
     try:
-        if not readable:
-            raise ValueError(problem or "no safely readable matched chunks were found")
+        if not safe_render and not safe_microphone:
+            raise ValueError("; ".join(problems) or
+                             "no safely readable chunks were found")
         _mix_available_chunks(
-            session, logger, _unique_recovered_path(session), chunk_numbers=readable
+            session, logger, _unique_recovered_path(session),
+            render_chunks=safe_render, microphone_chunks=safe_microphone,
         )
     except Exception as exc:
-        reason = problem or str(exc)
+        reason = "; ".join(problems) or str(exc)
         _write_session_state(session, RECOVERY_FAILED, reason)
         logger.exception("Interrupted recording repair failed: %s", session)
         return REPAIR_FAILED
 
-    if problem:
-        _write_session_state(session, RECOVERY_FAILED, problem)
+    if problems:
+        _write_session_state(session, RECOVERY_FAILED, "; ".join(problems))
         return REPAIR_PARTIAL
     return REPAIR_FULL
 
@@ -698,9 +703,15 @@ def _repair_all(sessions: list[Path], logger: logging.Logger) -> int:
 
 def _mix_available_chunks(output: Path, logger: logging.Logger,
                           final_path: Path | None = None,
-                          chunk_numbers: list[int] | None = None) -> Path:
-    render_chunks = _recording_chunks(output, "render")
-    microphone_chunks = _recording_chunks(output, "microphone")
+                          chunk_numbers: list[int] | None = None,
+                          render_chunks: dict[int, Path] | None = None,
+                          microphone_chunks: dict[int, Path] | None = None) -> Path:
+    # Repair passes independently validated maps. Never rediscover rejected
+    # paths from the directory after this API boundary.
+    if render_chunks is None:
+        render_chunks = _recording_chunks(output, "render")
+    if microphone_chunks is None:
+        microphone_chunks = _recording_chunks(output, "microphone")
     all_chunk_numbers = render_chunks.keys() | microphone_chunks.keys()
     sparse = any(_SLOT_WAV.fullmatch(path.name)
                  for path in (*render_chunks.values(), *microphone_chunks.values()))
@@ -733,7 +744,8 @@ def _mix_available_chunks(output: Path, logger: logging.Logger,
             )
     # Slot filenames encode a shared timeline. Include absent middle slots and
     # treat a missing endpoint as silence rather than dropping valid speech.
-    timeline_chunks = (list(range(min(available_chunks), max(available_chunks) + 1))
+    timeline_start = 1 if state.get("session_timeline_capture") else min(available_chunks)
+    timeline_chunks = (list(range(timeline_start, max(available_chunks) + 1))
                        if timeline_sparse else available_chunks)
 
     final_path = final_path or output / "recording_0001.mp3"
@@ -773,12 +785,12 @@ def _mix_available_chunks(output: Path, logger: logging.Logger,
                     adjacent = next(path for path in (*render_chunks.values(), *microphone_chunks.values()))
                     with wave.open(str(adjacent), "rb") as source:
                         timeline_frames = source.getframerate() * DEFAULT_CHUNK_DURATION_SECONDS
-            elif timeline_sparse and state.get("session_duration_seconds") is not None:
+            elif timeline_sparse and state.get("session_duration_100ns") is not None:
                 existing = render_path or microphone_path
                 if existing is not None:
                     with wave.open(str(existing), "rb") as source:
                         rate = source.getframerate()
-                        end_frame = int(float(state["session_duration_seconds"]) * rate)
+                        end_frame = int(state["session_duration_100ns"]) * rate // 10_000_000
                         slot_start = (number - 1) * DEFAULT_CHUNK_DURATION_SECONDS * rate
                         timeline_frames = max(source.getnframes(), end_frame - slot_start)
             pairs.append((render_path, microphone_path, timeline_frames))
@@ -1007,7 +1019,6 @@ def run(arguments: list[str] | None = None) -> int:
         "--recovery-disk-safety",
     ]
     recording_succeeded = False
-    recording_started = time.monotonic()
     try:
         try:
             print("Session active.")
@@ -1030,12 +1041,15 @@ def run(arguments: list[str] | None = None) -> int:
             )
             return result
 
-        _write_session_state(output, RECOVERY_PENDING, metadata={
+        session_duration_100ns = last_session_duration_100ns()
+        metadata = {
             "render_channel_mask": endpoint_log["render_channel_mask"],
             "microphone_channel_mask": endpoint_log["microphone_channel_mask"],
             "session_timeline_capture": True,
-            "session_duration_seconds": max(0.0, time.monotonic() - recording_started),
-        })
+        }
+        if session_duration_100ns is not None:
+            metadata["session_duration_100ns"] = session_duration_100ns
+        _write_session_state(output, RECOVERY_PENDING, metadata=metadata)
 
         postprocess_result = _finish_mp3(output, logger, diagnostic_log, final_path)
         if postprocess_result != 0:
