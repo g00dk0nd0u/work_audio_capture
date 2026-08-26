@@ -5,15 +5,16 @@ Work Audio Capture — quick start / クイックスタート
 ------
 1. このフォルダで `python record_one_click.py` を実行すると、既定の再生音声とマイクを同時録音します。
 2. 停止はコンソールで Ctrl+C を1回押します。
-3. `Creating final MP3: N%` の完了を待ちます。
-4. 最終結果は `recordings\YYYY-MM-DD_HH-MM-SS.mp3`（1 sessionにつき1本）です。
+3. 通常出力は mono 48 kbps（明示指定時は 80 kbps、silent fallback なし）です。
+4. `Session active.` の後、停止時は `Finalizing...   0%` から `Finalizing... 100%`、`Completed.` の完了を待ちます。
+5. 最終結果は `recordings\YYYY-MM-DD_HH-MM-SS.mp3`（1 sessionにつき1本）です。
 
 録音中の約10分ごとの recovery WAV は `%LOCALAPPDATA%\WorkAudioCapture\<session>` にあり、通常の出力ではありません。crash 後に prompt が出た場合、Enter / [1] は新しい録音を優先し、[2] は interrupted recordings をすべて repair します。active session は OS-backed lock で保護され、録音と repair は同時実行されません。壊れた末尾 chunk があっても以前の有効 chunk は recovery できます。失敗データは `recovery_failed` として保持され、毎回 prompt を出しません。
 
 リペア手順
 ----------
 1. 録音中の異常終了後、同じフォルダで `python record_one_click.py` をもう一度実行します。
-2. `Interrupted recording(s) found` と表示されたら `[2] Repair all interrupted recordings` を選びます。
+2. `Previous session(s) need attention.` と表示されたら `[2] Repair previous session(s)` を選びます（`[1] Start a new session` は新規sessionを開始します）。
 3. リペアされたMP3は `recordings\recovered_<session>.mp3` として保存されます。同名ファイルがある場合は番号が付きます。
 4. リペア中に Ctrl+C を押す、またはリペアに失敗した場合、元のrecovery WAVは削除されず、後で再確認できます。`[1]` を選ぶと新しい録音を先に開始し、中断データは残ります。
 
@@ -25,15 +26,16 @@ English
 -------
 1. Run `python record_one_click.py` in this folder to capture default Windows playback and microphone audio simultaneously.
 2. Press Ctrl+C once in the console to stop.
-3. Wait for `Creating final MP3: N%` to complete.
-4. The final result is `recordings\YYYY-MM-DD_HH-MM-SS.mp3` (one MP3 per session).
+3. Normal one-click output is mono 48 kbps; 80 kbps is an explicit option, with no silent fallback.
+4. After `Session active.`, wait for `Finalizing...   0%` through `Finalizing... 100%`, followed by `Completed.`.
+5. The final result is `recordings\YYYY-MM-DD_HH-MM-SS.mp3` (one MP3 per session).
 
 Approximately 10-minute recovery WAVs are internal data under `%LOCALAPPDATA%\WorkAudioCapture\<session>`, not normal output. After a crash, Enter/[1] prioritizes a new recording; [2] repairs all interrupted recordings. An OS-backed lock prevents repair of an active session. Earlier valid chunks can be recovered despite a corrupt tail. Failed data is preserved as `recovery_failed` without prompting on every startup.
 
 Repairing an interrupted recording
 -----------------------------------
 1. After an abnormal termination, run `python record_one_click.py` again in the same folder.
-2. When `Interrupted recording(s) found` appears, choose `[2] Repair all interrupted recordings`.
+2. When `Previous session(s) need attention.` appears, choose `[2] Repair previous session(s)` (`[1] Start a new session` starts a new session).
 3. Repaired MP3 files are saved as `recordings\recovered_<session>.mp3`; a number is added if that name already exists.
 4. If repair is cancelled with Ctrl+C or fails, the original recovery WAV files are kept for later inspection. Choosing `[1]` starts a new recording first and leaves the interrupted data in place.
 
