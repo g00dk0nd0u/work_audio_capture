@@ -23,6 +23,7 @@ from audio_capture.media_foundation import (  # noqa: E402
     DEFAULT_MP3_BITRATE_BPS,
     SUPPORTED_MP3_SAMPLE_RATES,
     Mp3Encoder,
+    available_mp3_bitrates,
 )
 from audio_capture.recorder import (  # noqa: E402
     DEFAULT_CHUNK_DURATION_SECONDS,
@@ -38,7 +39,7 @@ LOG_PATH = PROJECT_ROOT / "audio_capture.log"
 MIX_FRAMES = 262144
 RMS_SAMPLE_STRIDE_FRAMES = 16
 MP3_BITRATE_BPS = DEFAULT_MP3_BITRATE_BPS
-_VALIDATE_40_KBPS_OPTION = "--validate-mp3-40kbps"
+_LIST_MP3_BITRATES_OPTION = "--list-mp3-bitrates"
 MP3_ENCODER_FACTORY = Mp3Encoder
 SESSION_FILE = "session.json"
 SESSION_LOCK_FILE = "session.lock"
@@ -115,13 +116,6 @@ class _JsonFormatter(logging.Formatter):
         if record.exc_info:
             entry["exception"] = self.formatException(record.exc_info)
         return json.dumps(entry, ensure_ascii=False)
-
-
-def _validation_mp3_bitrate(arguments: list[str]) -> int:
-    """Return the hidden A/B-validation bitrate without changing normal startup UX."""
-    if _VALIDATE_40_KBPS_OPTION in arguments:
-        return 40_000
-    return DEFAULT_MP3_BITRATE_BPS
 
 
 def _configure_logging() -> logging.Logger:
@@ -740,10 +734,17 @@ def _open_output_folder(
 
 
 def run(arguments: list[str] | None = None) -> int:
-    global MP3_BITRATE_BPS
-    MP3_BITRATE_BPS = _validation_mp3_bitrate(
-        sys.argv[1:] if arguments is None else arguments
-    )
+    arguments = sys.argv[1:] if arguments is None else arguments
+    if _LIST_MP3_BITRATES_OPTION in arguments:
+        try:
+            bitrates = available_mp3_bitrates(48_000)
+        except Exception as exc:
+            print(f"Could not list Media Foundation MP3 bitrates: {exc}", file=sys.stderr)
+            return 1
+        print("Available mono 48000 Hz MP3 bitrates:")
+        for bitrate in bitrates:
+            print(bitrate)
+        return 0
     logger = _configure_logging()
     environment_log = _runtime_environment()
     logger.info("Recording request started", extra=environment_log)

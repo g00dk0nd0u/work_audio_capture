@@ -30,7 +30,6 @@ MFT_ENUM_FLAG_SORTANDFILTER = 0x00000040
 MFT_ENUM_FLAGS_SAFE = (MFT_ENUM_FLAG_ALL & ~MFT_ENUM_FLAG_FIELDOFUSE) | MFT_ENUM_FLAG_SORTANDFILTER
 
 SUPPORTED_MP3_SAMPLE_RATES = (32000, 44100, 48000)
-SUPPORTED_MP3_BITRATES_BPS = frozenset((40_000, 80_000))
 DEFAULT_MP3_BITRATE_BPS = 80_000
 
 IID_IMFMediaType = GUID.from_string("44ae0fa8-ea31-4109-8d2e-4cae4997c555")
@@ -62,11 +61,8 @@ def _require_supported_target(sample_rate: int, bitrate_bps: int) -> None:
             f"Media Foundation MP3 requires one of {SUPPORTED_MP3_SAMPLE_RATES} Hz; "
             f"got {sample_rate} Hz"
         )
-    if bitrate_bps not in SUPPORTED_MP3_BITRATES_BPS:
-        raise ValueError(
-            f"Media Foundation MP3 bitrate must be one of "
-            f"{sorted(SUPPORTED_MP3_BITRATES_BPS)} bps; got {bitrate_bps} bps"
-        )
+    if bitrate_bps != DEFAULT_MP3_BITRATE_BPS:
+        raise ValueError(f"this recorder currently supports MP3 {DEFAULT_MP3_BITRATE_BPS} bps only")
 
 
 def _load_media_foundation() -> tuple[Any, Any, Any]:
@@ -193,6 +189,68 @@ def _select_mp3_output_type(
             f"Windows MP3 encoder has no mono {sample_rate} Hz / {bitrate_bps // 1000} kbps output type"
         )
     return selected
+
+
+def _available_mp3_bitrates(mf: Any, sample_rate: int) -> list[int]:
+    """Enumerate bitrates exposed for mono MP3 at the requested sample rate."""
+    collection = LPVOID()
+    bitrates = set()
+    check_hresult(
+        mf.MFTranscodeGetAudioOutputAvailableTypes(
+            ctypes.byref(MFAudioFormat_MP3),
+            DWORD(MFT_ENUM_FLAGS_SAFE),
+            None,
+            ctypes.byref(collection),
+        ),
+        "MFTranscodeGetAudioOutputAvailableTypes(MP3)",
+    )
+    try:
+        count = DWORD()
+        check_hresult(
+            _method(collection, 3, HRESULT, ctypes.POINTER(DWORD))(
+                collection, ctypes.byref(count)
+            ),
+            "IMFCollection.GetElementCount",
+        )
+        for index in range(count.value):
+            unknown = LPVOID()
+            media_type = LPVOID()
+            try:
+                check_hresult(
+                    _method(collection, 4, HRESULT, DWORD, ctypes.POINTER(LPVOID))(
+                        collection, DWORD(index), ctypes.byref(unknown)
+                    ),
+                    "IMFCollection.GetElement",
+                )
+                media_type = _query_interface(
+                    unknown, IID_IMFMediaType, "QueryInterface(IMFMediaType)"
+                )
+                if (
+                    _get_uint32(media_type, MF_MT_AUDIO_NUM_CHANNELS) == 1
+                    and _get_uint32(media_type, MF_MT_AUDIO_SAMPLES_PER_SECOND) == sample_rate
+                ):
+                    bitrates.add(
+                        _get_uint32(media_type, MF_MT_AUDIO_AVG_BYTES_PER_SECOND) * 8
+                    )
+            except OSError:
+                pass
+            finally:
+                release(media_type)
+                release(unknown)
+    finally:
+        release(collection)
+    return sorted(bitrates)
+
+
+def available_mp3_bitrates(sample_rate: int = 48_000) -> list[int]:
+    """Return Media Foundation's available mono MP3 bitrates for diagnostics."""
+    with ComApartment():
+        mfplat, mf, _mfreadwrite = _load_media_foundation()
+        check_hresult(mfplat.MFStartup(DWORD(MF_VERSION), DWORD(MFSTARTUP_FULL)), "MFStartup")
+        try:
+            return _available_mp3_bitrates(mf, sample_rate)
+        finally:
+            check_hresult(mfplat.MFShutdown(), "MFShutdown")
 
 
 def _create_pcm_input_type(mfplat: Any, sample_rate: int) -> LPVOID:

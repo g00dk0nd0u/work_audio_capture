@@ -67,13 +67,20 @@ def _samples(data: bytes) -> list[int]:
 
 
 def test_one_click_default_bitrate_remains_80_kbps():
-    assert record_one_click._validation_mp3_bitrate([]) == 80_000
+    assert record_one_click.MP3_BITRATE_BPS == 80_000
 
 
-def test_hidden_validation_override_selects_40_kbps_only_when_present():
-    option = record_one_click._VALIDATE_40_KBPS_OPTION
-    assert record_one_click._validation_mp3_bitrate([option]) == 40_000
-    assert record_one_click._validation_mp3_bitrate(["--unrelated"]) == 80_000
+def test_hidden_validation_option_lists_bitrates_without_recording(monkeypatch, capsys):
+    monkeypatch.setattr(record_one_click, "available_mp3_bitrates", lambda _rate: [64_000, 80_000])
+    monkeypatch.setattr(
+        record_one_click, "_configure_logging",
+        lambda: pytest.fail("diagnostic option must exit before recording startup"),
+    )
+
+    assert record_one_click.run([record_one_click._LIST_MP3_BITRATES_OPTION]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "Available mono 48000 Hz MP3 bitrates:", "64000", "80000"
+    ]
 
 
 def test_encode_stereo_render_and_mono_microphone_to_mono_mp3(tmp_path, monkeypatch):
