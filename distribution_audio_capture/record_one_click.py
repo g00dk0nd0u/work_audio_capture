@@ -38,6 +38,7 @@ LOG_PATH = PROJECT_ROOT / "audio_capture.log"
 MIX_FRAMES = 262144
 RMS_SAMPLE_STRIDE_FRAMES = 16
 MP3_BITRATE_BPS = DEFAULT_MP3_BITRATE_BPS
+_VALIDATE_40_KBPS_OPTION = "--validate-mp3-40kbps"
 MP3_ENCODER_FACTORY = Mp3Encoder
 SESSION_FILE = "session.json"
 SESSION_LOCK_FILE = "session.lock"
@@ -114,6 +115,13 @@ class _JsonFormatter(logging.Formatter):
         if record.exc_info:
             entry["exception"] = self.formatException(record.exc_info)
         return json.dumps(entry, ensure_ascii=False)
+
+
+def _validation_mp3_bitrate(arguments: list[str]) -> int:
+    """Return the hidden A/B-validation bitrate without changing normal startup UX."""
+    if _VALIDATE_40_KBPS_OPTION in arguments:
+        return 40_000
+    return DEFAULT_MP3_BITRATE_BPS
 
 
 def _configure_logging() -> logging.Logger:
@@ -731,7 +739,11 @@ def _open_output_folder(
     logger.info("Recording output folder opened", extra=folder_log)
 
 
-def run() -> int:
+def run(arguments: list[str] | None = None) -> int:
+    global MP3_BITRATE_BPS
+    MP3_BITRATE_BPS = _validation_mp3_bitrate(
+        sys.argv[1:] if arguments is None else arguments
+    )
     logger = _configure_logging()
     environment_log = _runtime_environment()
     logger.info("Recording request started", extra=environment_log)
