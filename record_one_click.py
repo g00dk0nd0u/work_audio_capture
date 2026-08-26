@@ -2,6 +2,8 @@
 
 from datetime import datetime
 from array import array
+from contextlib import redirect_stdout
+import io
 import json
 import logging
 import math
@@ -266,9 +268,9 @@ def _pending_sessions(root: Path = RECOVERY_ROOT) -> list[Path]:
 def _choose_startup_action(pending: list[Path]) -> str:
     if not pending:
         return "record"
-    print(f"Interrupted recording(s) found: {len(pending)}")
-    print("\n[1] Start a new recording now")
-    print("[2] Repair all interrupted recordings")
+    print("Previous session(s) need attention.")
+    print("\n[1] Start a new session")
+    print("[2] Repair previous session(s)")
     try:
         choice = input("Choose [1]: ").strip()
     except EOFError:
@@ -408,6 +410,15 @@ def _encode_chunk_pairs_mp3(pairs, output_path: Path, progress=None) -> None:
         raise ValueError("no recording chunks were supplied")
     with wave.open(str(pairs[0][0]), "rb") as first:
         sample_rate = first.getframerate()
+    pair_frames = []
+    for render_path, microphone_path in pairs:
+        with wave.open(str(render_path), "rb") as render_file, wave.open(
+            str(microphone_path), "rb"
+        ) as microphone_file:
+            pair_frames.append(max(render_file.getnframes(), microphone_file.getnframes()))
+    total_frames = sum(pair_frames)
+    if progress is not None:
+        progress(0, total_frames)
     if sample_rate not in SUPPORTED_MP3_SAMPLE_RATES:
         raise ValueError(
             f"MP3 encoder does not support {sample_rate}Hz without resampling; source WAVs were kept"
@@ -415,8 +426,17 @@ def _encode_chunk_pairs_mp3(pairs, output_path: Path, progress=None) -> None:
     with MP3_ENCODER_FACTORY(
         output_path, sample_rate=sample_rate, bitrate_bps=MP3_BITRATE_BPS
     ) as encoder:
-        for render_path, microphone_path in pairs:
-            _write_recording_pair(encoder, render_path, microphone_path, sample_rate, progress)
+        completed_frames = 0
+        for (render_path, microphone_path), frames in zip(pairs, pair_frames):
+            pair_progress = None
+            if progress is not None:
+                pair_progress = lambda done, _total, offset=completed_frames: progress(
+                    min(offset + done, total_frames), total_frames
+                )
+            _write_recording_pair(
+                encoder, render_path, microphone_path, sample_rate, pair_progress
+            )
+            completed_frames += frames
 
 
 def _write_recording_pair(encoder, render_path: Path, microphone_path: Path,
@@ -443,8 +463,6 @@ def _write_recording_pair(encoder, render_path: Path, microphone_path: Path,
 
         total_frames = max(render_params.nframes, microphone_params.nframes)
         processed_frames = 0
-        if progress is not None:
-            progress(0, total_frames)
         raw_render_stats = _LevelStatistics(render_params.nchannels)
         raw_microphone_stats = _LevelStatistics(microphone_params.nchannels)
         mono_render_stats = _LevelStatistics()
@@ -665,8 +683,10 @@ def _mix_available_chunks(output: Path, logger: logging.Logger,
 
     def report_progress(done_frames: int, total_frames: int) -> None:
         nonlocal last_logged_percent
-        percent = 100 if total_frames <= 0 else min(100, int(done_frames * 100 / total_frames))
-        print(f"\rCreating final MP3: {percent:3d}%", end="", flush=True)
+        percent = (100 if done_frames else 0) if total_frames <= 0 else min(
+            100, int(done_frames * 100 / total_frames)
+        )
+        print(f"\rFinalizing... {percent:3d}%", end="", flush=True)
         if percent // 10 > last_logged_percent // 10 or percent == 100:
             log_percent = (percent // 10) * 10
             last_logged_percent = log_percent
@@ -675,14 +695,20 @@ def _mix_available_chunks(output: Path, logger: logging.Logger,
 
     try:
         pairs = [(render_chunks[number], microphone_chunks[number]) for number in common_chunks]
+        def encoding_progress(done_frames: int, total_frames: int) -> None:
+            # Publishing is part of finalization, so reserve 100% for the
+            # successful atomic replace below.
+            report_progress(min(done_frames, max(total_frames - 1, 0)), total_frames)
+
         if len(pairs) == 1:
-            _encode_recordings_mp3(*pairs[0], temp_path, report_progress)
+            _encode_recordings_mp3(*pairs[0], temp_path, encoding_progress)
         else:
-            _encode_chunk_pairs_mp3(pairs, temp_path, report_progress)
-        print()
+            _encode_chunk_pairs_mp3(pairs, temp_path, encoding_progress)
         if not temp_path.exists() or temp_path.stat().st_size <= 0:
             raise ValueError("MP3 encoder did not produce a non-empty output; source WAVs were kept")
         temp_path.replace(final_path)
+        report_progress(1, 1)
+        print()
     except BaseException:
         print()
         # Cleanup is best-effort: a second permissions error must not hide the
@@ -708,11 +734,6 @@ def _finish_mp3(
     final_path: Path | None = None,
 ) -> int:
     postprocess_log = {**diagnostic_log, "output_directory": str(output)}
-    print(
-        "Recording stopped. Creating MP3 now. "
-        "Source WAV files are already safe; please wait."
-    )
-    print("Press Ctrl+C again only if you want to cancel MP3 creation.")
     logger.info("MP3 post-processing started", extra=postprocess_log)
 
     try:
@@ -732,7 +753,7 @@ def _finish_mp3(
         )
         return 1
 
-    print(f"Saved combined MP3 recording to {published}")
+    print("Completed.")
     logger.info("Combined MP3 recording saved", extra=postprocess_log)
     return 0
 
@@ -754,7 +775,6 @@ def _open_output_folder(
             extra=folder_log,
         )
         return
-    print(f"Opened recording folder: {output}")
     logger.info("Recording output folder opened", extra=folder_log)
 
 
@@ -897,7 +917,9 @@ def run(arguments: list[str] | None = None) -> int:
     recording_succeeded = False
     try:
         try:
-            result = main()
+            print("Session active.")
+            with redirect_stdout(io.StringIO()):
+                result = main()
         except Exception as exc:
             print(f"Recording command failed unexpectedly: {exc}", file=sys.stderr)
             logger.exception(
