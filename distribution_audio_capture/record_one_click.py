@@ -1021,7 +1021,7 @@ def run(arguments: list[str] | None = None) -> int:
     recording_succeeded = False
     try:
         try:
-            print("Session active.")
+            print("Session active. Press Ctrl + C to end.")
             with open(os.devnull, "w", encoding="utf-8") as discarded_stdout:
                 with redirect_stdout(discarded_stdout):
                     result = main()

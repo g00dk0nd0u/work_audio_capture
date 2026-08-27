@@ -688,7 +688,8 @@ def _prepare_recording_start(monkeypatch, tmp_path):
     return tmp_path / "2026-01-02_03-04-05"
 
 
-def test_session_marker_is_written_only_after_recording_lock(monkeypatch, tmp_path):
+def test_session_marker_is_written_only_after_recording_lock(
+    monkeypatch, tmp_path, capsys):
     output = _prepare_recording_start(monkeypatch, tmp_path)
     events = []
 
@@ -719,6 +720,7 @@ def test_session_marker_is_written_only_after_recording_lock(monkeypatch, tmp_pa
 
     assert record_one_click.run() == 1
     assert events == ["lock", "record", "release"]
+    assert "Session active. Press Ctrl + C to end." in capsys.readouterr().out
 
 
 def test_low_disk_preflight_does_not_create_timestamp_session(monkeypatch, tmp_path, capsys):
