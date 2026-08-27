@@ -1,3 +1,5 @@
+import logging
+
 from audio_capture.model import CapturePacket
 from audio_capture.timeline import StreamTimelineMapper, TimelineState
 from audio_capture.wasapi import (AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY,
@@ -52,3 +54,35 @@ def test_device_regression_does_not_invent_silence_or_discard_packet():
     assert (regression.session_start_frame, regression.timing_trusted) == (10, False)
     assert regression.pcm
     assert mapper.diagnostics.device_position_regression_events == 1
+
+
+def test_normal_packets_do_not_emit_timeline_anomaly_log(caplog):
+    caplog.set_level(logging.INFO, logger="work_audio_capture")
+    mapper = StreamTimelineMapper(1000, 0)
+
+    mapper.place(packet(0, 0))
+    mapper.place(packet(10, 100_000))
+
+    assert not [record for record in caplog.records
+                if "timeline_anomaly" in record.getMessage()]
+
+
+def test_timeline_anomaly_log_contains_reconstruction_context(caplog):
+    caplog.set_level(logging.INFO, logger="work_audio_capture")
+    mapper = StreamTimelineMapper(1000, 0)
+    mapper.place(packet(100, 0))
+
+    mapper.place(packet(50, 100_000))
+
+    messages = [record.getMessage() for record in caplog.records
+                if "timeline_anomaly" in record.getMessage()]
+    assert len(messages) == 1
+    message = messages[0]
+    assert "type=device_position_regression" in message
+    assert "stream=" in message
+    assert "session_ms=10.000" in message
+    assert "device_position=50" in message
+    assert "packet_qpc_100ns=100000" in message
+    assert "sequential_end_before=10" in message
+    assert "sequential_end_after=20" in message
+    assert "timing_trusted=False" in message
