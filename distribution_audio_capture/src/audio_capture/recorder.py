@@ -678,6 +678,9 @@ class ConcurrentRecorder:
                     else:
                         pending_reconnect_session_frame = max(
                             pending_reconnect_session_frame, current_frame)
+                        writer.advance_session_frame(
+                            pending_reconnect_session_frame)
+                        pending_reconnect_session_frame = None
                     continue
                 # A valid audio packet completes this invalidation episode. An
                 # open that immediately invalidates cannot reset the retry budget.
@@ -696,10 +699,14 @@ class ConcurrentRecorder:
                             pending_reconnect_session_frame)
                     writer.write(placed)
                     if (pending_reconnect_session_frame is not None and
-                            placed.timing_trusted):
+                            placed.timing_trusted and
+                            placed.session_start_frame + placed.frame_count >=
+                            pending_reconnect_session_frame):
                         writer.advance_session_frame(
                             pending_reconnect_session_frame)
-                    pending_reconnect_session_frame = None
+                        pending_reconnect_session_frame = None
+                    elif not placed.timing_trusted:
+                        pending_reconnect_session_frame = None
                 except GracefulStopRequested:
                     return
                 statistics.successful_read(packet.frame_count,

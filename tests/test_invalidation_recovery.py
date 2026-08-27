@@ -190,6 +190,72 @@ def test_trusted_first_resumed_packet_can_finish_previous_slot(
     assert not recorder.errors
 
 
+def test_multiple_buffered_trusted_packets_finish_previous_slot(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS", (0,))
+    first = PacketStream([packet(1, 7, 7_000_000), invalidated()])
+    recorder = None
+
+    class Resumed(PacketStream):
+        def read_packet(self):
+            try:
+                return super().read_packet()
+            except StopIteration:
+                recorder.stop_event.set()
+                return None
+
+    resumed = Resumed([packet(2, 0, 8_000_000),
+                       packet(3, 1, 9_000_000),
+                       packet(4, 12, 20_000_000)])
+    backend = ReopenBackend([first, resumed])
+    recorder = ConcurrentRecorder(backend, chunk_duration_seconds=1,
+                                  session_qpc_clock=lambda: 10_000_000)
+    recorder.session_qpc_origin_100ns = 0
+
+    recorder._capture(Endpoint("id", "generic", 1, 10, "microphone"),
+                      tmp_path / "mic.wav")
+
+    count, data = wav_frames(tmp_path / "mic.wav")
+    assert count == 10
+    assert data[14:20] == b"\x01\x00\x02\x00\x03\x00"
+    assert wav_frames(tmp_path / "mic_0003.wav") == (1, b"\x04\x00")
+    assert not (tmp_path / "mic_0002.wav").exists()
+    assert not recorder.errors
+
+
+def test_reopen_without_packet_commits_pending_observation(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS", (0,))
+    output = tmp_path / "mic.wav"
+    first = PacketStream([packet(1, 0, 0), invalidated()])
+    recorder = None
+
+    class NoPacket(PacketStream):
+        def __init__(self):
+            super().__init__(())
+            self.reads = 0
+
+        def read_packet(self):
+            self.reads += 1
+            if self.reads == 2:
+                # The first timeout commits the pending observation and closes
+                # the expired occupied slot before this second read.
+                assert wav_frames(output) == (1, b"\x01\x00")
+                recorder.stop_event.set()
+            return None
+
+    backend = ReopenBackend([first, NoPacket()])
+    recorder = ConcurrentRecorder(backend, chunk_duration_seconds=1,
+                                  session_qpc_clock=lambda: 20_000_000)
+    recorder.session_qpc_origin_100ns = 0
+
+    recorder._capture(Endpoint("id", "generic", 1, 10, "microphone"), output)
+
+    assert wav_frames(output) == (1, b"\x01\x00")
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["mic.wav"]
+    assert not recorder.errors
+
+
 def test_untrusted_first_resumed_packet_rebases_after_long_gap(
         tmp_path, monkeypatch):
     monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS", (0,))
