@@ -56,6 +56,38 @@ def test_device_regression_does_not_invent_silence_or_discard_packet():
     assert mapper.diagnostics.device_position_regression_events == 1
 
 
+def test_explicit_stream_restart_reanchors_without_losing_session_state():
+    mapper = StreamTimelineMapper(1000, 0)
+    mapper.place(packet(10_000, 1_200_000))
+    before_end = mapper.sequential_end_frame
+    before_trusted = mapper.diagnostics.trusted_timeline_frames
+
+    mapper.reset_stream_continuity()
+    resumed = mapper.place(packet(0, 1_400_000))
+
+    assert resumed.session_start_frame == 140
+    assert mapper.sequential_end_frame == 150
+    assert mapper.sequential_end_frame > before_end
+    assert mapper.diagnostics.trusted_timeline_frames == before_trusted + 10
+    assert mapper.diagnostics.device_position_regression_events == 0
+
+
+def test_restart_timestamp_error_preserves_audio_then_valid_packet_reanchors():
+    mapper = StreamTimelineMapper(1000, 0)
+    mapper.place(packet(100, 1_200_000))
+    mapper.reset_stream_continuity()
+
+    uncertain = mapper.place(packet(
+        0, 1_280_000, flags=AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR))
+    recovered = mapper.place(packet(10, 1_500_000))
+
+    assert not uncertain.timing_trusted
+    assert uncertain.pcm
+    assert recovered.timing_trusted
+    assert recovered.session_start_frame == 150
+    assert mapper.diagnostics.untrusted_packet_count == 1
+
+
 def test_normal_packets_do_not_emit_timeline_anomaly_log(caplog):
     caplog.set_level(logging.INFO, logger="work_audio_capture")
     mapper = StreamTimelineMapper(1000, 0)

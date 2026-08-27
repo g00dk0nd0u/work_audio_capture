@@ -59,6 +59,12 @@ class StreamTimelineMapper:
         self.sequential_end_frame = 0
         self.diagnostics = TimelineDiagnostics()
 
+    def reset_stream_continuity(self) -> None:
+        """Forget endpoint-local continuity while retaining session history."""
+        self.state = TimelineState.UNANCHORED
+        self.anchor_device_position = None
+        self.last_device_end = None
+
     def _timestamp_valid(self, packet: CapturePacket) -> bool:
         return (not packet.flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR and
                 packet.device_position is not None and
