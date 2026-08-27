@@ -274,6 +274,31 @@ def test_json_formatter_preserves_endpoint_and_runtime_diagnostics():
     assert payload["mp3_bitrate_bps"] == 64_000
 
 
+def test_json_formatter_serializes_session_health_fields():
+    record = logging.LogRecord(
+        "work_audio_capture", logging.WARNING, __file__, 1,
+        "capture session health", (), None)
+    expected = {
+        "session_health_status": "degraded", "session_degraded": True,
+        "degraded_endpoint_count": 1, "fatal_error_count": 0,
+        "render_terminal_status": "endpoint_unavailable",
+        "render_endpoint_unavailable": True, "render_invalidation_events": 1,
+        "render_reopen_attempts": 6, "render_reopen_successes": 0,
+        "render_reopen_failures": 6,
+        "microphone_terminal_status": "normal_stop",
+        "microphone_endpoint_unavailable": False,
+        "microphone_invalidation_events": 0, "microphone_reopen_attempts": 0,
+        "microphone_reopen_successes": 0, "microphone_reopen_failures": 0,
+    }
+    for name, value in expected.items():
+        setattr(record, name, value)
+
+    payload = json.loads(record_one_click._JsonFormatter().format(record))
+
+    assert payload["event"] == "capture session health"
+    assert {name: payload[name] for name in expected} == expected
+
+
 def test_runtime_environment_contains_log_only_diagnostics():
     payload = record_one_click._runtime_environment()
 
@@ -767,6 +792,58 @@ def test_finish_mp3_failure_does_not_print_degraded_completion(
 
     assert result == 1
     assert "Completed with warning" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(("health", "expected"), [
+    ({"session_health_status": "healthy"}, "Completed."),
+    ({"session_health_status": "recovered"}, "Completed."),
+    ({"session_health_status": "degraded",
+      "render_endpoint_unavailable": True,
+      "microphone_endpoint_unavailable": False},
+     "Completed with warning: speaker audio was unavailable for part of the session."),
+    ({"session_health_status": "degraded",
+      "render_endpoint_unavailable": False,
+      "microphone_endpoint_unavailable": True},
+     "Completed with warning: microphone audio was unavailable for part of the session."),
+    ({"session_health_status": "degraded",
+      "render_endpoint_unavailable": True,
+      "microphone_endpoint_unavailable": True},
+     "Completed with warning: speaker and microphone audio were unavailable for part of the session."),
+    (None, "Completed."),
+    ({"unexpected": "value"}, "Completed."),
+    ({"session_health_status": "degraded"}, "Completed."),
+])
+def test_completion_message_exact_text(health, expected):
+    assert record_one_click._completion_message(health) == expected
+
+
+def test_run_passes_degraded_health_to_successful_finalization(
+        monkeypatch, tmp_path, capsys):
+    _prepare_recording_start(monkeypatch, tmp_path)
+    monkeypatch.setattr(record_one_click, "OUTPUT_ROOT", tmp_path / "published")
+    monkeypatch.setattr(record_one_click.shutil, "disk_usage", lambda _path: type(
+        "Usage", (), {"free": 10**12})())
+    monkeypatch.setattr(record_one_click, "main", lambda: 0)
+    monkeypatch.setattr(record_one_click, "last_session_duration_100ns", lambda: None)
+    monkeypatch.setattr(record_one_click, "last_session_health", lambda: {
+        "session_health_status": "degraded",
+        "render_endpoint_unavailable": True,
+        "microphone_endpoint_unavailable": False,
+    })
+    monkeypatch.setattr(record_one_click, "_open_output_folder", lambda *_args: None)
+
+    def finish(_output, _logger, _diagnostics, _final_path,
+               completion_message="Completed."):
+        print(completion_message)
+        return 0
+
+    monkeypatch.setattr(record_one_click, "_finish_mp3", finish)
+
+    assert record_one_click.run() == 0
+    output = capsys.readouterr().out
+    warning = ("Completed with warning: speaker audio was unavailable for part "
+               "of the session.")
+    assert output.count(warning) == 1
 
 
 def test_failed_recording_lock_does_not_overwrite_recovery_metadata(

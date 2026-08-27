@@ -383,16 +383,20 @@ class ConcurrentRecorder:
             # Instrumentation must never alter capture success or the original error.
             pass
         try:
-            self.session_health = session_health_fields(
-                self.stream_statistics, self.errors)
-            log = getattr(LOGGER, {
-                "healthy": "info", "recovered": "info",
-                "degraded": "warning", "failed": "error",
-            }[str(self.session_health["session_health_status"])])
-            log("capture session health", extra=self.session_health)
+            health = session_health_fields(self.stream_statistics, self.errors)
         except BaseException:
-            # Final diagnostics must never mask capture or cleanup failures.
-            self.session_health = None
+            health = None
+        self.session_health = health
+        if health is not None:
+            try:
+                log = getattr(LOGGER, {
+                    "healthy": "info", "recovered": "info",
+                    "degraded": "warning", "failed": "error",
+                }[str(health["session_health_status"])])
+                log("capture session health", extra=health)
+            except BaseException:
+                # Logging is diagnostic; retained health remains product state.
+                pass
         if self.errors:
             details = " | ".join(str(error) for error in self.errors)
             raise RuntimeError(f"audio capture failed: {details}") from self.errors[0]
