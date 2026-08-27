@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import ctypes
+import logging
+import threading
 from dataclasses import dataclass
 from enum import Enum
 
@@ -12,6 +14,7 @@ from .wasapi import (
 )
 
 HUNDRED_NS_PER_SECOND = 10_000_000
+LOGGER = logging.getLogger("work_audio_capture")
 
 
 def query_performance_counter_100ns() -> int:
@@ -74,17 +77,45 @@ class StreamTimelineMapper:
         self.state = TimelineState.NORMAL
         return start
 
+    def _log_anomaly(self, anomaly_type: str, packet: CapturePacket,
+                     start: int, trusted: bool, sequential_before: int) -> None:
+        """Log only rare timing anomalies; never log normal packets."""
+        try:
+            LOGGER.info(
+                "timeline_anomaly type=%s stream=%s session_ms=%.3f "
+                "session_frame=%d device_position=%s packet_qpc_100ns=%s "
+                "frame_count=%d sequential_end_before=%d "
+                "sequential_end_after=%d timing_trusted=%s",
+                anomaly_type,
+                threading.current_thread().name,
+                start * 1000.0 / self.sample_rate,
+                start,
+                packet.device_position,
+                packet.qpc_position_100ns,
+                packet.frame_count,
+                sequential_before,
+                self.sequential_end_frame,
+                trusted,
+            )
+        except BaseException:
+            # Diagnostics must never alter capture success.
+            pass
+
     def place(self, packet: CapturePacket) -> PlacedAudio:
         if packet.frame_count < 0:
             raise ValueError("packet frame count must not be negative")
+        sequential_before = self.sequential_end_frame
+        anomalies: list[str] = []
         discontinuity = bool(packet.flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY)
         timestamp_error = bool(packet.flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR)
         if discontinuity:
             self.diagnostics.data_discontinuity_events += 1
             self.state = TimelineState.UNANCHORED
+            anomalies.append("data_discontinuity")
         if timestamp_error:
             self.diagnostics.timestamp_error_events += 1
             self.state = TimelineState.UNANCHORED
+            anomalies.append("timestamp_error")
 
         regression = (self.state is TimelineState.NORMAL and
                       packet.device_position is not None and
@@ -93,6 +124,7 @@ class StreamTimelineMapper:
         if regression:
             self.diagnostics.device_position_regression_events += 1
             self.state = TimelineState.UNANCHORED
+            anomalies.append("device_position_regression")
 
         trusted = False
         if self.state is TimelineState.UNANCHORED:
@@ -119,4 +151,7 @@ class StreamTimelineMapper:
             self.diagnostics.untrusted_packet_count += 1
         self.sequential_end_frame = max(self.sequential_end_frame,
                                         start + packet.frame_count)
+        for anomaly_type in anomalies:
+            self._log_anomaly(anomaly_type, packet, start, trusted,
+                              sequential_before)
         return PlacedAudio(packet.pcm, packet.frame_count, start, trusted)
