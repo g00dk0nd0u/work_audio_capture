@@ -514,12 +514,16 @@ class ConcurrentRecorder:
                         secondary_errors.append(close_error)
         except BaseException as exc:
             capture_error = exc
-            statistics.terminal_status = (
-                "wav_io_failure" if getattr(exc, "_capture_context", False)
-                else "read_capture_failure"
-            )
-            error = (exc if getattr(exc, "_capture_context", False)
-                     else _endpoint_error(endpoint, "capture", exc))
+            if getattr(exc, "_packet_cleanup_context", False):
+                statistics.terminal_status = "shutdown_cleanup_failure"
+                error = exc
+            else:
+                statistics.terminal_status = (
+                    "wav_io_failure" if getattr(exc, "_capture_context", False)
+                    else "read_capture_failure"
+                )
+                error = (exc if getattr(exc, "_capture_context", False)
+                         else _endpoint_error(endpoint, "capture", exc))
             self._add_error(error)
             for secondary_error in secondary_errors:
                 self._add_error(secondary_error)
@@ -574,6 +578,7 @@ class ConcurrentRecorder:
         )
         statistics.capture_start_monotonic = self._diagnostics_now()
         reopen_attempt = 0
+        pending_reconnect_session_frame: int | None = None
 
         def close_stream(current, report: bool) -> None:
             first_error = None
@@ -620,17 +625,25 @@ class ConcurrentRecorder:
                         try:
                             candidate = self.backend.open_input(endpoint, self.frames)
                             fmt = getattr(candidate, "format", None)
+                            actual_mask = getattr(fmt, "channel_mask", None)
+                            layout_changed = (
+                                endpoint.channel_mask is not None and
+                                actual_mask is not None and
+                                actual_mask != endpoint.channel_mask)
                             if (fmt is not None and
                                     (fmt.sample_rate != endpoint.sample_rate or
-                                     fmt.channels != endpoint.channels)):
+                                     fmt.channels != endpoint.channels or
+                                     layout_changed)):
                                 close_stream(candidate, report=False)
                                 statistics.endpoint_unavailable = True
                                 statistics.terminal_status = "endpoint_unavailable"
                                 log("warning", "capture endpoint format changed after reopen "
                                     "endpoint_kind=%s expected_rate=%d expected_channels=%d "
-                                    "actual_rate=%d actual_channels=%d",
+                                    "actual_rate=%d actual_channels=%d "
+                                    "expected_channel_mask=%s actual_channel_mask=%s",
                                     endpoint.kind, endpoint.sample_rate, endpoint.channels,
-                                    fmt.sample_rate, fmt.channels)
+                                    fmt.sample_rate, fmt.channels,
+                                    endpoint.channel_mask, actual_mask)
                                 return
                         except BaseException as reopen_error:
                             statistics.stream_reopen_failures += 1
@@ -644,7 +657,8 @@ class ConcurrentRecorder:
                         current_frame = max(
                             0, (self.session_qpc_clock() - self.session_qpc_origin_100ns)
                             * endpoint.sample_rate // 10_000_000)
-                        writer.advance_session_frame(current_frame)
+                        pending_reconnect_session_frame = max(
+                            pending_reconnect_session_frame or 0, current_frame)
                         log("warning", "capture endpoint reopen succeeded endpoint_kind=%s "
                             "attempt=%d", endpoint.kind, reopen_attempt)
                         break
@@ -659,7 +673,11 @@ class ConcurrentRecorder:
                     current_frame = max(
                         0, (self.session_qpc_clock() - self.session_qpc_origin_100ns)
                         * endpoint.sample_rate // 10_000_000)
-                    writer.advance_session_frame(current_frame)
+                    if pending_reconnect_session_frame is None:
+                        writer.advance_session_frame(current_frame)
+                    else:
+                        pending_reconnect_session_frame = max(
+                            pending_reconnect_session_frame, current_frame)
                     continue
                 # A valid audio packet completes this invalidation episode. An
                 # open that immediately invalidates cannot reset the retry budget.
@@ -672,7 +690,16 @@ class ConcurrentRecorder:
                     pcm, packet.frame_count, packet.device_position,
                     packet.qpc_position_100ns, packet.flags))
                 try:
+                    if (pending_reconnect_session_frame is not None and
+                            not placed.timing_trusted):
+                        writer.advance_session_frame(
+                            pending_reconnect_session_frame)
                     writer.write(placed)
+                    if (pending_reconnect_session_frame is not None and
+                            placed.timing_trusted):
+                        writer.advance_session_frame(
+                            pending_reconnect_session_frame)
+                    pending_reconnect_session_frame = None
                 except GracefulStopRequested:
                     return
                 statistics.successful_read(packet.frame_count,
@@ -685,9 +712,14 @@ class ConcurrentRecorder:
                 writer.close()
             except BaseException as exc:
                 writer_error = exc
+            cleanup_error = None
             if stream is not None:
-                close_stream(stream, report=(active_error is None and
-                                             writer_error is None))
+                try:
+                    close_stream(stream, report=(active_error is None and
+                                                 writer_error is None))
+                except BaseException as exc:
+                    cleanup_error = _endpoint_error(endpoint, "cleanup", exc)
+                    setattr(cleanup_error, "_packet_cleanup_context", True)
             if writer_error is not None:
                 raise writer_error
             statistics.chunks_opened = len(writer.occupied_slots)
@@ -697,3 +729,5 @@ class ConcurrentRecorder:
                 setattr(statistics, name, value)
             statistics.timeline_gap_frames_filled = writer.timeline_gap_frames_filled
             statistics.occupied_recovery_slots = len(writer.occupied_slots)
+            if cleanup_error is not None:
+                raise cleanup_error from cleanup_error.__cause__

@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import wave
 
 import pytest
 
@@ -6,13 +7,15 @@ from audio_capture.model import CapturePacket, Endpoint
 from audio_capture.recorder import ConcurrentRecorder
 from audio_capture.wasapi import (AUDCLNT_E_DEVICE_INVALIDATED,
                                   AUDCLNT_E_RESOURCES_INVALIDATED,
+                                  AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR,
                                   HResultError)
 
 
 class PacketStream:
-    def __init__(self, actions, rate=10, channels=1):
+    def __init__(self, actions, rate=10, channels=1, channel_mask=None):
         self.actions = iter(actions)
-        self.format = SimpleNamespace(sample_rate=rate, channels=channels)
+        self.format = SimpleNamespace(sample_rate=rate, channels=channels,
+                                      channel_mask=channel_mask)
         self.closed = False
 
     def read_packet(self):
@@ -131,6 +134,94 @@ def test_format_change_after_reopen_degrades_without_resampling(tmp_path, monkey
     assert not (tmp_path / "mic.wav").exists()
 
 
+def test_known_channel_layout_change_after_reopen_degrades(tmp_path, monkeypatch):
+    monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS", (0,))
+    backend = ReopenBackend([
+        PacketStream([invalidated()], channels=2, channel_mask=0x3),
+        PacketStream([], channels=2, channel_mask=0xC),
+    ])
+    recorder = ConcurrentRecorder(backend, chunk_duration_seconds=1,
+                                  session_qpc_clock=lambda: 0)
+    recorder.session_qpc_origin_100ns = 0
+    endpoint = Endpoint("same-id", "generic", 2, 48_000, "render-loopback",
+                        channel_mask=0x3)
+
+    recorder._capture(endpoint, tmp_path / "render.wav")
+
+    stats = recorder.stream_statistics[endpoint.kind]
+    assert stats.endpoint_unavailable
+    assert stats.terminal_status == "endpoint_unavailable"
+    assert not recorder.errors
+
+
+def wav_frames(path):
+    with wave.open(str(path), "rb") as source:
+        return source.getnframes(), source.readframes(source.getnframes())
+
+
+def test_trusted_first_resumed_packet_can_finish_previous_slot(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS", (0,))
+    first = PacketStream([packet(1, 8, 8_000_000), invalidated()])
+    recorder = None
+
+    class Resumed(PacketStream):
+        def read_packet(self):
+            try:
+                return super().read_packet()
+            except StopIteration:
+                recorder.stop_event.set()
+                return None
+
+    resumed = Resumed([packet(2, 0, 9_000_000),
+                       packet(3, 11, 20_000_000)])
+    backend = ReopenBackend([first, resumed])
+    recorder = ConcurrentRecorder(backend, chunk_duration_seconds=1,
+                                  session_qpc_clock=lambda: 10_000_000)
+    recorder.session_qpc_origin_100ns = 0
+
+    recorder._capture(Endpoint("id", "generic", 1, 10, "microphone"),
+                      tmp_path / "mic.wav")
+
+    count, data = wav_frames(tmp_path / "mic.wav")
+    assert count == 10
+    assert data[16:20] == b"\x01\x00\x02\x00"
+    assert wav_frames(tmp_path / "mic_0003.wav") == (1, b"\x03\x00")
+    assert not recorder.errors
+
+
+def test_untrusted_first_resumed_packet_rebases_after_long_gap(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS", (0,))
+    first = PacketStream([packet(1, 0, 0), invalidated()])
+    recorder = None
+
+    class Resumed(PacketStream):
+        def read_packet(self):
+            try:
+                return super().read_packet()
+            except StopIteration:
+                recorder.stop_event.set()
+                return None
+
+    resumed = Resumed([packet(
+        2, 0, 999_000_000, AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR)])
+    backend = ReopenBackend([first, resumed])
+    recorder = ConcurrentRecorder(backend, chunk_duration_seconds=1,
+                                  session_qpc_clock=lambda: 25_000_000)
+    recorder.session_qpc_origin_100ns = 0
+
+    recorder._capture(Endpoint("id", "generic", 1, 10, "microphone"),
+                      tmp_path / "mic.wav")
+
+    assert wav_frames(tmp_path / "mic.wav") == (1, b"\x01\x00")
+    count, data = wav_frames(tmp_path / "mic_0003.wav")
+    assert count == 6
+    assert data == bytes(10) + b"\x02\x00"
+    assert not (tmp_path / "mic_0002.wav").exists()
+    assert not recorder.errors
+
+
 def test_non_invalidation_error_remains_fatal(tmp_path):
     backend = ReopenBackend([PacketStream([HResultError("read", 0x80004005)])])
     recorder = ConcurrentRecorder(backend, chunk_duration_seconds=1,
@@ -143,6 +234,30 @@ def test_non_invalidation_error_remains_fatal(tmp_path):
     assert recorder.stop_event.is_set()
     assert recorder.errors
     assert recorder.stream_statistics["microphone"].terminal_status == "read_capture_failure"
+
+
+def test_packet_stream_normal_cleanup_failure_keeps_cleanup_classification(tmp_path):
+    class CleanupFailure(PacketStream):
+        def read_packet(self):
+            recorder.stop_event.set()
+            return None
+
+        def close(self):
+            raise OSError("close failed")
+
+    backend = ReopenBackend([CleanupFailure([])])
+    recorder = ConcurrentRecorder(backend, chunk_duration_seconds=1,
+                                  session_qpc_clock=lambda: 0)
+    recorder.session_qpc_origin_100ns = 0
+
+    recorder._capture(Endpoint("id", "generic", 1, 10, "microphone"),
+                      tmp_path / "mic.wav")
+
+    stats = recorder.stream_statistics["microphone"]
+    assert stats.terminal_status == "shutdown_cleanup_failure"
+    assert len(recorder.errors) == 1
+    assert "microphone cleanup failed" in str(recorder.errors[0])
+    assert "capture failed" not in str(recorder.errors[0])
 
 
 def test_stop_event_interrupts_reconnect_backoff(tmp_path, monkeypatch):
