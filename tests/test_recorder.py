@@ -6,6 +6,7 @@ from array import array
 from pathlib import Path
 
 import pytest
+import audio_capture.recorder as recorder_module
 
 from audio_capture.model import Endpoint
 from audio_capture.recorder import (
@@ -13,9 +14,97 @@ from audio_capture.recorder import (
     ConcurrentRecorder,
     StreamStatistics,
     downmix_pcm16_mono,
+    session_health_fields,
     session_timing_fields,
     required_recovery_free_bytes,
 )
+
+
+def _health_statistics(kind, *, unavailable=False, invalidations=0):
+    statistics = StreamStatistics(kind, kind, 48000, 1)
+    statistics.endpoint_unavailable = unavailable
+    statistics.endpoint_invalidation_events = invalidations
+    return statistics
+
+
+@pytest.mark.parametrize(("render_unavailable", "microphone_unavailable",
+                          "invalidations", "errors", "status", "count"), [
+    (False, False, 0, [], "healthy", 0),
+    (False, False, 1, [], "recovered", 0),
+    (True, False, 0, [], "degraded", 1),
+    (False, True, 0, [], "degraded", 1),
+    (True, True, 0, [], "degraded", 2),
+    (True, False, 1, [RuntimeError("capture failed")], "failed", 1),
+])
+def test_session_health_classification(render_unavailable,
+                                       microphone_unavailable, invalidations,
+                                       errors, status, count):
+    render = _health_statistics("render-loopback",
+                                unavailable=render_unavailable,
+                                invalidations=invalidations)
+    microphone = _health_statistics("microphone",
+                                    unavailable=microphone_unavailable)
+
+    health = session_health_fields({
+        render.endpoint_kind: render, microphone.endpoint_kind: microphone,
+    }, errors)
+
+    assert health["session_health_status"] == status
+    assert health["session_degraded"] is (status == "degraded")
+    assert health["degraded_endpoint_count"] == count
+
+
+def test_failed_session_health_tolerates_missing_stream_statistics():
+    health = session_health_fields({}, [RuntimeError("startup failed")])
+
+    assert health["session_health_status"] == "failed"
+    assert health["render_endpoint_unavailable"] is False
+    assert health["microphone_terminal_status"] is None
+
+
+def test_health_logging_failure_preserves_degraded_session(monkeypatch, tmp_path):
+    recorder = ConcurrentRecorder(FakeBackend())
+    render = Endpoint(1, "render", 1, 48000, "render-loopback")
+    microphone = Endpoint(2, "microphone", 1, 48000, "microphone")
+
+    def capture(_endpoint, _path):
+        statistics = _health_statistics(_endpoint.kind)
+        statistics.endpoint_unavailable = _endpoint.kind == "render-loopback"
+        recorder.stream_statistics[_endpoint.kind] = statistics
+
+    monkeypatch.setattr(recorder, "_capture", capture)
+    monkeypatch.setattr(
+        recorder_module.LOGGER, "warning",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("log failed")))
+
+    recorder.record(render, microphone, tmp_path / "render.wav", tmp_path / "mic.wav")
+
+    assert recorder.session_health is not None
+    assert recorder.session_health["session_health_status"] == "degraded"
+    assert recorder.session_health["render_endpoint_unavailable"] is True
+
+
+def test_health_logging_failure_preserves_primary_capture_error(monkeypatch, tmp_path):
+    recorder = ConcurrentRecorder(FakeBackend())
+    render = Endpoint(1, "render", 1, 48000, "render-loopback")
+    microphone = Endpoint(2, "microphone", 1, 48000, "microphone")
+    capture_error = RuntimeError("primary capture failure")
+
+    def capture(_endpoint, _path):
+        recorder.stream_statistics[_endpoint.kind] = _health_statistics(_endpoint.kind)
+        if _endpoint.kind == "render-loopback":
+            recorder._add_error(capture_error)
+
+    monkeypatch.setattr(recorder, "_capture", capture)
+    monkeypatch.setattr(
+        recorder_module.LOGGER, "error",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("log failed")))
+
+    with pytest.raises(RuntimeError, match="primary capture failure") as raised:
+        recorder.record(render, microphone, tmp_path / "render.wav", tmp_path / "mic.wav")
+
+    assert raised.value.__cause__ is capture_error
+    assert recorder.session_health["session_health_status"] == "failed"
 
 
 class FakeStream:

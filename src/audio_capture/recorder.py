@@ -170,6 +170,54 @@ def session_timing_fields(render: StreamStatistics,
     return fields
 
 
+def session_health_fields(
+        statistics: dict[str, StreamStatistics],
+        errors: list[BaseException],
+        ) -> dict[str, object]:
+    """Build a non-sensitive final health snapshot from existing statistics."""
+    render = statistics.get("render-loopback")
+    microphone = statistics.get("microphone")
+    unavailable = [
+        item for item in (render, microphone)
+        if item is not None and item.endpoint_unavailable
+    ]
+    invalidations = sum(
+        item.endpoint_invalidation_events
+        for item in (render, microphone) if item is not None
+    )
+    if errors:
+        status = "failed"
+    elif unavailable:
+        status = "degraded"
+    elif invalidations:
+        status = "recovered"
+    else:
+        status = "healthy"
+
+    fields: dict[str, object] = {
+        "session_health_status": status,
+        "session_degraded": status == "degraded",
+        "degraded_endpoint_count": len(unavailable),
+        "fatal_error_count": len(errors),
+    }
+    for label, item in (("render", render), ("microphone", microphone)):
+        fields.update({
+            f"{label}_terminal_status": (
+                item.terminal_status if item is not None else None),
+            f"{label}_endpoint_unavailable": (
+                item.endpoint_unavailable if item is not None else False),
+            f"{label}_invalidation_events": (
+                item.endpoint_invalidation_events if item is not None else 0),
+            f"{label}_reopen_attempts": (
+                item.stream_reopen_attempts if item is not None else 0),
+            f"{label}_reopen_successes": (
+                item.stream_reopen_successes if item is not None else 0),
+            f"{label}_reopen_failures": (
+                item.stream_reopen_failures if item is not None else 0),
+        })
+    return fields
+
+
 class InputStream(Protocol):
     def read(self, frames: int, exception_on_overflow: bool = ...) -> bytes: ...
     def stop_stream(self) -> None: ...
@@ -269,6 +317,7 @@ class ConcurrentRecorder:
         self._chunk_number = 1
         self._chunk_deadline = 0.0
         self.stream_statistics: dict[str, StreamStatistics] = {}
+        self.session_health: dict[str, object] | None = None
         self._required_recovery_free_bytes = 0
         self._disk_space_stop_requested = False
 
@@ -276,6 +325,7 @@ class ConcurrentRecorder:
         self.stop_event.clear()
         self.errors.clear()
         self.stream_statistics.clear()
+        self.session_health = None
         self._chunk_number = 1
         self._disk_space_stop_requested = False
         self.session_duration_100ns = None
@@ -332,6 +382,21 @@ class ConcurrentRecorder:
         except BaseException:
             # Instrumentation must never alter capture success or the original error.
             pass
+        try:
+            health = session_health_fields(self.stream_statistics, self.errors)
+        except BaseException:
+            health = None
+        self.session_health = health
+        if health is not None:
+            try:
+                log = getattr(LOGGER, {
+                    "healthy": "info", "recovered": "info",
+                    "degraded": "warning", "failed": "error",
+                }[str(health["session_health_status"])])
+                log("capture session health", extra=health)
+            except BaseException:
+                # Logging is diagnostic; retained health remains product state.
+                pass
         if self.errors:
             details = " | ".join(str(error) for error in self.errors)
             raise RuntimeError(f"audio capture failed: {details}") from self.errors[0]

@@ -21,7 +21,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 SOURCE = PROJECT_ROOT / "src"
 sys.path.insert(0, str(SOURCE))
 
-from audio_capture.cli import last_session_duration_100ns, main  # noqa: E402
+from audio_capture.cli import (  # noqa: E402
+    last_session_duration_100ns,
+    last_session_health,
+    main,
+)
 from audio_capture.media_foundation import (  # noqa: E402
     DEFAULT_MP3_BITRATE_BPS,
     SUPPORTED_MP3_BITRATES_BPS,
@@ -95,6 +99,13 @@ _LOG_EXTRA_FIELDS = (
     "endpoint_invalidation_events", "stream_reopen_attempts",
     "stream_reopen_successes", "stream_reopen_failures",
     "endpoint_unavailable",
+    "session_health_status", "session_degraded", "degraded_endpoint_count",
+    "fatal_error_count", "render_terminal_status",
+    "render_endpoint_unavailable", "render_invalidation_events",
+    "render_reopen_attempts", "render_reopen_successes", "render_reopen_failures",
+    "microphone_terminal_status", "microphone_endpoint_unavailable",
+    "microphone_invalidation_events", "microphone_reopen_attempts",
+    "microphone_reopen_successes", "microphone_reopen_failures",
     "final_session_duration_seconds",
     "render_audio_duration_seconds",
     "microphone_audio_duration_seconds",
@@ -838,6 +849,7 @@ def _finish_mp3(
     logger: logging.Logger,
     diagnostic_log: dict[str, object],
     final_path: Path | None = None,
+    completion_message: str = "Completed.",
 ) -> int:
     postprocess_log = {**diagnostic_log, "output_directory": str(output)}
     logger.info("MP3 post-processing started", extra=postprocess_log)
@@ -859,9 +871,26 @@ def _finish_mp3(
         )
         return 1
 
-    print("Completed.")
+    print(completion_message)
     logger.info("Combined MP3 recording saved", extra=postprocess_log)
     return 0
+
+
+def _completion_message(health: object) -> str:
+    if not isinstance(health, dict) or health.get("session_health_status") != "degraded":
+        return "Completed."
+    render = health.get("render_endpoint_unavailable") is True
+    microphone = health.get("microphone_endpoint_unavailable") is True
+    if render and microphone:
+        return ("Completed with warning: speaker and microphone audio were "
+                "unavailable for part of the session.")
+    if render:
+        return ("Completed with warning: speaker audio was unavailable for part "
+                "of the session.")
+    if microphone:
+        return ("Completed with warning: microphone audio was unavailable for part "
+                "of the session.")
+    return "Completed."
 
 
 def _open_output_folder(
@@ -1045,6 +1074,7 @@ def run(arguments: list[str] | None = None) -> int:
             return result
 
         session_duration_100ns = last_session_duration_100ns()
+        session_health = last_session_health()
         metadata = {
             "render_channel_mask": endpoint_log["render_channel_mask"],
             "microphone_channel_mask": endpoint_log["microphone_channel_mask"],
@@ -1054,7 +1084,10 @@ def run(arguments: list[str] | None = None) -> int:
             metadata["session_duration_100ns"] = session_duration_100ns
         _write_session_state(output, RECOVERY_PENDING, metadata=metadata)
 
-        postprocess_result = _finish_mp3(output, logger, diagnostic_log, final_path)
+        postprocess_result = _finish_mp3(
+            output, logger, diagnostic_log, final_path,
+            completion_message=_completion_message(session_health),
+        )
         if postprocess_result != 0:
             print(f"Recovery recordings kept in: {output}")
             logger.warning("Recovery recordings retained", extra={

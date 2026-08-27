@@ -102,3 +102,24 @@ def test_recovery_disk_safety_accepts_mono_wav(tmp_path, monkeypatch):
         "mono_output": True,
         "recovery_disk_safety_path": tmp_path,
     }
+
+
+def test_last_session_health_returns_a_defensive_copy():
+    cli._LAST_SESSION_HEALTH = {"session_health_status": "degraded"}
+
+    returned = cli.last_session_health()
+    returned["session_health_status"] = "healthy"
+
+    assert cli.last_session_health() == {"session_health_status": "degraded"}
+
+
+def test_main_clears_stale_health_before_early_failure(monkeypatch):
+    cli._LAST_SESSION_HEALTH = {"session_health_status": "degraded"}
+    monkeypatch.setattr(sys, "argv", ["audio-capture", "record"])
+    monkeypatch.setattr(
+        cli, "_backend", lambda _name: (_ for _ in ()).throw(
+            RuntimeError("backend startup failed")))
+
+    assert cli.main() == 1
+
+    assert cli.last_session_health() is None
