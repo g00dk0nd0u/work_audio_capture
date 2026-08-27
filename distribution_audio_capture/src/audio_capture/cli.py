@@ -15,10 +15,15 @@ from .recorder import ConcurrentRecorder
 
 LOGGER = logging.getLogger("work_audio_capture")
 _LAST_SESSION_DURATION_100NS: int | None = None
+_LAST_SESSION_HEALTH: dict[str, object] | None = None
 
 
 def last_session_duration_100ns() -> int | None:
     return _LAST_SESSION_DURATION_100NS
+
+
+def last_session_health() -> dict[str, object] | None:
+    return dict(_LAST_SESSION_HEALTH) if _LAST_SESSION_HEALTH is not None else None
 
 
 def _print_group(title: str, endpoints: list[Endpoint]) -> None:
@@ -33,8 +38,9 @@ def _backend(name: str):
 
 
 def main() -> int:
-    global _LAST_SESSION_DURATION_100NS
+    global _LAST_SESSION_DURATION_100NS, _LAST_SESSION_HEALTH
     _LAST_SESSION_DURATION_100NS = None
+    _LAST_SESSION_HEALTH = None
     parser = argparse.ArgumentParser(description="WASAPI loopback + microphone recorder")
     parser.add_argument("command", choices=("doctor", "list", "record"))
     parser.add_argument("--backend", choices=("native", "pyaudio"), default="native",
@@ -92,6 +98,8 @@ def main() -> int:
             choose(render, args.render), choose(capture, args.microphone),
             render_path, microphone_path)
         _LAST_SESSION_DURATION_100NS = getattr(recorder, "session_duration_100ns", None)
+        health = getattr(recorder, "session_health", None)
+        _LAST_SESSION_HEALTH = dict(health) if isinstance(health, dict) else None
         return 0
     except (RuntimeError, ValueError, OSError) as exc:
         print(f"Audio backend error: {exc}", file=sys.stderr)

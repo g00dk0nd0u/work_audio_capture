@@ -748,6 +748,27 @@ def test_disk_preflight_query_failure_is_fail_open(monkeypatch, tmp_path, caplog
     assert "preflight failed; continuing" in caplog.text
 
 
+def test_finish_mp3_failure_does_not_print_degraded_completion(
+        monkeypatch, tmp_path, capsys):
+    def fail(*_args):
+        raise RuntimeError("encoding failed")
+
+    monkeypatch.setattr(record_one_click, "_mix_available_chunks", fail)
+    message = record_one_click._completion_message({
+        "session_health_status": "degraded",
+        "render_endpoint_unavailable": True,
+        "microphone_endpoint_unavailable": False,
+    })
+
+    result = record_one_click._finish_mp3(
+        tmp_path, logging.getLogger("finish-failure"), {},
+        completion_message=message,
+    )
+
+    assert result == 1
+    assert "Completed with warning" not in capsys.readouterr().out
+
+
 def test_failed_recording_lock_does_not_overwrite_recovery_metadata(
         monkeypatch, tmp_path):
     output = _prepare_recording_start(monkeypatch, tmp_path)

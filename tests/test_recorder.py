@@ -13,9 +13,42 @@ from audio_capture.recorder import (
     ConcurrentRecorder,
     StreamStatistics,
     downmix_pcm16_mono,
+    session_health_fields,
     session_timing_fields,
     required_recovery_free_bytes,
 )
+
+
+def _health_statistics(kind, *, unavailable=False, invalidations=0):
+    statistics = StreamStatistics(kind, kind, 48000, 1)
+    statistics.endpoint_unavailable = unavailable
+    statistics.endpoint_invalidation_events = invalidations
+    return statistics
+
+
+def test_session_health_precedence_and_recovery_use_existing_statistics():
+    render = _health_statistics(
+        "render-loopback", unavailable=True, invalidations=1)
+    microphone = _health_statistics("microphone", invalidations=1)
+
+    assert session_health_fields({
+        render.endpoint_kind: render, microphone.endpoint_kind: microphone,
+    }, [RuntimeError("capture failed")])["session_health_status"] == "failed"
+
+    render.endpoint_unavailable = False
+    health = session_health_fields({
+        render.endpoint_kind: render, microphone.endpoint_kind: microphone,
+    }, [])
+    assert health["session_health_status"] == "recovered"
+    assert health["render_invalidation_events"] == 1
+
+
+def test_failed_session_health_tolerates_missing_stream_statistics():
+    health = session_health_fields({}, [RuntimeError("startup failed")])
+
+    assert health["session_health_status"] == "failed"
+    assert health["render_endpoint_unavailable"] is False
+    assert health["microphone_terminal_status"] is None
 
 
 class FakeStream:
