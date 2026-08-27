@@ -844,7 +844,12 @@ def test_sparse_missing_middle_slot_preserves_silent_interval(tmp_path, monkeypa
     assert samples[-1] == 22
 
 
-def test_repair_keeps_corrupt_side_but_recovers_valid_opposite_audio(tmp_path, monkeypatch):
+@pytest.mark.parametrize("corrupt_side, expected", [
+    ("mic_____", 20),
+    ("speaker", 1),
+])
+def test_repair_keeps_corrupt_side_but_recovers_valid_opposite_audio(
+        tmp_path, monkeypatch, corrupt_side, expected):
     session = tmp_path / "session"
     session.mkdir()
     monkeypatch.setattr(record_one_click, "OUTPUT_ROOT", tmp_path / "recovered")
@@ -853,7 +858,10 @@ def test_repair_keeps_corrupt_side_but_recovers_valid_opposite_audio(tmp_path, m
         start = (number - 1) * 10
         _write(session / f"speaker_{start:02d}-{start + 10:02d}min.wav", 1, 48000, [value])
         _write(session / f"mic_____{start:02d}-{start + 10:02d}min.wav", 1, 48000, [1])
-    corrupt = session / "mic_____10-20min.wav"
+    corrupt = session / (
+        "mic_____10-20min.wav" if corrupt_side == "mic_____" else
+        "speaker_10-20min.wav"
+    )
     corrupt.write_bytes(b"corrupt")
 
     result = record_one_click._repair_locked_session(
@@ -862,7 +870,29 @@ def test_repair_keeps_corrupt_side_but_recovers_valid_opposite_audio(tmp_path, m
     assert result == record_one_click.REPAIR_PARTIAL
     assert corrupt.read_bytes() == b"corrupt"
     encoded = _samples(bytes(_FakeEncoder.instances[0].data))
-    assert 20 in encoded
+    assert expected in encoded
+
+
+def test_repair_preserves_missing_middle_both_side_slot(tmp_path, monkeypatch):
+    session = tmp_path / "session"
+    session.mkdir()
+    monkeypatch.setattr(record_one_click, "OUTPUT_ROOT", tmp_path / "recovered")
+    monkeypatch.setattr(record_one_click, "DEFAULT_CHUNK_DURATION_SECONDS", 1)
+    for start, value in ((0, 10), (20, 30)):
+        _write(session / f"speaker_{start:02d}-{start + 10:02d}min.wav",
+               1, 48000, [value])
+        _write(session / f"mic_____{start:02d}-{start + 10:02d}min.wav",
+               1, 48000, [1])
+
+    result = record_one_click._repair_locked_session(
+        session, logging.getLogger("test-missing-middle-repair"))
+
+    assert result == record_one_click.REPAIR_FULL
+    encoded = _samples(bytes(_FakeEncoder.instances[0].data))
+    assert len(encoded) == 96_001
+    assert encoded[0] == 11
+    assert encoded[48_000:96_000] == [0] * 48_000
+    assert encoded[-1] == 31
 
 
 def test_timeline_session_preserves_leading_fully_silent_slots(tmp_path, monkeypatch):
@@ -879,3 +909,40 @@ def test_timeline_session_preserves_leading_fully_silent_slots(tmp_path, monkeyp
     assert len(samples) == 96_001
     assert samples[:96_000] == [0] * 96_000
     assert samples[-1] == 7
+
+
+def test_timeline_normal_stop_after_speech_uses_qpc_session_duration(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(record_one_click, "DEFAULT_CHUNK_DURATION_SECONDS", 1)
+    _write(tmp_path / "speaker_00-10min.wav", 1, 48000, [7])
+    (tmp_path / record_one_click.SESSION_FILE).write_text(json.dumps({
+        "status": record_one_click.RECOVERY_PENDING,
+        "session_timeline_capture": True,
+        "session_duration_100ns": 25_000_000,
+    }), encoding="utf-8")
+
+    record_one_click._mix_available_chunks(
+        tmp_path, logging.getLogger("test-qpc-stop"))
+
+    samples = _samples(bytes(_FakeEncoder.instances[0].data))
+    assert len(samples) == 120_000
+    assert samples[0] == 7
+    assert samples[1:] == [0] * 119_999
+
+
+def test_timeline_endpoint_missing_for_consecutive_slots_is_silence(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(record_one_click, "DEFAULT_CHUNK_DURATION_SECONDS", 1)
+    _write(tmp_path / "speaker_00-10min.wav", 1, 48000, [10])
+    for start, value in ((0, 1), (10, 2), (20, 3)):
+        _write(tmp_path / f"mic_____{start:02d}-{start + 10:02d}min.wav",
+               1, 48000, [value])
+
+    record_one_click._mix_available_chunks(
+        tmp_path, logging.getLogger("test-consecutive-missing-endpoint"))
+
+    samples = _samples(bytes(_FakeEncoder.instances[0].data))
+    assert len(samples) == 96_001
+    assert samples[0] == 11
+    assert samples[48_000] == 2
+    assert samples[-1] == 3
