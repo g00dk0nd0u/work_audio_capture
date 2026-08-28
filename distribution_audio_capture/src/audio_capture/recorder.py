@@ -764,6 +764,7 @@ class ConcurrentRecorder:
                         writer.advance_session_frame(
                             pending_reconnect_session_frame)
                         pending_reconnect_session_frame = None
+                    mapper.reset_stream_continuity()
                     continue
                 # A valid audio packet completes this invalidation episode. An
                 # open that immediately invalidates cannot reset the retry budget.
