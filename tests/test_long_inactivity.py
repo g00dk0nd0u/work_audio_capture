@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import threading
 import wave
 
 from audio_capture.model import CapturePacket, Endpoint
@@ -212,4 +213,111 @@ def test_staggered_no_packet_and_content_silence_remain_per_stream(tmp_path):
     assert wav_frames(tmp_path / "mic_0004.wav") == (
         7, bytes(12) + b"\x04\x00")
     assert not (tmp_path / "mic_0003.wav").exists()
+    assert_healthy_and_uninterrupted(recorder)
+
+
+def test_record_concurrently_preserves_microphone_during_render_no_packet(
+        tmp_path):
+    clock_lock = threading.Lock()
+    clock_seconds = 0
+    microphone_started = threading.Event()
+    render_timeouts = [threading.Event() for _ in range(3)]
+    microphone_progress = [threading.Event() for _ in range(3)]
+    render_resumed = threading.Event()
+    microphone_finished = threading.Event()
+
+    def set_clock(seconds):
+        nonlocal clock_seconds
+        with clock_lock:
+            clock_seconds = seconds
+
+    def qpc_clock():
+        with clock_lock:
+            return clock_seconds * 10_000_000
+
+    class RenderStream:
+        format = SimpleNamespace(
+            sample_rate=RATE, channels=1, channel_mask=None)
+
+        def __init__(self):
+            self.reads = 0
+
+        def read_packet(self):
+            self.reads += 1
+            if self.reads == 1:
+                return packet(1, 100, 0)
+            if 2 <= self.reads <= 4:
+                stage = self.reads - 2
+                if stage == 0:
+                    assert microphone_started.wait(1)
+                else:
+                    assert microphone_progress[stage - 1].wait(1)
+                set_clock((601, 1_201, 1_801)[stage])
+                render_timeouts[stage].set()
+                return None
+            if self.reads == 5:
+                assert microphone_progress[2].wait(1)
+                return packet(2, 101, 1_805)
+            render_resumed.set()
+            assert microphone_finished.wait(1)
+            set_clock(1_806)
+            recorder.stop_event.set()
+            return None
+
+        def stop_stream(self):
+            pass
+
+        def close(self):
+            pass
+
+    class MicrophoneStream:
+        format = SimpleNamespace(
+            sample_rate=RATE, channels=1, channel_mask=None)
+
+        def __init__(self):
+            self.reads = 0
+
+        def read_packet(self):
+            self.reads += 1
+            if self.reads == 1:
+                microphone_started.set()
+                return packet(10, 0, 0)
+            if 2 <= self.reads <= 4:
+                stage = self.reads - 2
+                assert render_timeouts[stage].wait(1)
+                microphone_progress[stage].set()
+                return packet((11, 12, 13)[stage],
+                              (600, 1_200, 1_800)[stage], 0)
+            assert render_resumed.wait(1)
+            microphone_finished.set()
+            return None
+
+        def stop_stream(self):
+            pass
+
+        def close(self):
+            pass
+
+    class ConcurrentBackend:
+        packet_timestamps = True
+
+        def open_input(self, endpoint, _frames):
+            return (RenderStream() if endpoint.kind == "render-loopback"
+                    else MicrophoneStream())
+
+        def sample_width(self):
+            return 2
+
+    recorder = ConcurrentRecorder(
+        ConcurrentBackend(), chunk_duration_seconds=SLOT_SECONDS,
+        session_qpc_clock=qpc_clock)
+    render = Endpoint("render", "render", 1, RATE, "render-loopback")
+    microphone = Endpoint("mic", "mic", 1, RATE, "microphone")
+
+    recorder.record(render, microphone, tmp_path / "render.wav",
+                    tmp_path / "mic.wav")
+
+    assert_long_gap_files(tmp_path / "render.wav")
+    assert_active_files(tmp_path / "mic.wav", (10, 11, 12, 13))
+    assert recorder.session_health["session_health_status"] == "healthy"
     assert_healthy_and_uninterrupted(recorder)

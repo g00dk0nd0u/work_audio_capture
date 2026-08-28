@@ -536,6 +536,52 @@ def test_reopen_without_packet_commits_pending_observation(
     assert not recorder.errors
 
 
+def test_no_packet_reanchor_floor_survives_endpoint_reopen(tmp_path, monkeypatch):
+    monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS", (0,))
+    output = tmp_path / "render.wav"
+    closed_bytes = []
+    recorder = None
+
+    class Resumed(PacketStream):
+        def read_packet(self):
+            try:
+                action = super().read_packet()
+                closed_bytes.append(output.read_bytes())
+                return action
+            except StopIteration:
+                recorder.stop_event.set()
+                return None
+
+    backend = ReopenBackend([
+        PacketStream([packet(1, 100, 0), None, invalidated()]),
+        Resumed([packet(2, 0, 200_000_000)]),
+    ])
+    clock = iter((250_000_000, 260_000_000, 270_000_000))
+    recorder = ConcurrentRecorder(
+        backend, chunk_duration_seconds=1,
+        session_qpc_clock=lambda: next(clock))
+    recorder.session_qpc_origin_100ns = 0
+    endpoint = Endpoint("render-id", "generic", 1, 10, "render-loopback")
+
+    recorder._capture(endpoint, output)
+
+    assert output.read_bytes() == closed_bytes[0]
+    assert wav_frames(output) == (1, b"\x01\x00")
+    assert wav_frames(tmp_path / "render_0026.wav") == (1, b"\x02\x00")
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "render.wav", "render_0026.wav",
+    ]
+    stats = recorder.stream_statistics[endpoint.kind]
+    assert not recorder.errors
+    assert stats.endpoint_invalidation_events == 1
+    assert stats.audio_service_not_running_events == 0
+    assert stats.stream_reopen_attempts == 1
+    assert stats.stream_reopen_successes == 1
+    assert not stats.endpoint_unavailable
+    assert session_health_fields(recorder.stream_statistics, recorder.errors)[
+        "session_health_status"] == "recovered"
+
+
 def test_untrusted_first_resumed_packet_rebases_after_long_gap(
         tmp_path, monkeypatch):
     monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS", (0,))

@@ -66,7 +66,10 @@ class StreamTimelineMapper:
         self.state = TimelineState.UNANCHORED
         self.anchor_device_position = None
         self.last_device_end = None
-        self.reanchor_session_frame_floor = session_frame_floor
+        if session_frame_floor is not None:
+            self.reanchor_session_frame_floor = max(
+                self.reanchor_session_frame_floor or 0,
+                session_frame_floor)
 
     def _timestamp_valid(self, packet: CapturePacket) -> bool:
         return (not packet.flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR and
