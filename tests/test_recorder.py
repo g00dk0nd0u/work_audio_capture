@@ -20,10 +20,12 @@ from audio_capture.recorder import (
 )
 
 
-def _health_statistics(kind, *, unavailable=False, invalidations=0):
+def _health_statistics(kind, *, unavailable=False, invalidations=0,
+                       service_interruptions=0):
     statistics = StreamStatistics(kind, kind, 48000, 1)
     statistics.endpoint_unavailable = unavailable
     statistics.endpoint_invalidation_events = invalidations
+    statistics.audio_service_not_running_events = service_interruptions
     return statistics
 
 
@@ -60,6 +62,19 @@ def test_failed_session_health_tolerates_missing_stream_statistics():
     assert health["session_health_status"] == "failed"
     assert health["render_endpoint_unavailable"] is False
     assert health["microphone_terminal_status"] is None
+
+
+def test_recovered_audio_service_interruption_is_reported_in_health():
+    render = _health_statistics("render-loopback", service_interruptions=1)
+    microphone = _health_statistics("microphone")
+
+    health = session_health_fields({
+        render.endpoint_kind: render, microphone.endpoint_kind: microphone,
+    }, [])
+
+    assert health["session_health_status"] == "recovered"
+    assert health["render_audio_service_not_running_events"] == 1
+    assert health["microphone_audio_service_not_running_events"] == 0
 
 
 def test_health_logging_failure_preserves_degraded_session(monkeypatch, tmp_path):

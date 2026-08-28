@@ -16,7 +16,8 @@ from .model import Endpoint
 from .sparse_writer import GracefulStopRequested, SparseRecoveryWriter
 from .timeline import StreamTimelineMapper, query_performance_counter_100ns
 from .wasapi import (AUDCLNT_E_DEVICE_INVALIDATED,
-                     AUDCLNT_E_RESOURCES_INVALIDATED, HResultError)
+                     AUDCLNT_E_RESOURCES_INVALIDATED,
+                     AUDCLNT_E_SERVICE_NOT_RUNNING, HResultError)
 
 MAX_PCM_DATA_BYTES = (7 * 1024**3) // 2
 MAX_RECORDING_SECONDS = 12 * 60 * 60
@@ -25,7 +26,7 @@ LOGGER = logging.getLogger("work_audio_capture")
 MIN_DRIFT_RATE_DURATION_SECONDS = 60.0
 _TIME_SLOT_STEM = re.compile(r"^(?P<prefix>.+_)(?P<start>\d+)-(?P<end>\d+)min$")
 STREAM_REOPEN_DELAYS_SECONDS = (0.0, 0.25, 0.5, 1.0, 2.0, 4.0)
-_INVALIDATION_HRESULTS = {
+_ENDPOINT_OR_RESOURCE_INVALIDATED_HRESULTS = {
     AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_E_RESOURCES_INVALIDATED,
 }
 
@@ -63,6 +64,7 @@ class StreamStatistics:
     timeline_gap_frames_filled: int = 0
     occupied_recovery_slots: int = 0
     endpoint_invalidation_events: int = 0
+    audio_service_not_running_events: int = 0
     stream_reopen_attempts: int = 0
     stream_reopen_successes: int = 0
     stream_reopen_failures: int = 0
@@ -117,6 +119,7 @@ class StreamStatistics:
             "timeline_gap_frames_filled": self.timeline_gap_frames_filled,
             "occupied_recovery_slots": self.occupied_recovery_slots,
             "endpoint_invalidation_events": self.endpoint_invalidation_events,
+            "audio_service_not_running_events": self.audio_service_not_running_events,
             "stream_reopen_attempts": self.stream_reopen_attempts,
             "stream_reopen_successes": self.stream_reopen_successes,
             "stream_reopen_failures": self.stream_reopen_failures,
@@ -124,9 +127,14 @@ class StreamStatistics:
         }
 
 
-def _is_endpoint_invalidation(error: BaseException) -> bool:
-    return (isinstance(error, HResultError) and
-            error.hresult in _INVALIDATION_HRESULTS)
+def _recoverable_interruption_kind(error: BaseException) -> str | None:
+    if not isinstance(error, HResultError):
+        return None
+    if error.hresult in _ENDPOINT_OR_RESOURCE_INVALIDATED_HRESULTS:
+        return "endpoint_or_resource_invalidated"
+    if error.hresult == AUDCLNT_E_SERVICE_NOT_RUNNING:
+        return "audio_service_not_running"
+    return None
 
 
 def session_timing_fields(render: StreamStatistics,
@@ -181,15 +189,15 @@ def session_health_fields(
         item for item in (render, microphone)
         if item is not None and item.endpoint_unavailable
     ]
-    invalidations = sum(
-        item.endpoint_invalidation_events
+    interruptions = sum(
+        item.endpoint_invalidation_events + item.audio_service_not_running_events
         for item in (render, microphone) if item is not None
     )
     if errors:
         status = "failed"
     elif unavailable:
         status = "degraded"
-    elif invalidations:
+    elif interruptions:
         status = "recovered"
     else:
         status = "healthy"
@@ -208,6 +216,8 @@ def session_health_fields(
                 item.endpoint_unavailable if item is not None else False),
             f"{label}_invalidation_events": (
                 item.endpoint_invalidation_events if item is not None else 0),
+            f"{label}_audio_service_not_running_events": (
+                item.audio_service_not_running_events if item is not None else 0),
             f"{label}_reopen_attempts": (
                 item.stream_reopen_attempts if item is not None else 0),
             f"{label}_reopen_successes": (
@@ -672,11 +682,19 @@ class ConcurrentRecorder:
                 try:
                     packet = stream.read_packet()
                 except BaseException as exc:
-                    if not _is_endpoint_invalidation(exc):
+                    interruption_kind = _recoverable_interruption_kind(exc)
+                    if interruption_kind is None:
                         raise
-                    statistics.endpoint_invalidation_events += 1
-                    log("warning", "capture endpoint invalidated endpoint_kind=%s hresult=0x%08X",
-                        endpoint.kind, exc.hresult)
+                    if interruption_kind == "audio_service_not_running":
+                        statistics.audio_service_not_running_events += 1
+                        log("warning", "capture audio service unavailable "
+                            "endpoint_kind=%s hresult=0x%08X",
+                            endpoint.kind, exc.hresult)
+                    else:
+                        statistics.endpoint_invalidation_events += 1
+                        log("warning", "capture endpoint invalidated "
+                            "endpoint_kind=%s hresult=0x%08X",
+                            endpoint.kind, exc.hresult)
                     close_stream(stream, report=False)
                     stream = None
                     while reopen_attempt < len(STREAM_REOPEN_DELAYS_SECONDS):
