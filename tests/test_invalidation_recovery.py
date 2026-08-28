@@ -4,7 +4,7 @@ import wave
 import pytest
 
 from audio_capture.model import CapturePacket, Endpoint
-from audio_capture.recorder import ConcurrentRecorder
+from audio_capture.recorder import ConcurrentRecorder, session_health_fields
 from audio_capture.wasapi import (AUDCLNT_E_DEVICE_INVALIDATED,
                                   AUDCLNT_E_RESOURCES_INVALIDATED,
                                   AUDCLNT_E_SERVICE_NOT_RUNNING,
@@ -312,6 +312,133 @@ def wav_frames(path):
         return source.getnframes(), source.readframes(source.getnframes())
 
 
+def test_no_packet_gap_reanchors_resumed_audio_after_closed_slot(tmp_path):
+    output = tmp_path / "render.wav"
+    recorder = None
+    closed_bytes = []
+
+    class SilentGap(PacketStream):
+        def read_packet(self):
+            try:
+                action = super().read_packet()
+                if isinstance(action, CapturePacket) and action.pcm == b"\x02\x00":
+                    closed_bytes.append(output.read_bytes())
+                return action
+            except StopIteration:
+                recorder.stop_event.set()
+                return None
+
+    stream = SilentGap([
+        packet(1, 100, 0),
+        None,
+        None,
+        packet(2, 101, 255_000_000),
+    ])
+    clock = iter((20_000_000, 250_000_000, 260_000_000))
+    recorder = ConcurrentRecorder(
+        ReopenBackend([stream]), chunk_duration_seconds=1,
+        session_qpc_clock=lambda: next(clock))
+    recorder.session_qpc_origin_100ns = 0
+
+    recorder._capture(
+        Endpoint("render-id", "generic", 1, 10, "render-loopback"), output)
+
+    assert wav_frames(output) == (1, b"\x01\x00")
+    assert output.read_bytes() == closed_bytes[0]
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "render.wav", "render_0026.wav",
+    ]
+    assert wav_frames(tmp_path / "render_0026.wav") == (
+        6, bytes(10) + b"\x02\x00")
+    stats = recorder.stream_statistics["render-loopback"]
+    assert not recorder.errors
+    assert stats.endpoint_invalidation_events == 0
+    assert stats.audio_service_not_running_events == 0
+    assert not stats.endpoint_unavailable
+    assert stats.terminal_status == "normal_stop"
+    assert session_health_fields(recorder.stream_statistics, recorder.errors)[
+        "session_health_status"] == "healthy"
+
+
+def test_packet_after_no_packet_timeout_reanchors_from_packet_qpc(tmp_path):
+    recorder = None
+
+    class OneTimeout(PacketStream):
+        def read_packet(self):
+            try:
+                return super().read_packet()
+            except StopIteration:
+                recorder.stop_event.set()
+                return None
+
+    stream = OneTimeout([
+        packet(1, 100, 0),
+        None,
+        packet(2, 101, 50_000_000),
+    ])
+    clock = iter((10_000_000, 60_000_000))
+    recorder = ConcurrentRecorder(
+        ReopenBackend([stream]), chunk_duration_seconds=1,
+        session_qpc_clock=lambda: next(clock))
+    recorder.session_qpc_origin_100ns = 0
+
+    recorder._capture(
+        Endpoint("render-id", "generic", 1, 10, "render-loopback"),
+        tmp_path / "render.wav")
+
+    assert wav_frames(tmp_path / "render.wav") == (1, b"\x01\x00")
+    assert wav_frames(tmp_path / "render_0006.wav") == (1, b"\x02\x00")
+    assert not recorder.errors
+
+
+def test_no_packet_boundary_race_does_not_reopen_closed_slot(tmp_path):
+    output = tmp_path / "render.wav"
+    recorder = None
+    closed_bytes = []
+
+    class BoundaryRace(PacketStream):
+        def read_packet(self):
+            try:
+                action = super().read_packet()
+                if isinstance(action, CapturePacket) and action.pcm == b"\x02\x00":
+                    closed_bytes.append(output.read_bytes())
+                return action
+            except StopIteration:
+                recorder.stop_event.set()
+                return None
+
+    stream = BoundaryRace([
+        packet(1, 90, 9_000_000),
+        None,
+        packet(2, 91, 9_900_000),
+    ], rate=100)
+    clock = iter((10_100_000, 10_200_000))
+    recorder = ConcurrentRecorder(
+        ReopenBackend([stream]), chunk_duration_seconds=1,
+        session_qpc_clock=lambda: next(clock))
+    recorder.session_qpc_origin_100ns = 0
+
+    recorder._capture(
+        Endpoint("render-id", "generic", 1, 100, "render-loopback"), output)
+
+    assert output.read_bytes() == closed_bytes[0]
+    assert wav_frames(output) == (91, bytes(180) + b"\x01\x00")
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "render.wav", "render_0002.wav",
+    ]
+    assert wav_frames(tmp_path / "render_0002.wav") == (
+        2, bytes(2) + b"\x02\x00")
+    assert sum(path.stat().st_size for path in tmp_path.iterdir()) < 1_000
+    stats = recorder.stream_statistics["render-loopback"]
+    assert not recorder.errors
+    assert stats.endpoint_invalidation_events == 0
+    assert stats.audio_service_not_running_events == 0
+    assert not stats.endpoint_unavailable
+    assert stats.terminal_status == "normal_stop"
+    assert session_health_fields(recorder.stream_statistics, recorder.errors)[
+        "session_health_status"] == "healthy"
+
+
 def test_trusted_first_resumed_packet_can_finish_previous_slot(
         tmp_path, monkeypatch):
     monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS", (0,))
@@ -407,6 +534,52 @@ def test_reopen_without_packet_commits_pending_observation(
     assert wav_frames(output) == (1, b"\x01\x00")
     assert sorted(path.name for path in tmp_path.iterdir()) == ["mic.wav"]
     assert not recorder.errors
+
+
+def test_no_packet_reanchor_floor_survives_endpoint_reopen(tmp_path, monkeypatch):
+    monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS", (0,))
+    output = tmp_path / "render.wav"
+    closed_bytes = []
+    recorder = None
+
+    class Resumed(PacketStream):
+        def read_packet(self):
+            try:
+                action = super().read_packet()
+                closed_bytes.append(output.read_bytes())
+                return action
+            except StopIteration:
+                recorder.stop_event.set()
+                return None
+
+    backend = ReopenBackend([
+        PacketStream([packet(1, 100, 0), None, invalidated()]),
+        Resumed([packet(2, 0, 200_000_000)]),
+    ])
+    clock = iter((250_000_000, 260_000_000, 270_000_000))
+    recorder = ConcurrentRecorder(
+        backend, chunk_duration_seconds=1,
+        session_qpc_clock=lambda: next(clock))
+    recorder.session_qpc_origin_100ns = 0
+    endpoint = Endpoint("render-id", "generic", 1, 10, "render-loopback")
+
+    recorder._capture(endpoint, output)
+
+    assert output.read_bytes() == closed_bytes[0]
+    assert wav_frames(output) == (1, b"\x01\x00")
+    assert wav_frames(tmp_path / "render_0026.wav") == (1, b"\x02\x00")
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "render.wav", "render_0026.wav",
+    ]
+    stats = recorder.stream_statistics[endpoint.kind]
+    assert not recorder.errors
+    assert stats.endpoint_invalidation_events == 1
+    assert stats.audio_service_not_running_events == 0
+    assert stats.stream_reopen_attempts == 1
+    assert stats.stream_reopen_successes == 1
+    assert not stats.endpoint_unavailable
+    assert session_health_fields(recorder.stream_statistics, recorder.errors)[
+        "session_health_status"] == "recovered"
 
 
 def test_untrusted_first_resumed_packet_rebases_after_long_gap(

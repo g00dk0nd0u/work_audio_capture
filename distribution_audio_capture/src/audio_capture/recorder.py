@@ -756,14 +756,19 @@ class ConcurrentRecorder:
                     current_frame = max(
                         0, (self.session_qpc_clock() - self.session_qpc_origin_100ns)
                         * endpoint.sample_rate // 10_000_000)
+                    reanchor_session_frame_floor = current_frame
                     if pending_reconnect_session_frame is None:
                         writer.advance_session_frame(current_frame)
                     else:
                         pending_reconnect_session_frame = max(
                             pending_reconnect_session_frame, current_frame)
+                        reanchor_session_frame_floor = (
+                            pending_reconnect_session_frame)
                         writer.advance_session_frame(
                             pending_reconnect_session_frame)
                         pending_reconnect_session_frame = None
+                    mapper.reset_stream_continuity(
+                        reanchor_session_frame_floor)
                     continue
                 # A valid audio packet completes this invalidation episode. An
                 # open that immediately invalidates cannot reset the retry budget.

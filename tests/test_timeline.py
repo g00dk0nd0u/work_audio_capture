@@ -72,6 +72,19 @@ def test_explicit_stream_restart_reanchors_without_losing_session_state():
     assert mapper.diagnostics.device_position_regression_events == 0
 
 
+def test_reanchor_floor_survives_repeated_resets_until_trusted_reanchor():
+    mapper = StreamTimelineMapper(1, 0)
+
+    mapper.reset_stream_continuity(1_800)
+    mapper.reset_stream_continuity()
+    mapper.reset_stream_continuity()
+    resumed = mapper.place(packet(0, 1_700 * 10_000_000, frames=1))
+
+    assert resumed.session_start_frame == 1_800
+    assert mapper.reanchor_session_frame_floor is None
+    assert mapper.place(packet(1, 0, frames=1)).session_start_frame == 1_801
+
+
 def test_restart_timestamp_error_preserves_audio_then_valid_packet_reanchors():
     mapper = StreamTimelineMapper(1000, 0)
     mapper.place(packet(100, 1_200_000))
