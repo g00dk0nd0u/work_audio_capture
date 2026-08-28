@@ -159,3 +159,34 @@ def test_regression_after_no_packet_is_preserved_before_trusted_reanchor(tmp_pat
     assert writer.sequential_session_frame == 29
     assert [value for value in wav_data(tmp_path / "slot-2.wav")[::2]
             if value] == [2, 3, 4]
+
+
+def test_repeated_no_packet_advancement_keeps_highest_floor_and_sparse_slots(
+        tmp_path):
+    mapper = StreamTimelineMapper(RATE, 0)
+    writer = SparseRecoveryWriter(
+        lambda slot: tmp_path / f"slot-{slot}.wav", RATE, 1, 2, 1)
+    writer.write(mapper.place(packet(1, 100, 0)))
+
+    floors = (15, 35, 85)
+    snapshots = {}
+    for floor in floors:
+        writer.advance_session_frame(floor)
+        mapper.reset_stream_continuity(floor)
+        assert mapper.reanchor_session_frame_floor == floor
+        for slot in writer.closed_slots:
+            path = tmp_path / f"slot-{slot}.wav"
+            snapshots.setdefault(slot, path.read_bytes())
+
+    resumed = mapper.place(packet(2, 101, 80))
+    writer.write(resumed)
+    writer.close()
+
+    assert resumed.timing_trusted
+    assert resumed.session_start_frame == floors[-1]
+    assert mapper.reanchor_session_frame_floor is None
+    assert all((tmp_path / f"slot-{slot}.wav").read_bytes() == contents
+               for slot, contents in snapshots.items())
+    assert writer.occupied_slots == {0, 8}
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "slot-0.wav", "slot-8.wav"]
