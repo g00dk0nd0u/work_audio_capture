@@ -391,6 +391,54 @@ def test_packet_after_no_packet_timeout_reanchors_from_packet_qpc(tmp_path):
     assert not recorder.errors
 
 
+def test_no_packet_boundary_race_does_not_reopen_closed_slot(tmp_path):
+    output = tmp_path / "render.wav"
+    recorder = None
+    closed_bytes = []
+
+    class BoundaryRace(PacketStream):
+        def read_packet(self):
+            try:
+                action = super().read_packet()
+                if isinstance(action, CapturePacket) and action.pcm == b"\x02\x00":
+                    closed_bytes.append(output.read_bytes())
+                return action
+            except StopIteration:
+                recorder.stop_event.set()
+                return None
+
+    stream = BoundaryRace([
+        packet(1, 90, 9_000_000),
+        None,
+        packet(2, 91, 9_900_000),
+    ], rate=100)
+    clock = iter((10_100_000, 10_200_000))
+    recorder = ConcurrentRecorder(
+        ReopenBackend([stream]), chunk_duration_seconds=1,
+        session_qpc_clock=lambda: next(clock))
+    recorder.session_qpc_origin_100ns = 0
+
+    recorder._capture(
+        Endpoint("render-id", "generic", 1, 100, "render-loopback"), output)
+
+    assert output.read_bytes() == closed_bytes[0]
+    assert wav_frames(output) == (91, bytes(180) + b"\x01\x00")
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "render.wav", "render_0002.wav",
+    ]
+    assert wav_frames(tmp_path / "render_0002.wav") == (
+        2, bytes(2) + b"\x02\x00")
+    assert sum(path.stat().st_size for path in tmp_path.iterdir()) < 1_000
+    stats = recorder.stream_statistics["render-loopback"]
+    assert not recorder.errors
+    assert stats.endpoint_invalidation_events == 0
+    assert stats.audio_service_not_running_events == 0
+    assert not stats.endpoint_unavailable
+    assert stats.terminal_status == "normal_stop"
+    assert session_health_fields(recorder.stream_statistics, recorder.errors)[
+        "session_health_status"] == "healthy"
+
+
 def test_trusted_first_resumed_packet_can_finish_previous_slot(
         tmp_path, monkeypatch):
     monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS", (0,))

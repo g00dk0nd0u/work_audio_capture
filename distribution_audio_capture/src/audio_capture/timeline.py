@@ -57,13 +57,16 @@ class StreamTimelineMapper:
         self.anchor_session_frame = 0
         self.last_device_end: int | None = None
         self.sequential_end_frame = 0
+        self.reanchor_session_frame_floor: int | None = None
         self.diagnostics = TimelineDiagnostics()
 
-    def reset_stream_continuity(self) -> None:
+    def reset_stream_continuity(
+            self, session_frame_floor: int | None = None) -> None:
         """Forget endpoint-local continuity while retaining session history."""
         self.state = TimelineState.UNANCHORED
         self.anchor_device_position = None
         self.last_device_end = None
+        self.reanchor_session_frame_floor = session_frame_floor
 
     def _timestamp_valid(self, packet: CapturePacket) -> bool:
         return (not packet.flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR and
@@ -76,10 +79,12 @@ class StreamTimelineMapper:
         start = ((packet.qpc_position_100ns - self.origin) * self.sample_rate
                  // HUNDRED_NS_PER_SECOND)
         # An anomalous timestamp must never reorder already captured speech.
-        start = max(start, self.sequential_end_frame)
+        start = max(start, self.sequential_end_frame,
+                    self.reanchor_session_frame_floor or 0)
         self.anchor_device_position = packet.device_position
         self.anchor_session_frame = start
         self.last_device_end = packet.device_position + packet.frame_count
+        self.reanchor_session_frame_floor = None
         self.state = TimelineState.NORMAL
         return start
 
