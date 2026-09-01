@@ -24,20 +24,30 @@ level rejects comparatively quiet background, and the median of the remaining
 blocks provides a robust active level without allowing a notification or other
 isolated transient to dominate.
 
+When a persistent low-level population would dominate that distribution, a
+separate upper population with at least three seconds of evidence is used as
+the speech reference. This rejects an above-gate microphone noise floor without
+globally raising the absolute gate or excluding genuinely quiet speech.
+
 Balancing is skipped unless each source supplies at least three seconds of
 active evidence. Otherwise only the quieter source is raised by the measured
 level difference; the louder source always remains at exactly 0 dB. There is no
 midpoint adjustment, AGC, compression, normalization, or block/chunk-varying
 gain. Active-audio clipping is measured over the session and, when sustained
 clipping would be introduced, only the quieter source's requested gain is
-reduced. The resulting single fixed gain plan is then used for every recovery
+reduced. A single approximately 200 ms high block is treated as a possible
+transient, while consecutive high blocks are included in headroom analysis so
+a sustained loud passage constrains the safe gain. The resulting single fixed gain plan is then used for every recovery
 chunk in the encoding pass. Final summing retains deterministic PCM16 clipping
 as a safety invariant.
 
 The JSON log records both robust levels and evidence durations, the quieter
 source, measured difference, requested and safe gains, gains applied to each
 source, residual difference, baseline and balanced clipping counts, and whether
-balancing was full, partial, or skipped (with a reason).
+balancing was full, partial, or skipped (with a reason). Headroom diagnostics
+also report the active sample denominator and baseline/balanced clipping
+fractions; session silence is not part of that denominator. Equal levels are
+reported as skipped with `levels_already_balanced`.
 
 Recovery WAVs live under `%LOCALAPPDATA%\WorkAudioCapture\<session>` and the published normal MP3 lives in the repository/distribution `recordings` directory. Multiple WAV pairs are fed, in chunk-number order, through one bounded-memory encoder; they do not become multiple numbered MP3 outputs.
 

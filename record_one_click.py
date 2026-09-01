@@ -138,6 +138,8 @@ _LOG_EXTRA_FIELDS = (
     "quieter_source", "measured_level_difference_db", "requested_gain_db",
     "safe_gain_db", "applied_render_gain_db", "applied_microphone_gain_db",
     "residual_difference_db", "baseline_clipping", "balanced_clipping",
+    "active_headroom_sample_count", "baseline_clipping_fraction",
+    "balanced_clipping_fraction",
     "transcription_balance_state", "transcription_balance_skip_reason",
 )
 
@@ -477,6 +479,22 @@ class _LevelHistogram:
             return None, 0.0
         gate = max(BALANCE_ABSOLUTE_GATE_DBFS,
                    reference - BALANCE_RELATIVE_GATE_DB)
+        # A persistent above-gate electrical/noise floor can dominate the
+        # lower distribution.  When there is independently sufficient
+        # evidence in a population at least 12 dB above a low reference, use
+        # the upper population rather than counting the floor as speech.
+        minimum_blocks = math.ceil(
+            BALANCE_MIN_EVIDENCE_SECONDS / BALANCE_BLOCK_SECONDS)
+        upper_count = 0
+        upper_floor = None
+        for index in range(len(self.counts) - 1, -1, -1):
+            upper_count += self.counts[index]
+            if upper_count >= minimum_blocks:
+                upper_floor = index / 10.0 - 120.0
+                break
+        if (reference <= -35.0 and upper_floor is not None and
+                upper_floor >= reference + 12.0):
+            gate = max(gate, upper_floor - 6.0)
         level = self.percentile(0.5, gate)
         first = max(0, round((gate + 120.0) * 10))
         return level, sum(self.counts[first:]) * BALANCE_BLOCK_SECONDS
@@ -531,6 +549,9 @@ def _gain_plan(normalized, sample_rate: int, pair_frames) -> dict[str, object]:
         "applied_render_gain_db": 0.0, "applied_microphone_gain_db": 0.0,
         "residual_difference_db": None, "baseline_clipping": 0,
         "balanced_clipping": 0, "transcription_balance_state": "skipped",
+        "active_headroom_sample_count": 0,
+        "baseline_clipping_fraction": 0.0,
+        "balanced_clipping_fraction": 0.0,
         "transcription_balance_skip_reason": None,
     }
     if (render_level is None or microphone_level is None or
@@ -541,7 +562,6 @@ def _gain_plan(normalized, sample_rate: int, pair_frames) -> dict[str, object]:
     difference = abs(render_level - microphone_level)
     plan["measured_level_difference_db"] = difference
     if difference < 0.05:
-        plan["transcription_balance_state"] = "full"
         plan["transcription_balance_skip_reason"] = "levels_already_balanced"
         plan["residual_difference_db"] = difference
         return plan
@@ -554,15 +574,8 @@ def _gain_plan(normalized, sample_rate: int, pair_frames) -> dict[str, object]:
     # the session for each candidate gain.
     clipping_onset = [0] * 12001
     baseline = active_samples = 0
-    for render, microphone in _iter_aligned_mono_blocks(
-            normalized, sample_rate, pair_frames, block_frames):
-        render_db, microphone_db = _dbfs_rms(render), _dbfs_rms(microphone)
-        audible = [value for value in (render_db, microphone_db) if value is not None]
-        if not audible or max(audible) < BALANCE_ABSOLUTE_GATE_DBFS:
-            continue
-        if ((render_db is not None and render_db > render_level + 12.0) or
-                (microphone_db is not None and microphone_db > microphone_level + 12.0)):
-            continue
+    def add_headroom_block(render, microphone) -> None:
+        nonlocal baseline, active_samples
         for render_sample, microphone_sample in zip(render, microphone):
             quiet, loud = ((render_sample, microphone_sample) if quieter == "render"
                            else (microphone_sample, render_sample))
@@ -573,11 +586,39 @@ def _gain_plan(normalized, sample_rate: int, pair_frames) -> dict[str, object]:
                 continue
             limit = 32767 if quiet > 0 else -32768
             factor_limit = (limit - loud) / quiet
-            if factor_limit <= 1.0:
-                onset_db = 0.0
-            else:
-                onset_db = 20.0 * math.log10(factor_limit)
-            clipping_onset[max(0, min(12000, math.ceil(onset_db * 100)))] += 1
+            onset_db = (0.0 if factor_limit <= 1.0 else
+                        20.0 * math.log10(factor_limit))
+            clipping_onset[
+                max(0, min(12000, math.ceil(onset_db * 100)))] += 1
+
+    pending_high_block = None
+    in_high_run = False
+    for render, microphone in _iter_aligned_mono_blocks(
+            normalized, sample_rate, pair_frames, block_frames):
+        render_db, microphone_db = _dbfs_rms(render), _dbfs_rms(microphone)
+        audible = [value for value in (render_db, microphone_db) if value is not None]
+        if not audible or max(audible) < BALANCE_ABSOLUTE_GATE_DBFS:
+            pending_high_block = None
+            in_high_run = False
+            continue
+        high = ((render_db is not None and render_db > render_level + 12.0) or
+                (microphone_db is not None and
+                 microphone_db > microphone_level + 12.0))
+        if high and pending_high_block is None and not in_high_run:
+            # Hold one block so a genuinely isolated ~200 ms transient does
+            # not veto useful gain. A second consecutive high block proves a
+            # sustained passage and causes both blocks to participate.
+            pending_high_block = (render, microphone)
+            continue
+        if high:
+            if pending_high_block is not None:
+                add_headroom_block(*pending_high_block)
+                pending_high_block = None
+                in_high_run = True
+        else:
+            pending_high_block = None
+            in_high_run = False
+        add_headroom_block(render, microphone)
 
     def clipping(gain_db: float) -> int:
         index = max(0, min(12000, math.floor(gain_db * 100)))
@@ -601,6 +642,9 @@ def _gain_plan(normalized, sample_rate: int, pair_frames) -> dict[str, object]:
         f"applied_{quieter}_gain_db": safe,
         "residual_difference_db": max(0.0, difference - safe),
         "baseline_clipping": baseline, "balanced_clipping": balanced,
+        "active_headroom_sample_count": active_samples,
+        "baseline_clipping_fraction": baseline / active_samples if active_samples else 0.0,
+        "balanced_clipping_fraction": balanced / active_samples if active_samples else 0.0,
         "transcription_balance_state": "full" if safe >= difference - 0.05 else "partial",
     })
     return plan
