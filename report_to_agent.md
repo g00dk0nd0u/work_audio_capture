@@ -3,6 +3,25 @@
 この文書は、commit `9844947203ac700591f44cbe62c935ae4e618815`
 時点で実施した保守的なリポジトリ衛生監査の引き継ぎ資料です。
 
+## Agent handoff
+
+- **report type:** repository audit / handoff
+- **based on main SHA:** `9844947203ac700591f44cbe62c935ae4e618815`
+- **current main CI:** success
+- **current product state:** transcription-oriented source balancing merged
+- **remaining acceptance:** real-PC Teams validation
+- **current instruction:** 上記 validation 前に audio runtime behavior を変更しない
+- **next recommended action:** safe な documentation cleanup を確認し、diverged している
+  WASAPI branch を調査する
+
+### このファイルの保守ルール
+
+- `report_to_agent.md` は handoff / status 文書であり、normative な product documentation
+  ではありません。
+- より新しい report では、古くなった status 情報を置き換えて構いません。
+- 恒久的な project rule は `README.md`、`AGENTS.md`、`docs/` を正とします。
+- 後続の handoff に再利用するたびに、commit SHA と current status を更新してください。
+
 ## 前提と制約
 
 - transcription-oriented source balancing の実装直後であり、実 PC 上の Teams
@@ -54,16 +73,18 @@
   `distribution_audio_capture/` 自体の ignore は避けてください。
 - **リスク:** 低。
 
-### remote branch を接続可能な環境で再監査する
+### diverged している WASAPI branch を個別調査する
 
-- **対象:** GitHub remote branches
-- **理由:** 監査環境には remote 設定がなく、GitHub への `git ls-remote` も HTTP 403 で
-  失敗したため、現在存在する stale branch を確定できませんでした。
-- **推奨:** `git fetch --prune origin` 後、各 branch に
-  `git merge-base --is-ancestor origin/<branch> origin/main` を実行し、成功する branch
-  だけを削除してください。PR #32、#33、#36〜#45 の merge 元 branch は、先端が merge
-  後に進んでいなければ削除候補です。
-- **リスク:** 低〜中。merge commit の件名だけで削除しないでください。
+- **対象:** `codex/preserve-wasapi-capture-timeline-across-gaps`
+  (`34a862ea6a9228876888ffd14e5028d67262833e`)
+- **理由:** GitHub で確認された current branch は `main`、PR #46 の
+  `codex/perform-repository-hygiene-audit`、およびこの WASAPI branch です。この branch は
+  current main に対して **diverged** しており、merge base / main history より 2 commits
+  ahead、current main より 34 commits behind です。したがって、main に merge 済み、または
+  safe に削除可能とは証明されていません。
+- **推奨:** 削除しないでください。branch-only の 2 commits を個別に確認し、obsolete、
+  superseded、または still-needed work を含むか判定した後にのみ削除してください。
+- **リスク:** 中〜高。未反映の timeline work を失う可能性があります。
 
 ## B. KEEP FOR NOW
 
