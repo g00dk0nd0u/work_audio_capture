@@ -195,6 +195,134 @@ def test_mix_clamps_pcm16_overflow():
     assert mixed.tolist() == [32767, -32768]
 
 
+def _balance_plan(tmp_path, render_blocks, microphone_blocks, rate=100):
+    render = tmp_path / "balance-render.wav"
+    microphone = tmp_path / "balance-microphone.wav"
+    _write(render, 1, rate, [sample for block in render_blocks for sample in block])
+    _write(microphone, 1, rate,
+           [sample for block in microphone_blocks for sample in block])
+    frames = max(len(render_blocks), len(microphone_blocks)) * 20
+    return record_one_click._gain_plan(
+        [(render, microphone, None)], rate, [frames])
+
+
+def test_transcription_balance_boosts_only_render_when_it_is_ten_db_quieter(tmp_path):
+    quiet = [[1000] * 20 for _ in range(16)]
+    loud = [[3162] * 20 for _ in range(16)]
+    plan = _balance_plan(tmp_path, quiet, loud)
+
+    assert plan["applied_render_gain_db"] == pytest.approx(10.0, abs=0.15)
+    assert plan["applied_microphone_gain_db"] == 0.0
+    assert plan["transcription_balance_state"] == "full"
+
+
+def test_transcription_balance_boosts_only_microphone_when_it_is_quieter(tmp_path):
+    plan = _balance_plan(
+        tmp_path, [[3162] * 20 for _ in range(16)],
+        [[1000] * 20 for _ in range(16)])
+
+    assert plan["applied_render_gain_db"] == 0.0
+    assert plan["applied_microphone_gain_db"] == pytest.approx(10.0, abs=0.15)
+
+
+def test_transcription_balance_keeps_equal_active_levels_at_unity(tmp_path):
+    blocks = [[2000] * 20 for _ in range(16)]
+    plan = _balance_plan(tmp_path, blocks, blocks)
+
+    assert plan["applied_render_gain_db"] == 0.0
+    assert plan["applied_microphone_gain_db"] == 0.0
+    assert plan["transcription_balance_state"] == "skipped"
+    assert plan["transcription_balance_skip_reason"] == "levels_already_balanced"
+
+
+def test_transcription_balance_ignores_silence_noise_and_one_transient(tmp_path):
+    silence = [[0] * 20 for _ in range(50)]
+    noise = [[20] * 20 for _ in range(50)]
+    render = silence + noise + [[30000] * 20] + [[1000] * 20 for _ in range(16)]
+    microphone = silence + noise + [[3162] * 20] + [[3162] * 20 for _ in range(16)]
+    plan = _balance_plan(tmp_path, render, microphone)
+
+    assert plan["applied_render_gain_db"] == pytest.approx(10.0, abs=0.15)
+    assert plan["applied_microphone_gain_db"] == 0.0
+
+
+def test_transcription_balance_requires_three_seconds_from_both_sources(tmp_path):
+    plan = _balance_plan(
+        tmp_path, [[1000] * 20 for _ in range(14)],
+        [[3162] * 20 for _ in range(14)])
+
+    assert plan["applied_render_gain_db"] == 0.0
+    assert plan["applied_microphone_gain_db"] == 0.0
+    assert plan["transcription_balance_skip_reason"] == "insufficient_active_evidence"
+
+
+def test_sustained_loud_passage_constrains_quieter_source_gain(tmp_path):
+    normal_render = [[1000] * 20 for _ in range(48)]
+    sustained_loud_render = [[10000] * 20 for _ in range(16)]
+    plan = _balance_plan(
+        tmp_path, normal_render + sustained_loud_render,
+        [[3162] * 20 for _ in range(64)])
+
+    assert 0.0 <= plan["applied_render_gain_db"] < plan["requested_gain_db"]
+    assert plan["applied_microphone_gain_db"] == 0.0
+    assert plan["transcription_balance_state"] == "partial"
+    allowance = (plan["baseline_clipping"] + int(
+        plan["active_headroom_sample_count"] *
+        record_one_click.BALANCE_MAX_ADDED_CLIPPING_FRACTION))
+    assert plan["balanced_clipping"] <= allowance
+    assert plan["balanced_clipping_fraction"] == pytest.approx(
+        plan["balanced_clipping"] / plan["active_headroom_sample_count"])
+
+
+def test_persistent_above_gate_noise_does_not_become_active_reference(tmp_path):
+    noise = [[184] * 20 for _ in range(100)]  # approximately -45 dBFS
+    render_speech = [[1036] * 20 for _ in range(16)]  # approximately -30 dBFS
+    microphone_speech = [[3277] * 20 for _ in range(16)]  # approximately -20 dBFS
+    plan = _balance_plan(
+        tmp_path, noise + render_speech,
+        noise + microphone_speech)
+
+    assert plan["render_active_level_dbfs"] == pytest.approx(-30.0, abs=0.2)
+    assert plan["microphone_active_level_dbfs"] == pytest.approx(-20.0, abs=0.2)
+    assert plan["render_active_evidence_seconds"] == pytest.approx(3.2)
+    assert plan["microphone_active_evidence_seconds"] == pytest.approx(3.2)
+    assert plan["applied_render_gain_db"] == pytest.approx(10.0, abs=0.2)
+    assert plan["applied_microphone_gain_db"] == 0.0
+
+
+def test_pcm16_gained_mix_clips_deterministically_at_final_boundary():
+    stats = record_one_click._LevelStatistics()
+    mixed, clipped = record_one_click._mix_mono_with_diagnostics(
+        array("h", [32767, -32768]), array("h", [32767, -32768]),
+        stats, 6.0, 0.0)
+
+    assert mixed.tolist() == [32767, -32768]
+    assert clipped == 2
+
+
+def test_one_fixed_gain_plan_is_passed_to_every_recovery_chunk(tmp_path, monkeypatch):
+    pairs = []
+    for number in (1, 2):
+        render = tmp_path / f"fixed-render-{number}.wav"
+        microphone = tmp_path / f"fixed-microphone-{number}.wav"
+        _write(render, 1, 48000, [1000] * 76800)
+        _write(microphone, 1, 48000, [3162] * 76800)
+        pairs.append((render, microphone))
+    gains = []
+
+    def capture_plan(_encoder, _render, _microphone, _rate, _progress,
+                     _frames, render_gain, microphone_gain):
+        gains.append((render_gain, microphone_gain))
+
+    monkeypatch.setattr(record_one_click, "_write_recording_pair", capture_plan)
+    record_one_click._encode_chunk_pairs_mp3(pairs, tmp_path / "fixed.mp3")
+
+    assert len(gains) == 2
+    assert gains[0] == gains[1]
+    assert gains[0][0] == pytest.approx(10.0, abs=0.15)
+    assert gains[0][1] == 0.0
+
+
 def test_level_diagnostics_silent_pcm():
     raw = record_one_click._LevelStatistics(2)
     samples = array("h", [0, 0] * 32)

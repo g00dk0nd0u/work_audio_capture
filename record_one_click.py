@@ -46,6 +46,11 @@ RECOVERY_ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "L
 LOG_PATH = PROJECT_ROOT / "audio_capture.log"
 MIX_FRAMES = 262144
 RMS_SAMPLE_STRIDE_FRAMES = 16
+BALANCE_BLOCK_SECONDS = 0.2
+BALANCE_ABSOLUTE_GATE_DBFS = -55.0
+BALANCE_RELATIVE_GATE_DB = 25.0
+BALANCE_MIN_EVIDENCE_SECONDS = 3.0
+BALANCE_MAX_ADDED_CLIPPING_FRACTION = 0.001
 MP3_BITRATE_BPS = DEFAULT_MP3_BITRATE_BPS
 _LIST_MP3_BITRATES_OPTION = "--list-mp3-bitrates"
 _MP3_BITRATE_OPTION = "--mp3-bitrate"
@@ -128,6 +133,14 @@ _LOG_EXTRA_FIELDS = (
     "audio_stage", "rms", "rms_dbfs", "peak", "peak_dbfs",
     "channel_rms_dbfs", "channel_peak_dbfs", "clipped_samples",
     "rms_sample_stride_frames",
+    "render_active_level_dbfs", "microphone_active_level_dbfs",
+    "render_active_evidence_seconds", "microphone_active_evidence_seconds",
+    "quieter_source", "measured_level_difference_db", "requested_gain_db",
+    "safe_gain_db", "applied_render_gain_db", "applied_microphone_gain_db",
+    "residual_difference_db", "baseline_clipping", "balanced_clipping",
+    "active_headroom_sample_count", "baseline_clipping_fraction",
+    "balanced_clipping_fraction",
+    "transcription_balance_state", "transcription_balance_skip_reason",
 )
 
 
@@ -352,7 +365,9 @@ class _LevelStatistics:
 
 
 def _mix_mono_with_diagnostics(render_samples: array, microphone_samples: array,
-                               mixed_stats: _LevelStatistics) -> tuple[array, int]:
+                               mixed_stats: _LevelStatistics,
+                               render_gain_db: float = 0.0,
+                               microphone_gain_db: float = 0.0) -> tuple[array, int]:
     """Mix and count clipping in one pass, preserving `_mix_mono` output."""
     common_count = min(len(render_samples), len(microphone_samples))
     mixed = array("h")
@@ -361,8 +376,11 @@ def _mix_mono_with_diagnostics(render_samples: array, microphone_samples: array,
     peak = mixed_stats.peaks[0]
     squares = mixed_stats.squares[0]
     count = mixed_stats.counts[0]
+    render_factor = 10.0 ** (render_gain_db / 20.0)
+    microphone_factor = 10.0 ** (microphone_gain_db / 20.0)
     for index in range(common_count):
-        value = int(render_samples[index]) + int(microphone_samples[index])
+        value = (round(render_samples[index] * render_factor) +
+                 round(microphone_samples[index] * microphone_factor))
         if value > 32767:
             value = 32767
             clipped += 1
@@ -375,10 +393,18 @@ def _mix_mono_with_diagnostics(render_samples: array, microphone_samples: array,
             count += 1
             squares += value * value
 
-    tail = (render_samples[common_count:] if len(render_samples) > common_count
+    render_tail = len(render_samples) > common_count
+    tail = (render_samples[common_count:] if render_tail
             else microphone_samples[common_count:])
+    tail_factor = render_factor if render_tail else microphone_factor
     for offset, sample in enumerate(tail, common_count):
-        value = int(sample)
+        value = round(sample * tail_factor)
+        if value > 32767:
+            value = 32767
+            clipped += 1
+        elif value < -32768:
+            value = -32768
+            clipped += 1
         append(value)
         peak = max(peak, abs(value))
         if offset % RMS_SAMPLE_STRIDE_FRAMES == 0:
@@ -418,6 +444,212 @@ def _pcm16_bytes(samples: array) -> bytes:
     return copied.tobytes()
 
 
+def _dbfs_rms(samples: array) -> float | None:
+    if not samples:
+        return None
+    square = sum(int(value) * int(value) for value in samples) / len(samples)
+    return 10.0 * math.log10(square / (32768.0 ** 2)) if square else None
+
+
+class _LevelHistogram:
+    """Bounded 0.1 dB histogram spanning the useful PCM16 range."""
+    def __init__(self) -> None:
+        self.counts = [0] * 1201
+
+    def add(self, level: float | None) -> None:
+        if level is not None:
+            self.counts[max(0, min(1200, round((level + 120.0) * 10)))] += 1
+
+    def percentile(self, fraction: float, gate: float = -120.0) -> float | None:
+        first = max(0, round((gate + 120.0) * 10))
+        total = sum(self.counts[first:])
+        if not total:
+            return None
+        target = int((total - 1) * fraction)
+        seen = 0
+        for index in range(first, len(self.counts)):
+            seen += self.counts[index]
+            if seen > target:
+                return index / 10.0 - 120.0
+        return 0.0
+
+    def active_level(self) -> tuple[float | None, float]:
+        reference = self.percentile(0.75)
+        if reference is None:
+            return None, 0.0
+        gate = max(BALANCE_ABSOLUTE_GATE_DBFS,
+                   reference - BALANCE_RELATIVE_GATE_DB)
+        # A persistent above-gate electrical/noise floor can dominate the
+        # lower distribution.  When there is independently sufficient
+        # evidence in a population at least 12 dB above a low reference, use
+        # the upper population rather than counting the floor as speech.
+        minimum_blocks = math.ceil(
+            BALANCE_MIN_EVIDENCE_SECONDS / BALANCE_BLOCK_SECONDS)
+        upper_count = 0
+        upper_floor = None
+        for index in range(len(self.counts) - 1, -1, -1):
+            upper_count += self.counts[index]
+            if upper_count >= minimum_blocks:
+                upper_floor = index / 10.0 - 120.0
+                break
+        if (reference <= -35.0 and upper_floor is not None and
+                upper_floor >= reference + 12.0):
+            gate = max(gate, upper_floor - 6.0)
+        level = self.percentile(0.5, gate)
+        first = max(0, round((gate + 120.0) * 10))
+        return level, sum(self.counts[first:]) * BALANCE_BLOCK_SECONDS
+
+
+def _iter_aligned_mono_blocks(normalized, sample_rate: int, pair_frames,
+                              block_frames: int):
+    """Yield aligned mono blocks with the same padding/tail rules as encoding."""
+    for (render_path, microphone_path, _timeline_frames), frames in zip(
+            normalized, pair_frames):
+        with ExitStack() as stack:
+            render = stack.enter_context(wave.open(str(render_path), "rb")) if render_path else None
+            microphone = stack.enter_context(wave.open(str(microphone_path), "rb")) if microphone_path else None
+            existing = render or microphone
+            render_channels = render.getnchannels() if render else (
+                existing.getnchannels() if existing else 1)
+            microphone_channels = microphone.getnchannels() if microphone else (
+                existing.getnchannels() if existing else 1)
+            processed = 0
+            while processed < frames:
+                requested = min(block_frames, frames - processed)
+                render_raw = (render.readframes(requested) if render else
+                              bytes(requested * render_channels * 2))
+                microphone_raw = (microphone.readframes(requested) if microphone else
+                                   bytes(requested * microphone_channels * 2))
+                render_raw += bytes(requested * render_channels * 2 - len(render_raw))
+                microphone_raw += bytes(requested * microphone_channels * 2 - len(microphone_raw))
+                yield (_mono_samples(render_raw, render_channels),
+                       _mono_samples(microphone_raw, microphone_channels))
+                processed += requested
+
+
+def _gain_plan(normalized, sample_rate: int, pair_frames) -> dict[str, object]:
+    """Analyze a complete session and choose one transcription-oriented gain plan."""
+    block_frames = max(1, round(sample_rate * BALANCE_BLOCK_SECONDS))
+    render_levels, microphone_levels = _LevelHistogram(), _LevelHistogram()
+    for render, microphone in _iter_aligned_mono_blocks(
+            normalized, sample_rate, pair_frames, block_frames):
+        render_level = _dbfs_rms(render)
+        microphone_level = _dbfs_rms(microphone)
+        render_levels.add(render_level)
+        microphone_levels.add(microphone_level)
+    render_level, render_seconds = render_levels.active_level()
+    microphone_level, microphone_seconds = microphone_levels.active_level()
+    plan = {
+        "render_active_level_dbfs": render_level,
+        "microphone_active_level_dbfs": microphone_level,
+        "render_active_evidence_seconds": render_seconds,
+        "microphone_active_evidence_seconds": microphone_seconds,
+        "quieter_source": None, "measured_level_difference_db": None,
+        "requested_gain_db": 0.0, "safe_gain_db": 0.0,
+        "applied_render_gain_db": 0.0, "applied_microphone_gain_db": 0.0,
+        "residual_difference_db": None, "baseline_clipping": 0,
+        "balanced_clipping": 0, "transcription_balance_state": "skipped",
+        "active_headroom_sample_count": 0,
+        "baseline_clipping_fraction": 0.0,
+        "balanced_clipping_fraction": 0.0,
+        "transcription_balance_skip_reason": None,
+    }
+    if (render_level is None or microphone_level is None or
+            render_seconds < BALANCE_MIN_EVIDENCE_SECONDS or
+            microphone_seconds < BALANCE_MIN_EVIDENCE_SECONDS):
+        plan["transcription_balance_skip_reason"] = "insufficient_active_evidence"
+        return plan
+    difference = abs(render_level - microphone_level)
+    plan["measured_level_difference_db"] = difference
+    if difference < 0.05:
+        plan["transcription_balance_skip_reason"] = "levels_already_balanced"
+        plan["residual_difference_db"] = difference
+        return plan
+    quieter = "render" if render_level < microphone_level else "microphone"
+    plan["quieter_source"] = quieter
+    plan["requested_gain_db"] = difference
+
+    # A bounded histogram records the gain at which each active sample first
+    # clips. It permits headroom decisions without retaining PCM or rescanning
+    # the session for each candidate gain.
+    clipping_onset = [0] * 12001
+    baseline = active_samples = 0
+    def add_headroom_block(render, microphone) -> None:
+        nonlocal baseline, active_samples
+        for render_sample, microphone_sample in zip(render, microphone):
+            quiet, loud = ((render_sample, microphone_sample) if quieter == "render"
+                           else (microphone_sample, render_sample))
+            original = int(quiet) + int(loud)
+            baseline += original > 32767 or original < -32768
+            active_samples += 1
+            if quiet == 0:
+                continue
+            limit = 32767 if quiet > 0 else -32768
+            factor_limit = (limit - loud) / quiet
+            onset_db = (0.0 if factor_limit <= 1.0 else
+                        20.0 * math.log10(factor_limit))
+            clipping_onset[
+                max(0, min(12000, math.ceil(onset_db * 100)))] += 1
+
+    pending_high_block = None
+    in_high_run = False
+    for render, microphone in _iter_aligned_mono_blocks(
+            normalized, sample_rate, pair_frames, block_frames):
+        render_db, microphone_db = _dbfs_rms(render), _dbfs_rms(microphone)
+        audible = [value for value in (render_db, microphone_db) if value is not None]
+        if not audible or max(audible) < BALANCE_ABSOLUTE_GATE_DBFS:
+            pending_high_block = None
+            in_high_run = False
+            continue
+        high = ((render_db is not None and render_db > render_level + 12.0) or
+                (microphone_db is not None and
+                 microphone_db > microphone_level + 12.0))
+        if high and pending_high_block is None and not in_high_run:
+            # Hold one block so a genuinely isolated ~200 ms transient does
+            # not veto useful gain. A second consecutive high block proves a
+            # sustained passage and causes both blocks to participate.
+            pending_high_block = (render, microphone)
+            continue
+        if high:
+            if pending_high_block is not None:
+                add_headroom_block(*pending_high_block)
+                pending_high_block = None
+                in_high_run = True
+        else:
+            pending_high_block = None
+            in_high_run = False
+        add_headroom_block(render, microphone)
+
+    def clipping(gain_db: float) -> int:
+        index = max(0, min(12000, math.floor(gain_db * 100)))
+        return sum(clipping_onset[:index + 1])
+
+    requested_clipping = clipping(difference)
+    allowance = baseline + int(active_samples * BALANCE_MAX_ADDED_CLIPPING_FRACTION)
+    safe = difference
+    if requested_clipping > allowance:
+        low, high = 0.0, difference
+        for _ in range(16):
+            candidate = (low + high) / 2.0
+            if clipping(candidate) <= allowance:
+                low = candidate
+            else:
+                high = candidate
+        safe = low
+    balanced = clipping(safe)
+    plan.update({
+        "safe_gain_db": safe,
+        f"applied_{quieter}_gain_db": safe,
+        "residual_difference_db": max(0.0, difference - safe),
+        "baseline_clipping": baseline, "balanced_clipping": balanced,
+        "active_headroom_sample_count": active_samples,
+        "baseline_clipping_fraction": baseline / active_samples if active_samples else 0.0,
+        "balanced_clipping_fraction": balanced / active_samples if active_samples else 0.0,
+        "transcription_balance_state": "full" if safe >= difference - 0.05 else "partial",
+    })
+    return plan
+
+
 def _encode_recordings_mp3(
     render_path: Path,
     microphone_path: Path,
@@ -453,6 +685,9 @@ def _encode_chunk_pairs_mp3(pairs, output_path: Path, progress=None) -> None:
         raise ValueError(
             f"MP3 encoder does not support {sample_rate}Hz without resampling; source WAVs were kept"
         )
+    gain_plan = _gain_plan(normalized, sample_rate, pair_frames)
+    logging.getLogger("work_audio_capture").info(
+        "transcription source balancing", extra=gain_plan)
     with MP3_ENCODER_FACTORY(
         output_path, sample_rate=sample_rate, bitrate_bps=MP3_BITRATE_BPS
     ) as encoder:
@@ -465,14 +700,17 @@ def _encode_chunk_pairs_mp3(pairs, output_path: Path, progress=None) -> None:
                 )
             _write_recording_pair(
                 encoder, render_path, microphone_path, sample_rate, pair_progress,
-                frames,
+                frames, gain_plan["applied_render_gain_db"],
+                gain_plan["applied_microphone_gain_db"],
             )
             completed_frames += frames
 
 
 def _write_recording_pair(encoder, render_path: Path | None,
                           microphone_path: Path | None, sample_rate: int,
-                          progress=None, timeline_frames: int | None = None) -> None:
+                          progress=None, timeline_frames: int | None = None,
+                          render_gain_db: float = 0.0,
+                          microphone_gain_db: float = 0.0) -> None:
     with ExitStack() as stack:
         render_file = stack.enter_context(wave.open(str(render_path), "rb")) if render_path else None
         microphone_file = stack.enter_context(wave.open(str(microphone_path), "rb")) if microphone_path else None
@@ -530,7 +768,8 @@ def _write_recording_pair(encoder, render_path: Path | None,
             mono_render_stats.add(render_samples)
             mono_microphone_stats.add(microphone_samples)
             mixed, block_clipped = _mix_mono_with_diagnostics(
-                render_samples, microphone_samples, mixed_stats)
+                render_samples, microphone_samples, mixed_stats,
+                render_gain_db, microphone_gain_db)
             clipped_samples += block_clipped
             encoder.write_pcm(_pcm16_bytes(mixed))
             processed_frames += max(len(render_samples), len(microphone_samples))
