@@ -1,18 +1,22 @@
 # Repository hygiene audit report
 
-この文書は、commit `9844947203ac700591f44cbe62c935ae4e618815`
-時点で実施した保守的なリポジトリ衛生監査の引き継ぎ資料です。
+この文書は、main commit `ddd52c493ab38d62dc1652c4629c13a861e2c258`
+を基準に更新した、リポジトリ衛生監査の引き継ぎ資料です。
 
 ## Agent handoff
 
 - **report type:** repository audit / handoff
-- **based on main SHA:** `9844947203ac700591f44cbe62c935ae4e618815`
+- **report timestamp:** 2026-09-03 00:11 JST
+- **based on main SHA:** `ddd52c493ab38d62dc1652c4629c13a861e2c258`
 - **current main CI:** success
-- **current product state:** transcription-oriented source balancing merged
+- **current product state:** PR #45 transcription-oriented source balancing merged、PR #46
+  repository handoff report merged、diverged WASAPI branch audited、branch-only の 2 commits
+  はいずれも **SUPERSEDED**
 - **remaining acceptance:** real-PC Teams validation
 - **current instruction:** 上記 validation 前に audio runtime behavior を変更しない
-- **next recommended action:** safe な documentation cleanup を確認し、diverged している
-  WASAPI branch を調査する
+- **next recommended action:** この report-only update を merge し、superseded WASAPI branch
+  を別作業で削除した後、real-PC Teams validation を進める。validation 前に audio runtime
+  behavior は変更しない
 
 ### このファイルの保守ルール
 
@@ -20,7 +24,9 @@
   ではありません。
 - より新しい report では、古くなった status 情報を置き換えて構いません。
 - 恒久的な project rule は `README.md`、`AGENTS.md`、`docs/` を正とします。
-- 後続の handoff に再利用するたびに、commit SHA と current status を更新してください。
+- 後続の handoff に再利用するたびに、**report timestamp**、**based-on main SHA**、
+  **current CI state**、**current product state**、**remaining/blocking validation**、
+  **next recommended action** を必ず更新してください。
 
 ## 前提と制約
 
@@ -73,18 +79,49 @@
   `distribution_audio_capture/` 自体の ignore は避けてください。
 - **リスク:** 低。
 
-### diverged している WASAPI branch を個別調査する
+### diverged WASAPI branch の監査結果
 
 - **対象:** `codex/preserve-wasapi-capture-timeline-across-gaps`
   (`34a862ea6a9228876888ffd14e5028d67262833e`)
-- **理由:** GitHub で確認された current branch は `main`、PR #46 の
-  `codex/perform-repository-hygiene-audit`、およびこの WASAPI branch です。この branch は
-  current main に対して **diverged** しており、merge base / main history より 2 commits
-  ahead、current main より 34 commits behind です。したがって、main に merge 済み、または
-  safe に削除可能とは証明されていません。
-- **推奨:** 削除しないでください。branch-only の 2 commits を個別に確認し、obsolete、
-  superseded、または still-needed work を含むか判定した後にのみ削除してください。
-- **リスク:** 中〜高。未反映の timeline work を失う可能性があります。
+- **結論:** **SAFE DELETION CANDIDATE**。branch-only の 2 commits はともに実 diff を
+  確認済みで **SUPERSEDED** です。current main へ再実装すべき branch-only behavior は
+  確認されませんでした。この task では branch を削除せず、この report PR の review / merge
+  後に別作業として削除できます。
+
+#### `ad614817ab50f1afc248a4139b8086c779cc9cca`
+
+- **title:** Preserve WASAPI capture timeline across packet gaps
+- **classification:** **SUPERSEDED**
+- **変更対象:** native WASAPI capture、recorder/recovery timeline、および対応する
+  timeline/recovery tests と distribution mirror。
+- **意図:** WASAPI device/QPC positions の取得、packet gap の検出、確認済み
+  device-position gap への silence 挿入、`DATA_DISCONTINUITY` / `TIMESTAMP_ERROR` /
+  device-position regression の追跡、および sample timeline に沿った recovery chunk 配置。
+- **判定根拠:** current main は旧 `NativeWasapiStream.read()` 中心の
+  `pending_segments` design を、`NativeWasapiStream.read_packet()`、`CapturePacket` の
+  device/QPC position と flags、`StreamTimelineMapper`、`SparseRecoveryWriter`、timestamped
+  session timeline に置換済みです。さらに `data_discontinuity_events`、
+  `timestamp_error_events`、`device_position_regression_events`、
+  `timeline_gap_frames_filled`、`occupied_recovery_slots` を structured diagnostics として
+  保持します。旧実装は復元しません。
+
+#### `34a862ea6a9228876888ffd14e5028d67262833e`
+
+- **title:** Align confirmed gaps with closed recovery slots
+- **classification:** **SUPERSEDED**
+- **変更対象:** confirmed-gap / closed-slot recovery placement、片側欠落時の post-processing、
+  および対応する timeline/recovery tests と distribution mirror。
+- **意図:** confirmed gap silence の誤った recovery slot への書き込み防止、通常の position
+  gap と discontinuity/regression の区別、render/microphone の片側 slot がない recovery、
+  欠落側の silence 化、および sparse recovery ordering の維持。
+- **判定根拠:** current main には `SparseRecoveryWriter` による slot placement、
+  `StreamTimelineMapper` の continuity handling、endpoint reopen、no-packet gap re-anchoring、
+  `mapper.reset_stream_continuity()`、adversarial timeline/recovery tests、sparse な片側欠落
+  recovery、および missing-side timeline semantics を保つ post-processing があります。
+  特に後続 commit `a4d532332c711a2b801adcd8d00715d70e44d6d5`
+  (`Reanchor render timeline after no-packet gaps`) は explicit continuity reset と、closed /
+  no-packet gap 後に再開する audio の regression tests を追加しています。旧 closed-slot 実装は
+  復元しません。
 
 ## B. KEEP FOR NOW
 
