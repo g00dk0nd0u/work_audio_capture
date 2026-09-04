@@ -1,22 +1,22 @@
 # Repository hygiene audit report
 
-この文書は、main commit `ddd52c493ab38d62dc1652c4629c13a861e2c258`
+この文書は、main commit `af08af05b659327a3414000fab22229e9cbe0089`
 を基準に更新した、リポジトリ衛生監査の引き継ぎ資料です。
 
 ## Agent handoff
 
 - **report type:** repository audit / handoff
-- **report timestamp:** 2026-09-03 00:11 JST
-- **based on main SHA:** `ddd52c493ab38d62dc1652c4629c13a861e2c258`
+- **report timestamp:** 2026-09-04 22:24 JST
+- **based on main SHA:** `af08af05b659327a3414000fab22229e9cbe0089`
 - **current main CI:** success
-- **current product state:** PR #45 transcription-oriented source balancing merged、PR #46
-  repository handoff report merged、diverged WASAPI branch audited、branch-only の 2 commits
-  はいずれも **SUPERSEDED**
+- **current product state:** PR #45 transcription-oriented source balancing merged、PR #46 / #47
+  repository handoff updates merged、diverged WASAPI branch の 2 branch-only commits は
+  **SUPERSEDED** 判定済み、旧 branch は削除済み
 - **remaining acceptance:** real-PC Teams validation
 - **current instruction:** 上記 validation 前に audio runtime behavior を変更しない
-- **next recommended action:** この report-only update を merge し、superseded WASAPI branch
-  を別作業で削除した後、real-PC Teams validation を進める。validation 前に audio runtime
-  behavior は変更しない
+- **next recommended action:** real-PC Teams validation を実施し、final MP3 と
+  `audio_capture.log` を確認して source balancing、timeline / recovery、speech loss の有無を
+  実機で評価する
 
 ### このファイルの保守ルール
 
@@ -37,7 +37,8 @@
 - `distribution_audio_capture/` は利用者向け配布物の source of truth です。root または
   `src/audio_capture/` の runtime を変更する場合、対応する配布コピーも byte-identical
   に保ってください。
-- 今回の監査ではファイル削除や runtime 変更は行っていません。
+- 今回の監査・handoff更新では runtime 変更は行っていません。監査済みの旧WASAPI branch
+  は、両 branch-only commits が **SUPERSEDED** と確認された後に削除済みです。
 
 ## A. SAFE TO CLEAN NOW
 
@@ -79,14 +80,14 @@
   `distribution_audio_capture/` 自体の ignore は避けてください。
 - **リスク:** 低。
 
-### diverged WASAPI branch の監査結果
+### superseded WASAPI branch の監査・整理結果
 
-- **対象:** `codex/preserve-wasapi-capture-timeline-across-gaps`
+- **旧対象:** `codex/preserve-wasapi-capture-timeline-across-gaps`
   (`34a862ea6a9228876888ffd14e5028d67262833e`)
-- **結論:** **SAFE DELETION CANDIDATE**。branch-only の 2 commits はともに実 diff を
-  確認済みで **SUPERSEDED** です。current main へ再実装すべき branch-only behavior は
-  確認されませんでした。この task では branch を削除せず、この report PR の review / merge
-  後に別作業として削除できます。
+- **結論:** branch-only の 2 commits はともに実 diff を確認済みで **SUPERSEDED**。
+  current main へ再実装すべき branch-only behavior は確認されませんでした。
+- **現在状態:** 旧 branch は監査完了後に削除済みです。追加の merge / cherry-pick / deletion
+  action は不要です。
 
 #### `ad614817ab50f1afc248a4139b8086c779cc9cca`
 
