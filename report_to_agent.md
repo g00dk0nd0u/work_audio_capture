@@ -1,15 +1,15 @@
 # Repository hygiene audit report
 
-この文書は、main commit `af08af05b659327a3414000fab22229e9cbe0089`
+この文書は、audio runtime baseline commit `af08af05b659327a3414000fab22229e9cbe0089`
 を基準に更新した、リポジトリ衛生監査の引き継ぎ資料です。
 
 ## Agent handoff
 
 - **report type:** repository audit / handoff
-- **report timestamp:** 2026-09-04 22:24 JST
-- **based on main SHA:** `af08af05b659327a3414000fab22229e9cbe0089`
-- **current main CI:** success
-- **current product state:** PR #45 transcription-oriented source balancing merged、PR #46 / #47
+- **report timestamp:** 2026-09-04 22:30 JST
+- **runtime baseline SHA:** `af08af05b659327a3414000fab22229e9cbe0089`
+- **runtime baseline CI:** success
+- **current product state:** PR #45 transcription-oriented source balancing merged、PR #46 / #47 / #48
   repository handoff updates merged、diverged WASAPI branch の 2 branch-only commits は
   **SUPERSEDED** 判定済み、旧 branch は削除済み
 - **remaining acceptance:** real-PC Teams validation
@@ -24,8 +24,12 @@
   ではありません。
 - より新しい report では、古くなった status 情報を置き換えて構いません。
 - 恒久的な project rule は `README.md`、`AGENTS.md`、`docs/` を正とします。
-- 後続の handoff に再利用するたびに、**report timestamp**、**based-on main SHA**、
-  **current CI state**、**current product state**、**remaining/blocking validation**、
+- **runtime baseline SHA** は、この handoff が前提とする最新の product/runtime behavior を
+  含む commit を指します。report-only / documentation-only merge によって main SHA が進んでも、
+  runtime behavior が変わらない限りこの値を機械的に更新しません。これにより status document
+  自身の merge で SHA が即座に陳腐化する自己参照問題を避けます。
+- 後続の handoff に再利用するたびに、**report timestamp**、**runtime baseline SHA**、
+  **runtime baseline CI**、**current product state**、**remaining/blocking validation**、
   **next recommended action** を必ず更新してください。
 
 ## 前提と制約
