@@ -28,6 +28,7 @@ Session active.
 停止後、保存済み recovery WAV を順番に mix / mono downmix し、1 本の MP3 を作ります。
 
 ```text
+Analyzing...
 Finalizing...   0%
 ...
 Finalizing... 100%
@@ -72,10 +73,10 @@ MP3 生成中にもう一度 `Ctrl+C` を押すと後処理をキャンセルし
 
 問題が起きた場合は、実行したフォルダ直下の `audio_capture.log` を確認してください。OS / Python、endpoint、channel、sample rate、出力先、例外、後処理の進捗と結果が記録されます。
 
-- render と microphone の sample rate が一致する必要があります。
+- one-click MP3 は録音開始前に、実際の render / microphone の sample rate が一致し、指定 bitrate の厳密な Media Foundation 出力形式がその周波数で利用できることを検査します。repair は現在の endpoint ではなく保存済み WAV の形式を使用します。
 - MP3 は 32 / 44.1 / 48 kHz に対応し、resampling と独立 clock の drift 補正は未実装です。
-- multichannel downmix は算術平均です。channel-mask-aware weighting、adaptive gain、limiter、loudness normalization は未実装です。
-- endpoint removal / device invalidation / default-device change / suspend-resume の自動復旧は未実装です。
+- multichannel downmix は算術平均です。文字起こし向け source balancing はセッション単位の固定ゲインで実装済みです。channel-mask-aware weighting、AGC、limiter、loudness normalization は未実装です。
+- 同一 endpoint への回数制限付き再接続と Windows Audio Service interruption の処理は実装済みです。別の既定 endpoint への自動切替と suspend/resume の保証は未実装です。
 - representative な実 PC と長時間 hardware soak の検証は未完了です。
 - launcher / tray UI は reliability validation 後の予定です。
 
@@ -116,6 +117,7 @@ Session active.
 After capture stops, the saved recovery WAV chunks are mixed/downmixed sequentially into one MP3:
 
 ```text
+Analyzing...
 Finalizing...   0%
 ...
 Finalizing... 100%
@@ -158,9 +160,9 @@ The MP3 is written to `<final-name>.part.mp3` so that its temporary path retains
 
 Inspect `audio_capture.log` in the repository/distribution directory for environment, endpoint, format, exception, and post-processing details.
 
-- Render and microphone sample rates must match; MP3 supports 32/44.1/48 kHz without resampling.
-- Clock-drift correction, channel-mask-aware mixing, automatic gain/limiting, and loudness normalization are not implemented.
-- Endpoint removal/device invalidation/default-device changes and suspend/resume are not automatically recovered.
+- Before a new one-click recording starts, the actual render/microphone rates must match and the exact requested Media Foundation bitrate must be available at that rate. Repair instead uses the saved WAV format and does not depend on current endpoints. MP3 supports 32/44.1/48 kHz without resampling.
+- Session-wide fixed-gain source balancing is implemented. Clock-drift correction, channel-mask-aware mixing, AGC/limiting, and loudness normalization are not implemented.
+- Bounded reconnection to the same endpoint and Windows Audio Service interruption handling are implemented. Automatic switching to another default endpoint and suspend/resume guarantees are not implemented.
 - Representative real-PC validation and long-session hardware soak testing remain outstanding.
 - Launcher/tray UX is deferred until reliability is validated.
 

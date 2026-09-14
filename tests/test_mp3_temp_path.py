@@ -11,7 +11,11 @@ def test_mix_uses_mp3_suffix_for_temporary_output(tmp_path, monkeypatch):
     microphone.write_bytes(b"stub")
     captured = {}
 
-    def fake_encode(render_path, microphone_path, output_path, progress=None):
+    def fake_encode(
+        render_path, microphone_path, output_path, progress=None,
+        analysis_started=None,
+    ):
+        analysis_started()
         captured["output_path"] = Path(output_path)
         output_path.write_bytes(b"fake-mp3")
 

@@ -13,6 +13,8 @@ This document separates the implemented baseline from work that still requires e
 - `session.json` interrupted-session tracking, repair-all startup choice, `recovery_pending` discovery, and `recovery_failed` prompt suppression
 - Validation and partial repair of readable matched chunks even when a crash-tail or unpaired chunk cannot be used
 - Sequential mix/downmix of all usable recovery chunks into one mono Media Foundation MP3 per session: 48 kbps by default for normal one-click use, with an explicit optional 80 kbps setting and no silent bitrate fallback
+- Actual-endpoint one-click MP3 preflight (matching 32/44.1/48 kHz rates and exact bitrate support), while repair uses saved WAV formats independently of current endpoints
+- Pre-analysis validation of every selected WAV header and distinct `Analyzing...` / `Finalizing...` stages
 - Transactional `.part` output, atomic publication, and cleanup only after successful finalize/publish; cancellation and failures preserve recovery inputs
 - Normal MP3 output in the repository/distribution `recordings` directory
 - JSONL diagnostics and repository/distribution synchronization tests
@@ -34,7 +36,7 @@ Do not treat automated or single-development-machine results as hardware accepta
 
 ## P1 — device and lifecycle recovery
 
-- Define teardown, bounded retry, re-enumeration, and restart behavior for endpoint removal, device invalidation, and default-device changes
+- Bounded reconnection to the same endpoint and Windows Audio Service interruption handling are implemented; define policy for automatic switching to a different default endpoint
 - Define and validate suspend/resume behavior
 - Run eight-to-twelve-hour hardware soak tests and record resource use and output integrity
 - Improve diagnostics for frames, gaps, device transitions, and disk/permission failures where practical
@@ -46,7 +48,7 @@ Do not treat automated or single-development-machine results as hardware accepta
   representative timing validation remains outstanding)
 - Decide a resampling policy for mismatched sample rates and accumulated drift
 - Evaluate channel-mask/microphone-array-aware downmix if hardware results justify it
-- Define gain, limiting, and loudness policy if clipping or intelligibility tests justify it
+- Session-wide fixed-gain source balancing is implemented; evaluate AGC, limiting, or loudness policy only if hardware tests justify it
 
 ## Later / intentionally deferred
 
