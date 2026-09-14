@@ -6,15 +6,15 @@ These instructions apply to the entire repository.
 
 ## Distribution is part of the product
 
-`distribution_audio_capture/` is the user-facing distribution source of truth. A runtime change is not complete until the distribution copy is synchronized.
+`AudioCapture/` is the user-facing distribution source of truth. A runtime change is not complete until the distribution copy is synchronized.
 
 When changing runtime code in the repository root or under `src/audio_capture/`:
 
-1. Update the corresponding runtime file under `distribution_audio_capture/`.
+1. Update the corresponding runtime file under `AudioCapture/`.
 2. Verify corresponding root/source and distribution files are byte-identical where they are intended to mirror each other.
 
 Generated distribution ZIP files are not tracked. Build them from the current
-`distribution_audio_capture/` directory only when packaging is needed.
+`AudioCapture/` directory only when packaging is needed.
 
 ## Required validation before completion
 
@@ -22,7 +22,7 @@ Run at minimum:
 
 ```bash
 PYTHONPATH=src python -m pytest
-python -m compileall -q run.py record_one_click.py src tests distribution_audio_capture
+python -m compileall -q run.py record_one_click.py src tests AudioCapture
 git diff --check
 ```
 

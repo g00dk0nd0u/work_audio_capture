@@ -38,7 +38,7 @@
   検証は未完了です。
 - capture、recovery、timeline、mixing、gain、Media Foundation の挙動は、実機検証が
   終わるまで変更しないでください。
-- `distribution_audio_capture/` は利用者向け配布物の source of truth です。root または
+- `AudioCapture/` は利用者向け配布物の source of truth です。root または
   `src/audio_capture/` の runtime を変更する場合、対応する配布コピーも byte-identical
   に保ってください。
 - 今回の監査・handoff更新では runtime 変更は行っていません。監査済みの旧WASAPI branch
@@ -58,7 +58,7 @@
 
 ### transcription-oriented balancing を利用者向け文書へ反映する
 
-- **対象:** `README.md`, `distribution_audio_capture/README.txt`
+- **対象:** `README.md`, `AudioCapture/README.txt`
 - **理由:** 詳細は `docs/POSTPROCESSING.md` にありますが、主要な利用者向け文書に
   balancing の説明がありません。
 - **推奨:** セッション全体で一度だけ決める固定 gain、静かな source のみを上げること、
@@ -68,7 +68,7 @@
 
 ### 診断情報を文書化する
 
-- **対象:** `README.md`, `distribution_audio_capture/README.txt`
+- **対象:** `README.md`, `AudioCapture/README.txt`
 - **理由:** `audio_capture.log` は JSONL で、runtime、endpoint、timeline、reopen、session
   health、balancing、clipping の structured fields を記録します。
 - **推奨:** 実機検証時に確認すべき balancing state / applied gain / clipping fraction / reopen
@@ -81,7 +81,7 @@
 - **理由:** 現状の repository は clean ですが、`.coverage`, `coverage.xml`, `htmlcov/`,
   `.mypy_cache/`, `.ruff_cache/`, `build/`, `dist/`, `*.egg-info/` は未登録です。
 - **推奨:** 対応 tooling を使用する場合に限定して追加してください。広すぎる glob や
-  `distribution_audio_capture/` 自体の ignore は避けてください。
+  `AudioCapture/` 自体の ignore は避けてください。
 - **リスク:** 低。
 
 ### superseded WASAPI branch の監査・整理結果
@@ -133,7 +133,7 @@
 ### root/distribution の runtime 複製
 
 - **対象:** `record_one_click.py`, `src/audio_capture/*.py` と対応する
-  `distribution_audio_capture/` 配下
+  `AudioCapture/` 配下
 - **理由:** accidental duplication ではなく配布要件です。監査時点では全対応ファイルが
   byte-identical で、CI も parity を検証しています。
 - **推奨:** 維持してください。重複削減を理由に配布コピーを削除しないでください。
@@ -210,7 +210,7 @@
 PYTHONPATH=src python -m pytest
 477 passed, 3 skipped
 
-python -m compileall -q run.py record_one_click.py src tests distribution_audio_capture
+python -m compileall -q run.py record_one_click.py src tests AudioCapture
 成功
 
 git diff --check
