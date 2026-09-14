@@ -6,5 +6,5 @@ __pycache__/
 *.log
 *.lnk
 /recordings/
-/distribution_audio_capture/recordings/
-/distribution_audio_capture.zip
+/AudioCapture/recordings/
+/AudioCapture.zip
