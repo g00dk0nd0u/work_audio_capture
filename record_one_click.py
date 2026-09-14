@@ -655,39 +655,63 @@ def _encode_recordings_mp3(
     microphone_path: Path,
     output_path: Path,
     progress=None,
+    analysis_started=None,
 ) -> None:
-    _encode_chunk_pairs_mp3([(render_path, microphone_path)], output_path, progress)
+    _encode_chunk_pairs_mp3(
+        [(render_path, microphone_path)], output_path, progress, analysis_started
+    )
 
 
-def _encode_chunk_pairs_mp3(pairs, output_path: Path, progress=None) -> None:
+def _encode_chunk_pairs_mp3(
+    pairs, output_path: Path, progress=None, analysis_started=None
+) -> None:
     """Encode ordered recovery pairs through one bounded-memory MP3 writer."""
     if not pairs:
         raise ValueError("no recording chunks were supplied")
     normalized = [(*pair, None) if len(pair) == 2 else pair for pair in pairs]
-    first_path = next((path for pair in normalized for path in pair[:2]
-                       if path is not None), None)
-    if first_path is None:
-        raise ValueError("no recoverable audio chunks were supplied")
-    with wave.open(str(first_path), "rb") as first:
-        sample_rate = first.getframerate()
+    sample_rate = None
     pair_frames = []
     for render_path, microphone_path, timeline_frames in normalized:
         counts = []
         for path in (render_path, microphone_path):
             if path is not None:
                 with wave.open(str(path), "rb") as source:
+                    rate = source.getframerate()
+                    width = source.getsampwidth()
+                    channels = source.getnchannels()
+                    if width != 2:
+                        raise ValueError(
+                            f"{path}: expected PCM16 WAV with 2-byte samples, got {width}; "
+                            "source WAVs were kept"
+                        )
+                    if channels < 1:
+                        raise ValueError(
+                            f"{path}: expected at least one channel, got {channels}; "
+                            "source WAVs were kept"
+                        )
+                    if sample_rate is None:
+                        sample_rate = rate
+                    elif rate != sample_rate:
+                        raise ValueError(
+                            f"{path}: sample rate mismatch: expected {sample_rate}Hz, "
+                            f"got {rate}Hz; source WAVs were kept"
+                        )
                     counts.append(source.getnframes())
         pair_frames.append(timeline_frames if timeline_frames is not None else max(counts))
+    if sample_rate is None:
+        raise ValueError("no recoverable audio chunks were supplied")
     total_frames = sum(pair_frames)
-    if progress is not None:
-        progress(0, total_frames)
     if sample_rate not in SUPPORTED_MP3_SAMPLE_RATES:
         raise ValueError(
             f"MP3 encoder does not support {sample_rate}Hz without resampling; source WAVs were kept"
         )
+    if analysis_started is not None:
+        analysis_started()
     gain_plan = _gain_plan(normalized, sample_rate, pair_frames)
     logging.getLogger("work_audio_capture").info(
         "transcription source balancing", extra=gain_plan)
+    if progress is not None:
+        progress(0, total_frames)
     with MP3_ENCODER_FACTORY(
         output_path, sample_rate=sample_rate, bitrate_bps=MP3_BITRATE_BPS
     ) as encoder:
@@ -1050,6 +1074,9 @@ def _mix_available_chunks(output: Path, logger: logging.Logger,
                         slot_start = (number - 1) * DEFAULT_CHUNK_DURATION_SECONDS * rate
                         timeline_frames = max(source.getnframes(), end_frame - slot_start)
             pairs.append((render_path, microphone_path, timeline_frames))
+        def analysis_started() -> None:
+            print("Analyzing...")
+
         def encoding_progress(done_frames: int, total_frames: int) -> None:
             # Publishing is part of finalization, so reserve 100% for the
             # successful atomic replace below.
@@ -1058,9 +1085,11 @@ def _mix_available_chunks(output: Path, logger: logging.Logger,
         if (not sparse and len(pairs) == 1 and
                 pairs[0][0] is not None and pairs[0][1] is not None):
             _encode_recordings_mp3(pairs[0][0], pairs[0][1], temp_path,
-                                   encoding_progress)
+                                   encoding_progress, analysis_started)
         else:
-            _encode_chunk_pairs_mp3(pairs, temp_path, encoding_progress)
+            _encode_chunk_pairs_mp3(
+                pairs, temp_path, encoding_progress, analysis_started
+            )
         if not temp_path.exists() or temp_path.stat().st_size <= 0:
             raise ValueError("MP3 encoder did not produce a non-empty output; source WAVs were kept")
         temp_path.replace(final_path)
@@ -1173,18 +1202,6 @@ def run(arguments: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"Could not start recording: {exc}", file=sys.stderr)
         return 2
-    try:
-        available_bitrates = available_mp3_bitrates(48_000)
-    except Exception as exc:
-        print(f"Could not validate Media Foundation MP3 bitrate: {exc}", file=sys.stderr)
-        return 1
-    if requested_bitrate not in available_bitrates:
-        print(
-            f"Media Foundation has no exact mono 48000 Hz / "
-            f"{requested_bitrate} bps MP3 output type.",
-            file=sys.stderr,
-        )
-        return 1
     MP3_BITRATE_BPS = requested_bitrate
     logger = _configure_logging()
     environment_log = {
@@ -1238,6 +1255,35 @@ def run(arguments: list[str] | None = None) -> int:
         endpoint_log[f"default_{key}_name"] = endpoint.name if endpoint else None
     diagnostic_log = {**environment_log, **endpoint_log}
     logger.info("Selected audio endpoints", extra=diagnostic_log)
+
+    preflight_error = None
+    if render.sample_rate != microphone.sample_rate:
+        preflight_error = (
+            f"endpoint sample rates differ: render={render.sample_rate}Hz, "
+            f"microphone={microphone.sample_rate}Hz"
+        )
+    elif render.sample_rate not in SUPPORTED_MP3_SAMPLE_RATES:
+        preflight_error = f"MP3 encoding does not support {render.sample_rate}Hz without resampling"
+    else:
+        try:
+            available_bitrates = available_mp3_bitrates(render.sample_rate)
+        except Exception as exc:
+            preflight_error = f"Media Foundation MP3 format query failed: {exc}"
+        else:
+            if requested_bitrate not in available_bitrates:
+                preflight_error = (
+                    f"Media Foundation has no exact mono {render.sample_rate} Hz / "
+                    f"{requested_bitrate} bps MP3 output type"
+                )
+    if preflight_error is not None:
+        message = (
+            "Could not start one-click MP3 recording: "
+            f"render={render.sample_rate}Hz, microphone={microphone.sample_rate}Hz, "
+            f"bitrate={requested_bitrate} bps: {preflight_error}"
+        )
+        print(message, file=sys.stderr)
+        logger.error(message, extra=diagnostic_log)
+        return 1
 
     RECOVERY_ROOT.mkdir(parents=True, exist_ok=True)
     required_free = required_recovery_free_bytes(

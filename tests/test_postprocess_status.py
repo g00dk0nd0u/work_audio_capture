@@ -102,6 +102,74 @@ def test_multiple_chunk_progress_is_global_monotonic_and_uses_longer_pair_side(
     assert sum(done == total for done, total in progress) == 1
 
 
+@pytest.mark.parametrize(("second_rate", "second_width", "message"), [
+    (44_100, 2, "sample rate mismatch"),
+    (48_000, 1, "expected PCM16 WAV"),
+])
+def test_all_wav_headers_are_validated_before_analysis_or_encoding(
+        tmp_path, monkeypatch, second_rate, second_width, message):
+    first = tmp_path / "render_0001.wav"
+    second = tmp_path / "render_0002.wav"
+    _write_mono(first, [1, 2])
+    with wave.open(str(second), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(second_width)
+        output.setframerate(second_rate)
+        output.writeframes(b"\0" * second_width * 2)
+    monkeypatch.setattr(
+        record_one_click, "_gain_plan",
+        lambda *_args: pytest.fail("analysis must not start for invalid WAV headers"),
+    )
+    monkeypatch.setattr(
+        record_one_click, "MP3_ENCODER_FACTORY",
+        lambda *_args, **_kwargs: pytest.fail("encoder must not start"),
+    )
+
+    with pytest.raises(ValueError, match=message) as error:
+        record_one_click._encode_chunk_pairs_mp3(
+            [(first, None), (second, None)], tmp_path / "output.mp3"
+        )
+
+    assert str(second) in str(error.value)
+    assert first.exists() and second.exists()
+
+
+def test_analysis_stage_precedes_finalizing_stage(tmp_path, monkeypatch, capsys):
+    _write_mono(tmp_path / "render_0001.wav", [1, 2])
+    _write_mono(tmp_path / "microphone_0001.wav", [2, 1])
+    monkeypatch.setattr(record_one_click, "MP3_ENCODER_FACTORY", _ProgressEncoder)
+
+    record_one_click._mix_available_chunks(
+        tmp_path, logging.getLogger("test-stage-order")
+    )
+
+    output = capsys.readouterr().out
+    assert output.index("Analyzing...") < output.index("Finalizing...   0%")
+
+
+def test_keyboard_interrupt_during_analysis_preserves_inputs_without_success(
+        tmp_path, monkeypatch, capsys):
+    render = tmp_path / "render_0001.wav"
+    microphone = tmp_path / "microphone_0001.wav"
+    _write_mono(render, [1, 2])
+    _write_mono(microphone, [2, 1])
+    monkeypatch.setattr(
+        record_one_click, "_gain_plan",
+        lambda *_args: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    result = record_one_click._finish_mp3(
+        tmp_path, logging.getLogger("test-analysis-cancel"), {}
+    )
+
+    output = capsys.readouterr().out
+    assert result == 130
+    assert "Analyzing..." in output
+    assert "Finalizing..." not in output
+    assert "Completed." not in output
+    assert render.exists() and microphone.exists()
+
+
 def test_finish_mp3_handles_keyboard_interrupt_as_safe_cancel(tmp_path, monkeypatch, capsys, caplog):
     def interrupted(*args, **kwargs):
         raise KeyboardInterrupt
@@ -127,7 +195,7 @@ def test_mix_available_chunks_keeps_wavs_when_postprocess_is_interrupted(tmp_pat
     _write_mono(render, [1, 2])
     _write_mono(microphone, [3, 4])
 
-    def interrupted(render_path, microphone_path, output_path, progress=None):
+    def interrupted(render_path, microphone_path, output_path, progress=None, analysis_started=None):
         Path(output_path).write_bytes(b"partial")
         raise KeyboardInterrupt
 

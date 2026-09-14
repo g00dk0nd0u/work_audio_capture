@@ -6,7 +6,7 @@ Work Audio Capture — quick start / クイックスタート
 1. このフォルダで `python record_one_click.py` を実行すると、既定の再生音声とマイクを同時録音します。
 2. 停止はコンソールで Ctrl+C を1回押します。
 3. 通常出力は mono 48 kbps（明示指定時は 80 kbps、silent fallback なし）です。
-4. `Session active.` の後、停止時は `Finalizing...   0%` から `Finalizing... 100%`、`Completed.` の完了を待ちます。
+4. `Session active.` の後、停止時は `Analyzing...` の後、`Finalizing...   0%` から `Finalizing... 100%`、`Completed.` の完了を待ちます。
 5. 最終結果は `recordings\YYYY-MM-DD_HH-MM-SS.mp3`（1 sessionにつき1本）です。
 
 録音中の約10分ごとの recovery WAV は `%LOCALAPPDATA%\WorkAudioCapture\<session>` にあり、通常の出力ではありません。crash 後に prompt が出た場合、Enter / [1] は新しい録音を優先し、[2] は interrupted recordings をすべて repair します。active session は OS-backed lock で保護され、録音と repair は同時実行されません。壊れた末尾 chunk があっても以前の有効 chunk は recovery できます。失敗データは `recovery_failed` として保持され、毎回 prompt を出しません。
@@ -27,7 +27,7 @@ English
 1. Run `python record_one_click.py` in this folder to capture default Windows playback and microphone audio simultaneously.
 2. Press Ctrl+C once in the console to stop.
 3. Normal one-click output is mono 48 kbps; 80 kbps is an explicit option, with no silent fallback.
-4. After `Session active.`, wait for `Finalizing...   0%` through `Finalizing... 100%`, followed by `Completed.`.
+4. After `Session active.`, wait for `Analyzing...`, then `Finalizing...   0%` through `Finalizing... 100%`, followed by `Completed.`.
 5. The final result is `recordings\YYYY-MM-DD_HH-MM-SS.mp3` (one MP3 per session).
 
 Approximately 10-minute recovery WAVs are internal data under `%LOCALAPPDATA%\WorkAudioCapture\<session>`, not normal output. After a crash, Enter/[1] prioritizes a new recording; [2] repairs all interrupted recordings. An OS-backed lock prevents repair of an active session. Earlier valid chunks can be recovered despite a corrupt tail. Failed data is preserved as `recovery_failed` without prompting on every startup.
@@ -42,3 +42,8 @@ Repairing an interrupted recording
 All usable WAV chunks are mixed/downmixed sequentially into one `<final-name>.part.mp3` and atomically published. Incorporated WAVs are deleted only after publication. A second Ctrl+C during MP3 creation, or any conversion/finalize failure, removes `.part` but preserves recovery data.
 
 The default native WASAPI/Media Foundation path needs no NumPy, ffmpeg, extra DLL, or runtime pip install. Recording has a 12-hour safety limit. See `audio_capture.log` for diagnostics.
+
+開始前検査 / Preflight
+------------------------
+one-click MP3は新規録音前に実際のrender/microphone周波数の一致（32/44.1/48 kHz）と指定bitrateの厳密なMedia Foundation対応を検査します。repairは現在のendpointに依存せず、保存済みWAV形式を使います。
+New one-click recordings validate matching actual endpoint rates (32/44.1/48 kHz) and exact requested Media Foundation bitrate support. Repair uses saved WAV formats without requiring current endpoints.

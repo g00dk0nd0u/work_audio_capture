@@ -6,7 +6,9 @@ One-click recording uses this transaction:
 simultaneous WASAPI capture
   -> recovery WAV chunks (about 10 minutes each)
   -> Ctrl+C / capture stop
-  -> validate and sequentially mix/downmix matched chunks
+  -> validate every selected WAV header
+  -> analyze fixed session gain
+  -> sequentially mix/downmix matched chunks
   -> one Media Foundation MP3 written as <final-name>.part.mp3
   -> finalize encoder
   -> atomic replace to <final-name>.mp3
@@ -51,9 +53,10 @@ reported as skipped with `levels_already_balanced`.
 
 Recovery WAVs live under `%LOCALAPPDATA%\WorkAudioCapture\<session>` and the published normal MP3 lives in the repository/distribution `recordings` directory. Multiple WAV pairs are fed, in chunk-number order, through one bounded-memory encoder; they do not become multiple numbered MP3 outputs.
 
-The one-click terminal overwrites one line while finalizing, then reports completion:
+The one-click terminal identifies the analysis stage, then overwrites one line while encoding/finalizing and reports completion:
 
 ```text
+Analyzing...
 Finalizing...   0%
 ...
 Finalizing... 100%
@@ -61,6 +64,8 @@ Completed.
 ```
 
 Progress is global and monotonic across all recovery chunks in the session; it does not reset to 0% at chunk boundaries. Publication is the transaction boundary: the final path is not exposed until the complete MP3 is finalized, non-empty, and renamed from `<final-name>.part.mp3`.
+
+Before analysis begins, every selected WAV header is checked for one common supported sample rate, PCM16 two-byte samples, and at least one channel. Different channel counts are accepted. A header failure names the input and starts neither gain analysis nor the encoder.
 
 ## Cancellation and failure
 

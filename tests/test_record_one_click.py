@@ -101,15 +101,18 @@ def test_hidden_validation_option_lists_bitrates_without_recording(monkeypatch, 
     ]
 
 
-def test_unavailable_requested_bitrate_fails_before_recording(monkeypatch, capsys):
-    monkeypatch.setattr(record_one_click, "available_mp3_bitrates", lambda _rate: [80_000])
+def test_repair_precedes_endpoint_and_mp3_format_queries(monkeypatch):
+    monkeypatch.setattr(record_one_click, "_configure_logging",
+                        lambda: logging.getLogger("repair-startup"))
+    monkeypatch.setattr(record_one_click, "_pending_sessions", lambda: [Path("pending")])
+    monkeypatch.setattr(record_one_click, "_choose_startup_action", lambda _pending: "repair")
+    monkeypatch.setattr(record_one_click, "_repair_all", lambda _pending, _logger: 0)
     monkeypatch.setattr(
-        record_one_click, "_configure_logging",
-        lambda: pytest.fail("unavailable bitrate must fail before recording startup"),
+        record_one_click, "available_mp3_bitrates",
+        lambda _rate: pytest.fail("repair must use saved WAV format in the encoder"),
     )
 
-    assert record_one_click.run(["--mp3-bitrate", "48000"]) == 1
-    assert "no exact mono 48000 Hz / 48000 bps" in capsys.readouterr().err
+    assert record_one_click.run(["--mp3-bitrate", "48000"]) == 0
 
 
 @pytest.mark.parametrize(("arguments", "expected_bitrate"), [
@@ -820,6 +823,15 @@ class _Backend:
         pass
 
 
+def _backend_with_rates(render_rate, microphone_rate):
+    class Backend(_Backend):
+        def endpoints(self):
+            render = type("Render", (_Endpoint,), {"sample_rate": render_rate})()
+            microphone = type("Microphone", (_Endpoint,), {"sample_rate": microphone_rate})()
+            return [render], [microphone]
+    return Backend
+
+
 class _FixedDatetime:
     @staticmethod
     def now():
@@ -839,6 +851,56 @@ def _prepare_recording_start(monkeypatch, tmp_path):
     monkeypatch.setattr(record_one_click, "datetime", _FixedDatetime)
     monkeypatch.setattr(audio_capture.native_backend, "NativeWasapiBackend", _Backend)
     return tmp_path / "2026-01-02_03-04-05"
+
+
+@pytest.mark.parametrize("rate", [32_000, 44_100, 48_000])
+def test_recording_preflight_queries_actual_common_endpoint_rate(
+        monkeypatch, tmp_path, rate):
+    import audio_capture.native_backend
+
+    queried = []
+    output = _prepare_recording_start(monkeypatch, tmp_path)
+    monkeypatch.setattr(audio_capture.native_backend, "NativeWasapiBackend",
+                        _backend_with_rates(rate, rate))
+    monkeypatch.setattr(record_one_click, "available_mp3_bitrates",
+                        lambda actual: queried.append(actual) or [48_000])
+    monkeypatch.setattr(record_one_click, "main", lambda: 1)
+
+    assert record_one_click.run() == 1
+    assert queried == [rate]
+    assert output.exists()
+
+
+@pytest.mark.parametrize(("render_rate", "microphone_rate", "bitrates", "reason"), [
+    (48_000, 44_100, [48_000], "sample rates differ"),
+    (22_050, 22_050, [48_000], "does not support 22050Hz"),
+    (44_100, 44_100, [80_000], "no exact mono 44100 Hz / 48000 bps"),
+])
+def test_recording_preflight_rejects_before_session_creation(
+        monkeypatch, tmp_path, capsys, render_rate, microphone_rate, bitrates, reason):
+    import audio_capture.native_backend
+
+    output = _prepare_recording_start(monkeypatch, tmp_path)
+    monkeypatch.setattr(audio_capture.native_backend, "NativeWasapiBackend",
+                        _backend_with_rates(render_rate, microphone_rate))
+    monkeypatch.setattr(record_one_click, "available_mp3_bitrates", lambda _rate: bitrates)
+    monkeypatch.setattr(record_one_click, "main", lambda: pytest.fail("must not record"))
+
+    assert record_one_click.run() == 1
+    assert reason in capsys.readouterr().err
+    assert not output.exists()
+
+
+def test_recording_preflight_reports_format_query_failure_without_session(
+        monkeypatch, tmp_path, capsys):
+    output = _prepare_recording_start(monkeypatch, tmp_path)
+    monkeypatch.setattr(record_one_click, "available_mp3_bitrates",
+                        lambda _rate: (_ for _ in ()).throw(RuntimeError("MF unavailable")))
+    monkeypatch.setattr(record_one_click, "main", lambda: pytest.fail("must not record"))
+
+    assert record_one_click.run() == 1
+    assert "format query failed: MF unavailable" in capsys.readouterr().err
+    assert not output.exists()
 
 
 def test_session_marker_is_written_only_after_recording_lock(
