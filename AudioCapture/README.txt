@@ -3,7 +3,7 @@ Work Audio Capture — quick start / クイックスタート
 
 日本語
 ------
-1. このフォルダで `python record_one_click.py` を実行すると、既定の再生音声とマイクを同時録音します。
+1. ダウンロードしたZIPは必ず「すべて展開」してから、展開後のこのフォルダで `python record_one_click.py` を実行します。ZIP内から直接実行しないでください。
 2. 停止はコンソールで Ctrl+C を1回押します。
 3. 通常出力は mono 48 kbps（明示指定時は 80 kbps、silent fallback なし）です。
 4. `Session active.` の後、停止時は `Analyzing...` の後、`Finalizing...   0%` から `Finalizing... 100%`、`Completed.` の完了を待ちます。
@@ -24,7 +24,7 @@ Work Audio Capture — quick start / クイックスタート
 
 English
 -------
-1. Run `python record_one_click.py` in this folder to capture default Windows playback and microphone audio simultaneously.
+1. Extract the downloaded ZIP completely first, then run `python record_one_click.py` in the extracted folder. Do not run the launcher from inside the ZIP.
 2. Press Ctrl+C once in the console to stop.
 3. Normal one-click output is mono 48 kbps; 80 kbps is an explicit option, with no silent fallback.
 4. After `Session active.`, wait for `Analyzing...`, then `Finalizing...   0%` through `Finalizing... 100%`, followed by `Completed.`.
