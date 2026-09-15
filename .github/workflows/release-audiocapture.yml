@@ -4,13 +4,12 @@ on:
   push:
     branches: [main]
     paths:
-      - ".github/workflows/release-audiocapture.yml"
+      - ".audiocapture-version"
   workflow_dispatch:
     inputs:
       version:
-        description: "Release tag (for example v0.1.1)"
+        description: "Release tag (for example v0.1.2)"
         required: true
-        default: "v0.1.0"
 
 permissions:
   contents: read
@@ -23,16 +22,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="$(tr -d '\r\n' < .audiocapture-version)"
+          fi
+          case "${VERSION}" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              echo "Invalid release version: ${VERSION}" >&2
+              exit 1
+              ;;
+          esac
+          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+          echo "ASSET=AudioCapture-${VERSION}.zip" >> "${GITHUB_ENV}"
+
       - name: Package AudioCapture
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="${{ github.event.inputs.version || 'v0.1.0' }}"
-          ASSET="AudioCapture-${VERSION}.zip"
           test -d AudioCapture
           zip -r "${ASSET}" AudioCapture
-          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
-          echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
 
       - name: Publish GitHub Release
         env:
@@ -47,4 +61,4 @@ jobs:
           gh release create "${VERSION}" "${ASSET}" \
             --target "${GITHUB_SHA}" \
             --title "AudioCapture ${VERSION}" \
-            --notes "Windows audio capture distribution. Download \`${ASSET}\`, extract it, and run \`python record_one_click.py\`."
+            --notes "Windows audio capture distribution. Download \`${ASSET}\`, extract the ZIP completely, then run \`record_one_click.py\` from the extracted AudioCapture folder."
