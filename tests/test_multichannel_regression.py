@@ -10,7 +10,7 @@ from audio_capture.recorder import ConcurrentRecorder, downmix_pcm16_mono
 
 
 PROJECT_ROOT = Path(__file__).parents[1]
-DISTRIBUTION_ROOT = PROJECT_ROOT / "distribution_audio_capture"
+DISTRIBUTION_ROOT = PROJECT_ROOT / "AudioCapture"
 
 
 def _pcm16(values):

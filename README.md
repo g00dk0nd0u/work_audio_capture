@@ -13,7 +13,7 @@ Windows PC の再生音声（Teams / Zoom / YouTube など）とマイク音声�
 
 ## 最短の使い方
 
-リポジトリ直下、または `distribution_audio_capture` フォルダで次を実行します。
+リポジトリ直下、または `AudioCapture` フォルダで次を実行します。
 
 ```powershell
 python record_one_click.py
@@ -100,7 +100,7 @@ Work Audio Capture records Windows playback (Teams, Zoom, YouTube, and similar a
 
 ## Quick start
 
-From the repository root or the `distribution_audio_capture` folder, run:
+From the repository root or the `AudioCapture` folder, run:
 
 ```powershell
 python record_one_click.py
@@ -183,5 +183,5 @@ Windows CI covers Python 3.10, 3.12, 3.13, and 3.14.
 ```bash
 python -m pip install pytest
 PYTHONPATH=src python -m pytest
-python -m compileall -q run.py record_one_click.py src tests distribution_audio_capture
+python -m compileall -q run.py record_one_click.py src tests AudioCapture
 ```
