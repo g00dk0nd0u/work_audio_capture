@@ -19,6 +19,30 @@ import wave
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SOURCE = PROJECT_ROOT / "src"
+
+
+def _stop_if_distribution_incomplete() -> None:
+    package_init = SOURCE / "audio_capture" / "__init__.py"
+    if package_init.is_file():
+        return
+
+    print(
+        "AudioCapture cannot start because required files are missing.\n"
+        "\n"
+        "If you opened record_one_click.py directly from the ZIP file,\n"
+        "please extract the ZIP first, then run record_one_click.py from\n"
+        "the extracted AudioCapture folder.\n",
+        file=sys.stderr,
+    )
+    if sys.stdin.isatty():
+        try:
+            input("Press Enter to close...")
+        except (EOFError, KeyboardInterrupt):
+            pass
+    raise SystemExit(2)
+
+
+_stop_if_distribution_incomplete()
 sys.path.insert(0, str(SOURCE))
 
 from audio_capture.cli import (  # noqa: E402
