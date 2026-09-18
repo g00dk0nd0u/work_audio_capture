@@ -40,6 +40,75 @@ def service_unavailable():
     return HResultError("read", AUDCLNT_E_SERVICE_NOT_RUNNING)
 
 
+@pytest.mark.parametrize("kind", ["render-loopback", "microphone"])
+def test_invalidation_resolves_changed_role_default_and_keeps_timeline(
+        tmp_path, monkeypatch, kind):
+    monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS", (0,))
+    old = Endpoint("A", "old", 2, 10, kind)
+    new = Endpoint("B", "new", 1, 10, kind)
+    recorder = None
+
+    class Resumed(PacketStream):
+        def read_packet(self):
+            try:
+                return super().read_packet()
+            except StopIteration:
+                recorder.stop_event.set()
+                return None
+
+    class SwitchingBackend(ReopenBackend):
+        def resolve_default(self, requested_kind, role):
+            assert (requested_kind, role) == (kind, "communications")
+            return new
+
+    backend = SwitchingBackend([
+        PacketStream([CapturePacket(b"\x01\x00\x03\x00", 1, 0, 0, 0),
+                      invalidated()], rate=10, channels=2),
+        Resumed([packet(2, 0, 20_000_000)], rate=10, channels=1),
+    ])
+    recorder = ConcurrentRecorder(
+        backend, chunk_duration_seconds=1, mono_output=True,
+        session_qpc_clock=lambda: 20_000_000,
+        default_device_role="communications")
+    recorder.session_qpc_origin_100ns = 0
+
+    recorder._capture(old, tmp_path / "audio.wav")
+
+    stats = recorder.stream_statistics[kind]
+    assert backend.endpoints == [old, new]
+    assert stats.endpoint_switch_count == 1
+    assert stats.stream_reopen_successes == 1
+    assert stats.occupied_recovery_slots == 2
+    assert session_health_fields(recorder.stream_statistics, [])["session_health_status"] == "recovered"
+
+
+def test_changed_default_with_different_rate_degrades_without_losing_data(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS", (0,))
+    old = Endpoint("A", "old", 1, 10, "render-loopback")
+    new = Endpoint("B", "new", 1, 20, "render-loopback")
+
+    class SwitchingBackend(ReopenBackend):
+        def resolve_default(self, _kind, _role):
+            return new
+
+    backend = SwitchingBackend([
+        PacketStream([packet(7, 0, 0), invalidated()]),
+        PacketStream([], rate=20),
+    ])
+    recorder = ConcurrentRecorder(
+        backend, chunk_duration_seconds=1, mono_output=True,
+        session_qpc_clock=lambda: 0, default_device_role="console")
+    recorder.session_qpc_origin_100ns = 0
+
+    recorder._capture(old, tmp_path / "audio.wav")
+
+    stats = recorder.stream_statistics[old.kind]
+    assert stats.endpoint_unavailable
+    assert stats.endpoint_switch_count == 0
+    assert wav_frames(tmp_path / "audio.wav") == (1, b"\x07\x00")
+
+
 def test_audio_service_not_running_hresult_matches_windows_sdk():
     assert AUDCLNT_E_SERVICE_NOT_RUNNING == 0x88890010
 

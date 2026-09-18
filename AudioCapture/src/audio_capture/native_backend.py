@@ -327,6 +327,13 @@ class NativeWasapiBackend:
         expected = eRender if endpoint.kind == "render-loopback" else eCapture
         return NativeWasapiStream(str(endpoint.index), expected)
 
+    def resolve_default(self, kind: str, role: str) -> Endpoint | None:
+        """Resolve a role default at recovery time, after device topology changes."""
+        renders, captures = self.endpoints()
+        defaults = self.default_endpoints(renders, captures)
+        suffix = "render" if kind == "render-loopback" else "capture"
+        return defaults.get(f"{role}_{suffix}")
+
     def sample_width(self) -> int:
         return 2
 

@@ -69,6 +69,7 @@ class StreamStatistics:
     stream_reopen_successes: int = 0
     stream_reopen_failures: int = 0
     endpoint_unavailable: bool = False
+    endpoint_switch_count: int = 0
 
     @property
     def audio_duration_seconds(self) -> float:
@@ -124,6 +125,7 @@ class StreamStatistics:
             "stream_reopen_successes": self.stream_reopen_successes,
             "stream_reopen_failures": self.stream_reopen_failures,
             "endpoint_unavailable": self.endpoint_unavailable,
+            "endpoint_switch_count": self.endpoint_switch_count,
         }
 
 
@@ -224,6 +226,8 @@ def session_health_fields(
                 item.stream_reopen_successes if item is not None else 0),
             f"{label}_reopen_failures": (
                 item.stream_reopen_failures if item is not None else 0),
+            f"{label}_endpoint_switch_count": (
+                item.endpoint_switch_count if item is not None else 0),
         })
     return fields
 
@@ -306,7 +310,8 @@ class ConcurrentRecorder:
                  shutdown_timeout_seconds: float = 5.0, clock=time.monotonic,
                  diagnostics_clock=time.monotonic,
                  recovery_disk_safety_path: Path | None = None,
-                 session_qpc_clock=query_performance_counter_100ns) -> None:
+                 session_qpc_clock=query_performance_counter_100ns,
+                 default_device_role: str | None = None) -> None:
         self.backend = backend
         self.frames = frames_per_buffer
         self.chunk_duration_seconds = chunk_duration_seconds
@@ -317,6 +322,8 @@ class ConcurrentRecorder:
         self.diagnostics_clock = diagnostics_clock
         self.recovery_disk_safety_path = recovery_disk_safety_path
         self.session_qpc_clock = session_qpc_clock
+        # None means the endpoints were selected explicitly and must never roam.
+        self.default_device_role = default_device_role
         self.session_qpc_origin_100ns: int | None = None
         self.session_duration_100ns: int | None = None
         self._session_end_lock = threading.Lock()
@@ -706,35 +713,55 @@ class ConcurrentRecorder:
                         log("warning", "capture endpoint reopen attempt endpoint_kind=%s attempt=%d",
                             endpoint.kind, reopen_attempt)
                         try:
-                            candidate = self.backend.open_input(endpoint, self.frames)
+                            reopen_endpoint = endpoint
+                            if (interruption_kind == "endpoint_or_resource_invalidated" and
+                                    self.default_device_role is not None and
+                                    hasattr(self.backend, "resolve_default")):
+                                resolved = self.backend.resolve_default(
+                                    endpoint.kind, self.default_device_role)
+                                if resolved is not None:
+                                    reopen_endpoint = resolved
+                                log("warning", "capture endpoint default resolved "
+                                    "endpoint_kind=%s previous_endpoint=%s new_endpoint=%s",
+                                    endpoint.kind, endpoint.index, reopen_endpoint.index)
+                            candidate = self.backend.open_input(reopen_endpoint, self.frames)
                             fmt = getattr(candidate, "format", None)
                             actual_mask = getattr(fmt, "channel_mask", None)
-                            layout_changed = (
-                                endpoint.channel_mask is not None and
-                                actual_mask is not None and
-                                actual_mask != endpoint.channel_mask)
                             if (fmt is not None and
                                     (fmt.sample_rate != endpoint.sample_rate or
-                                     fmt.channels != endpoint.channels or
-                                     layout_changed)):
+                                     (not self.mono_output and
+                                      (fmt.channels != endpoint.channels or
+                                       (endpoint.channel_mask is not None and
+                                        actual_mask is not None and
+                                        actual_mask != endpoint.channel_mask))))):
                                 close_stream(candidate, report=False)
                                 statistics.endpoint_unavailable = True
                                 statistics.terminal_status = "endpoint_unavailable"
                                 log("warning", "capture endpoint format changed after reopen "
-                                    "endpoint_kind=%s expected_rate=%d expected_channels=%d "
+                                    "endpoint_kind=%s previous_endpoint=%s new_endpoint=%s "
+                                    "switch_success=false expected_rate=%d expected_channels=%d "
                                     "actual_rate=%d actual_channels=%d "
                                     "expected_channel_mask=%s actual_channel_mask=%s",
-                                    endpoint.kind, endpoint.sample_rate, endpoint.channels,
+                                    endpoint.kind, endpoint.index, reopen_endpoint.index,
+                                    endpoint.sample_rate, endpoint.channels,
                                     fmt.sample_rate, fmt.channels,
                                     endpoint.channel_mask, actual_mask)
                                 return
                         except BaseException as reopen_error:
                             statistics.stream_reopen_failures += 1
                             log("warning", "capture endpoint reopen failed endpoint_kind=%s "
-                                "attempt=%d error=%s", endpoint.kind, reopen_attempt,
-                                reopen_error)
+                                "attempt=%d previous_endpoint=%s new_endpoint=%s "
+                                "switch_success=false error=%s", endpoint.kind, reopen_attempt,
+                                endpoint.index, reopen_endpoint.index, reopen_error)
                             continue
                         stream = candidate
+                        if str(reopen_endpoint.index) != str(endpoint.index):
+                            statistics.endpoint_switch_count += 1
+                            log("warning", "capture endpoint switch succeeded "
+                                "endpoint_kind=%s previous_endpoint=%s new_endpoint=%s "
+                                "endpoint_switch_count=%d", endpoint.kind, endpoint.index,
+                                reopen_endpoint.index, statistics.endpoint_switch_count)
+                        endpoint = reopen_endpoint
                         statistics.stream_reopen_successes += 1
                         mapper.reset_stream_continuity()
                         current_frame = max(

@@ -4,6 +4,7 @@ from datetime import datetime
 from array import array
 from contextlib import redirect_stdout
 from contextlib import ExitStack
+import argparse
 import json
 import logging
 import math
@@ -78,6 +79,7 @@ BALANCE_MAX_ADDED_CLIPPING_FRACTION = 0.001
 MP3_BITRATE_BPS = DEFAULT_MP3_BITRATE_BPS
 _LIST_MP3_BITRATES_OPTION = "--list-mp3-bitrates"
 _MP3_BITRATE_OPTION = "--mp3-bitrate"
+_DEVICE_ROLE_OPTION = "--device-role"
 MP3_ENCODER_FACTORY = Mp3Encoder
 SESSION_FILE = "session.json"
 SESSION_LOCK_FILE = "session.lock"
@@ -129,6 +131,7 @@ _LOG_EXTRA_FIELDS = (
     "stream_reopen_attempts",
     "stream_reopen_successes", "stream_reopen_failures",
     "endpoint_unavailable",
+    "endpoint_switch_count",
     "session_health_status", "session_degraded", "degraded_endpoint_count",
     "fatal_error_count", "render_terminal_status",
     "render_endpoint_unavailable", "render_invalidation_events",
@@ -138,6 +141,7 @@ _LOG_EXTRA_FIELDS = (
     "microphone_invalidation_events", "microphone_reopen_attempts",
     "microphone_audio_service_not_running_events",
     "microphone_reopen_successes", "microphone_reopen_failures",
+    "render_endpoint_switch_count", "microphone_endpoint_switch_count",
     "final_session_duration_seconds",
     "render_audio_duration_seconds",
     "microphone_audio_duration_seconds",
@@ -154,6 +158,7 @@ _LOG_EXTRA_FIELDS = (
     "default_console_capture_id", "default_console_capture_name",
     "default_multimedia_capture_id", "default_multimedia_capture_name",
     "default_communications_capture_id", "default_communications_capture_name",
+    "requested_device_role", "selected_device_role", "endpoint_selection_reason",
     "audio_stage", "rms", "rms_dbfs", "peak", "peak_dbfs",
     "channel_rms_dbfs", "channel_peak_dbfs", "clipped_samples",
     "rms_sample_stride_frames",
@@ -181,6 +186,53 @@ class _JsonFormatter(logging.Formatter):
         if record.exc_info:
             entry["exception"] = self.formatException(record.exc_info)
         return json.dumps(entry, ensure_ascii=False)
+
+
+def _requested_device_role(arguments: list[str]) -> str:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(_DEVICE_ROLE_OPTION,
+                        choices=("auto", "communications", "console"),
+                        default="auto")
+    try:
+        options, _ = parser.parse_known_args(arguments)
+    except SystemExit as exc:
+        raise ValueError(
+            "--device-role must be auto, communications, or console") from exc
+    return options.device_role
+
+
+def _select_role_pair(role_defaults, requested_role: str, input_fn=input):
+    """Select a role pair without coupling the policy to endpoint enumeration."""
+    pairs = {
+        role: (role_defaults.get(f"{role}_render"),
+               role_defaults.get(f"{role}_capture"))
+        for role in ("communications", "console")
+    }
+    if requested_role != "auto":
+        selected = requested_role
+        reason = "requested role"
+    else:
+        communications = pairs["communications"]
+        console = pairs["console"]
+        same = all(left is not None and right is not None and
+                   str(left.index) == str(right.index)
+                   for left, right in zip(communications, console))
+        if same:
+            selected = "communications"
+            reason = "console and communications defaults match"
+        else:
+            print("Windows uses different audio devices.\n")
+            print("[1] Teams / communications:")
+            print(f"    {communications[0].name if communications[0] else 'Unavailable'}")
+            print("\n[2] General system audio:")
+            print(f"    {console[0].name if console[0] else 'Unavailable'}\n")
+            answer = input_fn("Choose [1]: ").strip()
+            selected = "console" if answer == "2" else "communications"
+            reason = "user selected split-role default"
+    render, microphone = pairs[selected]
+    if render is None or microphone is None:
+        raise ValueError(f"Windows {selected} defaults are not both available")
+    return render, microphone, selected, reason
 
 
 def _requested_mp3_bitrate(arguments: list[str]) -> int:
@@ -1223,6 +1275,7 @@ def run(arguments: list[str] | None = None) -> int:
         return 0
     try:
         requested_bitrate = _requested_mp3_bitrate(arguments)
+        requested_device_role = _requested_device_role(arguments)
     except ValueError as exc:
         print(f"Could not start recording: {exc}", file=sys.stderr)
         return 2
@@ -1246,6 +1299,15 @@ def run(arguments: list[str] | None = None) -> int:
             render_endpoints, microphone_endpoints = backend.endpoints()
             role_defaults = (backend.default_endpoints(render_endpoints, microphone_endpoints)
                              if hasattr(backend, "default_endpoints") else {})
+            # Compatibility for test/optional backends that expose only the
+            # traditional default marker.
+            fallback_render = next(
+                (item for item in render_endpoints if item.is_default), None)
+            fallback_capture = next(
+                (item for item in microphone_endpoints if item.is_default), None)
+            for role in ("console", "communications"):
+                role_defaults.setdefault(f"{role}_render", fallback_render)
+                role_defaults.setdefault(f"{role}_capture", fallback_capture)
         finally:
             backend.close()
     except Exception as exc:
@@ -1253,11 +1315,14 @@ def run(arguments: list[str] | None = None) -> int:
         logger.exception("Could not enumerate Windows audio endpoints", extra=environment_log)
         return 1
 
-    render = next((endpoint for endpoint in render_endpoints if endpoint.is_default), None)
-    microphone = next((endpoint for endpoint in microphone_endpoints if endpoint.is_default), None)
-    if render is None or microphone is None:
-        print("Could not find the Windows default playback and microphone devices.")
-        logger.error("Could not find both default playback and microphone devices", extra=environment_log)
+    try:
+        render, microphone, selected_device_role, selection_reason = (
+            _select_role_pair(role_defaults, requested_device_role))
+    except (EOFError, KeyboardInterrupt, ValueError) as exc:
+        print(f"Could not select Windows audio devices: {exc}", file=sys.stderr)
+        logger.error("Could not select both role-default audio devices: %s", exc,
+                     extra={**environment_log,
+                            "requested_device_role": requested_device_role})
         return 1
 
     endpoint_log = {
@@ -1273,6 +1338,9 @@ def run(arguments: list[str] | None = None) -> int:
         "microphone_channels": microphone.channels,
         "microphone_sample_rate": microphone.sample_rate,
         "microphone_channel_mask": getattr(microphone, "channel_mask", None),
+        "requested_device_role": requested_device_role,
+        "selected_device_role": selected_device_role,
+        "endpoint_selection_reason": selection_reason,
     }
     for key, endpoint in role_defaults.items():
         endpoint_log[f"default_{key}_id"] = str(endpoint.index) if endpoint else None
@@ -1356,6 +1424,8 @@ def run(arguments: list[str] | None = None) -> int:
         str(render.index),
         "--microphone",
         str(microphone.index),
+        "--device-role",
+        selected_device_role,
         "--output",
         str(output),
         "--mono-wav",
