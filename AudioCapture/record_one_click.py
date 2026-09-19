@@ -161,6 +161,7 @@ _LOG_EXTRA_FIELDS = (
     "requested_device_role", "selected_device_role", "endpoint_selection_reason",
     "previous_endpoint_id", "previous_endpoint_name",
     "new_endpoint_id", "new_endpoint_name", "switch_reason", "switch_success",
+    "resolver_error",
     "audio_stage", "rms", "rms_dbfs", "peak", "peak_dbfs",
     "channel_rms_dbfs", "channel_peak_dbfs", "clipped_samples",
     "rms_sample_stride_frames",

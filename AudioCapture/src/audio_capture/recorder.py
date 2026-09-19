@@ -686,7 +686,7 @@ class ConcurrentRecorder:
 
         def log_switch(event: str, *, previous: Endpoint,
                        new: Endpoint | None, reason: str,
-                       success: bool) -> None:
+                       success: bool, error: BaseException | None = None) -> None:
             """Emit one stable, searchable event without affecting capture."""
             try:
                 LOGGER.warning(event, extra={
@@ -699,6 +699,7 @@ class ConcurrentRecorder:
                     "switch_reason": reason,
                     "endpoint_switch_count": statistics.endpoint_switch_count,
                     "switch_success": success,
+                    "resolver_error": str(error) if error is not None else None,
                 })
             except BaseException:
                 pass
@@ -733,12 +734,20 @@ class ConcurrentRecorder:
                             endpoint.kind, reopen_attempt)
                         reopen_endpoint = endpoint
                         fresh_endpoint_metadata = False
-                        try:
-                            if (interruption_kind == "endpoint_or_resource_invalidated" and
-                                    self.default_device_role is not None and
-                                    hasattr(self.backend, "resolve_default")):
+                        resolution_failed = False
+                        if (interruption_kind == "endpoint_or_resource_invalidated" and
+                                self.default_device_role is not None and
+                                hasattr(self.backend, "resolve_default")):
+                            try:
                                 resolved = self.backend.resolve_default(
                                     endpoint.kind, self.default_device_role)
+                            except BaseException as resolver_error:
+                                resolution_failed = True
+                                log_switch(
+                                    "endpoint_re_resolution", previous=endpoint,
+                                    new=None, reason="default_resolution_failed",
+                                    success=False, error=resolver_error)
+                            else:
                                 if resolved is not None:
                                     reopen_endpoint = resolved
                                     fresh_endpoint_metadata = True
@@ -746,6 +755,7 @@ class ConcurrentRecorder:
                                     "endpoint_re_resolution", previous=endpoint,
                                     new=resolved, reason="endpoint_invalidated",
                                     success=resolved is not None)
+                        try:
                             candidate = self.backend.open_input(reopen_endpoint, self.frames)
                             fmt = getattr(candidate, "format", None)
                             actual_mask = getattr(fmt, "channel_mask", None)
@@ -774,30 +784,47 @@ class ConcurrentRecorder:
                                 (self.mono_output or not layout_changed))
                             if not safe_format:
                                 close_stream(candidate, report=False)
+                                statistics.stream_reopen_failures += 1
                                 statistics.endpoint_unavailable = True
                                 statistics.terminal_status = "endpoint_unavailable"
                                 log_switch(
-                                    "endpoint_switch", previous=endpoint,
+                                    ("endpoint_switch" if str(reopen_endpoint.index) !=
+                                     str(endpoint.index) else "endpoint_reopen"),
+                                    previous=endpoint,
                                     new=reopen_endpoint,
                                     reason="incompatible_reopen_format", success=False)
                                 return
                         except BaseException as reopen_error:
                             statistics.stream_reopen_failures += 1
                             log_switch(
-                                "endpoint_switch", previous=endpoint,
-                                new=reopen_endpoint, reason="reopen_failed",
+                                ("endpoint_switch" if str(reopen_endpoint.index) !=
+                                 str(endpoint.index) else "endpoint_reopen"),
+                                previous=endpoint, new=reopen_endpoint,
+                                reason=("previous_endpoint_after_resolution_failure"
+                                        if resolution_failed else "reopen_failed"),
                                 success=False)
                             log("warning", "capture endpoint reopen failed "
                                 "endpoint_kind=%s attempt=%d error=%s",
                                 endpoint.kind, reopen_attempt, reopen_error)
                             continue
                         stream = candidate
-                        if str(reopen_endpoint.index) != str(endpoint.index):
+                        endpoint_changed = (
+                            str(reopen_endpoint.index) != str(endpoint.index))
+                        if endpoint_changed:
                             statistics.endpoint_switch_count += 1
                         if fresh_endpoint_metadata:
                             log_switch(
-                                "endpoint_switch", previous=endpoint,
-                                new=reopen_endpoint, reason="current_role_default",
+                                ("endpoint_switch" if endpoint_changed
+                                 else "endpoint_reopen"),
+                                previous=endpoint, new=reopen_endpoint,
+                                reason=("current_role_default_changed" if endpoint_changed
+                                        else "current_role_default_unchanged"),
+                                success=True)
+                        elif resolution_failed:
+                            log_switch(
+                                "endpoint_reopen", previous=endpoint,
+                                new=reopen_endpoint,
+                                reason="previous_endpoint_after_resolution_failure",
                                 success=True)
                         endpoint = reopen_endpoint
                         statistics.stream_reopen_successes += 1
