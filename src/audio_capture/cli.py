@@ -47,6 +47,8 @@ def main() -> int:
                         help="audio backend (default: native; pyaudio is optional)")
     parser.add_argument("--render", help="explicit render endpoint ID (required for record)")
     parser.add_argument("--microphone", help="explicit capture endpoint ID (required for record)")
+    parser.add_argument("--device-role", choices=("console", "communications"),
+                        help=argparse.SUPPRESS)
     parser.add_argument("--output", type=Path, help="output directory; defaults to a temporary directory")
     parser.add_argument(
         "--mono-wav",
@@ -91,6 +93,8 @@ def main() -> int:
             if args.time_slot_recovery_names else "microphone_0001.wav"
         )
         recorder_options = {"mono_output": args.mono_wav}
+        if args.device_role is not None:
+            recorder_options["default_device_role"] = args.device_role
         if args.recovery_disk_safety:
             recorder_options["recovery_disk_safety_path"] = directory
         recorder = ConcurrentRecorder(backend, **recorder_options)

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import record_one_click
+from audio_capture.model import Endpoint
 
 
 def _write(path: Path, channels: int, rate: int, samples: list[int]) -> None:
@@ -1283,3 +1284,87 @@ def test_timeline_endpoint_missing_for_consecutive_slots_is_silence(
     assert samples[0] == 11
     assert samples[48_000] == 2
     assert samples[-1] == 3
+
+def _role_defaults(same=False):
+    communications_render = Endpoint("cr", "Teams speaker", 2, 48000,
+                                     "render-loopback")
+    communications_capture = Endpoint("cc", "Teams microphone", 1, 48000,
+                                      "microphone")
+    return {
+        "communications_render": communications_render,
+        "communications_capture": communications_capture,
+        "console_render": communications_render if same else Endpoint(
+            "gr", "General speaker", 2, 48000, "render-loopback"),
+        "console_capture": communications_capture if same else Endpoint(
+            "gc", "General microphone", 1, 48000, "microphone"),
+    }
+
+
+def test_auto_matching_roles_does_not_prompt():
+    selected = record_one_click._select_role_pair(
+        _role_defaults(same=True), "auto",
+        lambda _prompt: pytest.fail("matching defaults must not prompt"))
+    assert selected[2:] == (
+        "communications", "console and communications defaults match")
+
+
+def test_auto_split_roles_enter_selects_communications(capsys):
+    render, microphone, role, reason = record_one_click._select_role_pair(
+        _role_defaults(), "auto", lambda _prompt: "")
+    assert (render.index, microphone.index, role) == ("cr", "cc", "communications")
+    assert reason == "user selected split-role default"
+    output = capsys.readouterr().out
+    assert "Teams / communications" in output
+    assert "Speaker: Teams speaker" in output
+    assert "Microphone: Teams microphone" in output
+    assert "Speaker: General speaker" in output
+    assert "Microphone: General microphone" in output
+
+
+def test_auto_prompt_shows_capture_difference_when_render_matches(capsys):
+    defaults = _role_defaults()
+    defaults["console_render"] = defaults["communications_render"]
+    record_one_click._select_role_pair(defaults, "auto", lambda _prompt: "")
+    output = capsys.readouterr().out
+    assert output.count("Speaker: Teams speaker") == 2
+    assert "Microphone: Teams microphone" in output
+    assert "Microphone: General microphone" in output
+
+
+@pytest.mark.parametrize(("missing_role", "expected_role"), [
+    ("communications", "console"),
+    ("console", "communications"),
+])
+def test_auto_selects_only_complete_role_without_prompt(
+        missing_role, expected_role):
+    defaults = _role_defaults()
+    defaults[f"{missing_role}_capture"] = None
+    selected = record_one_click._select_role_pair(
+        defaults, "auto",
+        lambda _prompt: pytest.fail("one complete pair must not prompt"))
+    assert selected[2] == expected_role
+    assert selected[3] == (
+        f"only {expected_role} role has a complete endpoint pair")
+
+
+def test_auto_rejects_when_neither_role_has_complete_pair():
+    defaults = _role_defaults()
+    defaults["communications_capture"] = None
+    defaults["console_render"] = None
+    with pytest.raises(ValueError, match="neither Windows role"):
+        record_one_click._select_role_pair(defaults, "auto")
+
+
+@pytest.mark.parametrize(("requested", "answer", "expected"), [
+    ("auto", "2", ("gr", "gc", "console")),
+    ("communications", None, ("cr", "cc", "communications")),
+    ("console", None, ("gr", "gc", "console")),
+])
+def test_role_selection_pairs_render_and_microphone(requested, answer, expected):
+    def choose(_prompt):
+        if answer is None:
+            pytest.fail("an explicit role must not prompt")
+        return answer
+    render, microphone, role, _ = record_one_click._select_role_pair(
+        _role_defaults(), requested, choose)
+    assert (render.index, microphone.index, role) == expected

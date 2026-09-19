@@ -20,7 +20,7 @@ Work Audio Capture — quick start / クイックスタート
 
 複数 WAV は順番に mix/downmix され、1つの `<final-name>.part.mp3` を経て atomic publish されます。publish 成功後だけ取り込んだ WAV を削除します。MP3生成中の2回目の Ctrl+C、変換失敗、finalize失敗では `.part` を削除して recovery data を保持します。
 
-既定の native WASAPI / Media Foundation 経路は NumPy、ffmpeg、追加 DLL、runtime pip install が不要です。録音は12時間で安全停止します。問題の詳細は `audio_capture.log` を確認してください。
+既定の native WASAPI / Media Foundation 経路は NumPy、ffmpeg、追加 DLL、runtime pip install が不要です。Console と Communications の既定デバイスが異なる場合は Teams 側（Enter の既定）または一般システム側を選択します。`--device-role communications` / `--device-role console` でも固定できます。選択した録音 endpoint が invalidated された場合に同じ role の current default を再解決し、default が変わっていれば新 endpoint への復旧を試みます（常時監視は行わず、sample rate が変わる場合は既存 recovery data を保持してその stream を unavailable にします）。録音は12時間で安全停止します。問題の詳細は `audio_capture.log` を確認してください。
 
 English
 -------

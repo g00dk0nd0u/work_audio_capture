@@ -40,6 +40,85 @@ def service_unavailable():
     return HResultError("read", AUDCLNT_E_SERVICE_NOT_RUNNING)
 
 
+@pytest.mark.parametrize("kind", ["render-loopback", "microphone"])
+def test_invalidation_resolves_changed_role_default_and_keeps_timeline(
+        tmp_path, monkeypatch, caplog, kind):
+    monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS", (0,))
+    old = Endpoint("A", "old", 2, 10, kind)
+    new = Endpoint("B", "new", 3, 10, kind)
+    recorder = None
+
+    class Resumed(PacketStream):
+        def read_packet(self):
+            try:
+                return super().read_packet()
+            except StopIteration:
+                recorder.stop_event.set()
+                return None
+
+    class SwitchingBackend(ReopenBackend):
+        def resolve_default(self, requested_kind, role):
+            assert (requested_kind, role) == (kind, "communications")
+            return new
+
+    backend = SwitchingBackend([
+        PacketStream([CapturePacket(b"\x01\x00\x03\x00", 1, 0, 0, 0),
+                      invalidated()], rate=10, channels=2),
+        Resumed([CapturePacket(b"\x03\x00\x06\x00\x09\x00", 1, 0,
+                               20_000_000, 0)], rate=10, channels=3),
+    ])
+    recorder = ConcurrentRecorder(
+        backend, chunk_duration_seconds=1, mono_output=True,
+        session_qpc_clock=lambda: 20_000_000,
+        default_device_role="communications")
+    recorder.session_qpc_origin_100ns = 0
+
+    recorder._capture(old, tmp_path / "audio.wav")
+
+    stats = recorder.stream_statistics[kind]
+    assert backend.endpoints == [old, new]
+    assert stats.endpoint_switch_count == 1
+    assert stats.stream_reopen_successes == 1
+    assert stats.occupied_recovery_slots == 2
+    assert wav_frames(tmp_path / "audio_0003.wav") == (1, b"\x06\x00")
+    assert session_health_fields(recorder.stream_statistics, [])["session_health_status"] == "recovered"
+    switch = next(record for record in caplog.records
+                  if record.getMessage() == "endpoint_switch" and
+                  record.switch_success)
+    assert switch.switch_reason == "current_role_default_changed"
+    assert switch.endpoint_switch_count == 1
+
+
+def test_changed_default_with_different_rate_degrades_without_losing_data(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS", (0,))
+    old = Endpoint("A", "old", 1, 10, "render-loopback")
+    new = Endpoint("B", "new", 1, 20, "render-loopback")
+
+    class SwitchingBackend(ReopenBackend):
+        def resolve_default(self, _kind, _role):
+            return new
+
+    backend = SwitchingBackend([
+        PacketStream([packet(7, 0, 0), invalidated()]),
+        PacketStream([], rate=20),
+    ])
+    recorder = ConcurrentRecorder(
+        backend, chunk_duration_seconds=1, mono_output=True,
+        session_qpc_clock=lambda: 0, default_device_role="console")
+    recorder.session_qpc_origin_100ns = 0
+
+    recorder._capture(old, tmp_path / "audio.wav")
+
+    stats = recorder.stream_statistics[old.kind]
+    assert stats.endpoint_unavailable
+    assert stats.endpoint_switch_count == 0
+    assert stats.stream_reopen_attempts == 1
+    assert stats.stream_reopen_successes == 0
+    assert stats.stream_reopen_failures == 1
+    assert wav_frames(tmp_path / "audio.wav") == (1, b"\x07\x00")
+
+
 def test_audio_service_not_running_hresult_matches_windows_sdk():
     assert AUDCLNT_E_SERVICE_NOT_RUNNING == 0x88890010
 
@@ -283,6 +362,9 @@ def test_format_change_after_reopen_degrades_without_resampling(tmp_path, monkey
     stats = recorder.stream_statistics[endpoint.kind]
     assert stats.endpoint_unavailable
     assert stats.terminal_status == "endpoint_unavailable"
+    assert stats.stream_reopen_attempts == 1
+    assert stats.stream_reopen_successes == 0
+    assert stats.stream_reopen_failures == 1
     assert not recorder.errors
     assert not (tmp_path / "mic.wav").exists()
 
@@ -304,12 +386,141 @@ def test_known_channel_layout_change_after_reopen_degrades(tmp_path, monkeypatch
     stats = recorder.stream_statistics[endpoint.kind]
     assert stats.endpoint_unavailable
     assert stats.terminal_status == "endpoint_unavailable"
+    assert stats.stream_reopen_attempts == 1
+    assert stats.stream_reopen_successes == 0
+    assert stats.stream_reopen_failures == 1
     assert not recorder.errors
 
 
 def wav_frames(path):
     with wave.open(str(path), "rb") as source:
         return source.getnframes(), source.readframes(source.getnframes())
+
+
+def test_explicit_mono_channel_change_degrades_and_preserves_recovery(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS", (0,))
+    backend = ReopenBackend([
+        PacketStream([packet(7, 0, 0), invalidated()], channels=1),
+        PacketStream([], channels=2),
+    ])
+    recorder = ConcurrentRecorder(
+        backend, mono_output=True, chunk_duration_seconds=1,
+        session_qpc_clock=lambda: 0)
+    recorder.session_qpc_origin_100ns = 0
+    endpoint = Endpoint("same-id", "explicit", 1, 10, "microphone")
+
+    recorder._capture(endpoint, tmp_path / "mic.wav")
+
+    stats = recorder.stream_statistics[endpoint.kind]
+    assert stats.endpoint_unavailable
+    assert stats.terminal_status == "endpoint_unavailable"
+    assert stats.stream_reopen_attempts == 1
+    assert stats.stream_reopen_successes == 0
+    assert stats.stream_reopen_failures == 1
+    assert not recorder.errors
+    assert wav_frames(tmp_path / "mic.wav") == (1, b"\x07\x00")
+
+
+def test_role_reopen_same_id_uses_fresh_channel_metadata(
+        tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS", (0,))
+    old = Endpoint("same-id", "old", 1, 10, "render-loopback")
+    fresh = Endpoint("same-id", "fresh", 2, 10, "render-loopback")
+    recorder = None
+
+    class Resumed(PacketStream):
+        def read_packet(self):
+            try:
+                return super().read_packet()
+            except StopIteration:
+                recorder.stop_event.set()
+                return None
+
+    class FreshMetadataBackend(ReopenBackend):
+        def resolve_default(self, _kind, _role):
+            return fresh
+
+    backend = FreshMetadataBackend([
+        PacketStream([invalidated()], channels=1),
+        Resumed([CapturePacket(b"\x02\x00\x06\x00", 1, 0, 0, 0)],
+                channels=2),
+    ])
+    recorder = ConcurrentRecorder(
+        backend, mono_output=True, chunk_duration_seconds=1,
+        session_qpc_clock=lambda: 0, default_device_role="communications")
+    recorder.session_qpc_origin_100ns = 0
+
+    recorder._capture(old, tmp_path / "render.wav")
+
+    stats = recorder.stream_statistics[old.kind]
+    assert not stats.endpoint_unavailable
+    assert stats.stream_reopen_successes == 1
+    assert wav_frames(tmp_path / "render.wav") == (1, b"\x04\x00")
+    reopen = next(record for record in caplog.records
+                  if record.getMessage() == "endpoint_reopen")
+    assert not any(record.getMessage() == "endpoint_switch"
+                   for record in caplog.records)
+    assert reopen.endpoint_kind == "render-loopback"
+    assert reopen.previous_endpoint_id == "same-id"
+    assert reopen.previous_endpoint_name == "old"
+    assert reopen.new_endpoint_id == "same-id"
+    assert reopen.new_endpoint_name == "fresh"
+    assert reopen.selected_device_role == "communications"
+    assert reopen.switch_reason == "current_role_default_unchanged"
+    assert reopen.endpoint_switch_count == 0
+    assert reopen.switch_success is True
+
+
+def test_default_resolution_failure_is_distinct_from_bounded_open_retry(
+        tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS",
+                        (0, 0))
+    endpoint = Endpoint("A", "old", 1, 10, "microphone")
+    recorder = None
+
+    class Resumed(PacketStream):
+        def read_packet(self):
+            try:
+                return super().read_packet()
+            except StopIteration:
+                recorder.stop_event.set()
+                return None
+
+    class FailingResolverBackend(ReopenBackend):
+        def resolve_default(self, _kind, _role):
+            raise RuntimeError("resolver unavailable")
+
+    backend = FailingResolverBackend([
+        PacketStream([invalidated()]),
+        RuntimeError("old endpoint temporarily unavailable"),
+        Resumed([packet(4, 0, 0)]),
+    ])
+    recorder = ConcurrentRecorder(
+        backend, mono_output=True, chunk_duration_seconds=1,
+        session_qpc_clock=lambda: 0, default_device_role="communications")
+    recorder.session_qpc_origin_100ns = 0
+
+    recorder._capture(endpoint, tmp_path / "mic.wav")
+
+    stats = recorder.stream_statistics[endpoint.kind]
+    assert stats.stream_reopen_attempts == 2
+    assert stats.stream_reopen_failures == 1
+    assert stats.stream_reopen_successes == 1
+    resolutions = [record for record in caplog.records
+                   if record.getMessage() == "endpoint_re_resolution"]
+    assert len(resolutions) == 2
+    assert all(record.switch_success is False for record in resolutions)
+    assert all(record.switch_reason == "default_resolution_failed"
+               for record in resolutions)
+    assert all(record.resolver_error == "resolver unavailable"
+               for record in resolutions)
+    reopen_events = [record for record in caplog.records
+                     if record.getMessage() == "endpoint_reopen"]
+    assert [record.switch_success for record in reopen_events] == [False, True]
+    assert all(record.switch_reason ==
+               "previous_endpoint_after_resolution_failure"
+               for record in reopen_events)
 
 
 def test_no_packet_gap_reanchors_resumed_audio_after_closed_slot(tmp_path):
