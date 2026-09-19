@@ -159,6 +159,8 @@ _LOG_EXTRA_FIELDS = (
     "default_multimedia_capture_id", "default_multimedia_capture_name",
     "default_communications_capture_id", "default_communications_capture_name",
     "requested_device_role", "selected_device_role", "endpoint_selection_reason",
+    "previous_endpoint_id", "previous_endpoint_name",
+    "new_endpoint_id", "new_endpoint_name", "switch_reason", "switch_success",
     "audio_stage", "rms", "rms_dbfs", "peak", "peak_dbfs",
     "channel_rms_dbfs", "channel_peak_dbfs", "clipped_samples",
     "rms_sample_stride_frames",
@@ -214,6 +216,16 @@ def _select_role_pair(role_defaults, requested_role: str, input_fn=input):
     else:
         communications = pairs["communications"]
         console = pairs["console"]
+        communications_complete = all(communications)
+        console_complete = all(console)
+        if communications_complete and not console_complete:
+            return (*communications, "communications",
+                    "only communications role has a complete endpoint pair")
+        if console_complete and not communications_complete:
+            return (*console, "console",
+                    "only console role has a complete endpoint pair")
+        if not communications_complete and not console_complete:
+            raise ValueError("neither Windows role has a complete endpoint pair")
         same = all(left is not None and right is not None and
                    str(left.index) == str(right.index)
                    for left, right in zip(communications, console))
@@ -222,10 +234,12 @@ def _select_role_pair(role_defaults, requested_role: str, input_fn=input):
             reason = "console and communications defaults match"
         else:
             print("Windows uses different audio devices.\n")
-            print("[1] Teams / communications:")
-            print(f"    {communications[0].name if communications[0] else 'Unavailable'}")
-            print("\n[2] General system audio:")
-            print(f"    {console[0].name if console[0] else 'Unavailable'}\n")
+            print("[1] Teams / communications")
+            print(f"Speaker: {communications[0].name}")
+            print(f"Microphone: {communications[1].name}")
+            print("\n[2] General system audio")
+            print(f"Speaker: {console[0].name}")
+            print(f"Microphone: {console[1].name}\n")
             answer = input_fn("Choose [1]: ").strip()
             selected = "console" if answer == "2" else "communications"
             reason = "user selected split-role default"

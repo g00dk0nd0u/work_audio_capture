@@ -1313,7 +1313,46 @@ def test_auto_split_roles_enter_selects_communications(capsys):
         _role_defaults(), "auto", lambda _prompt: "")
     assert (render.index, microphone.index, role) == ("cr", "cc", "communications")
     assert reason == "user selected split-role default"
-    assert "Teams / communications" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "Teams / communications" in output
+    assert "Speaker: Teams speaker" in output
+    assert "Microphone: Teams microphone" in output
+    assert "Speaker: General speaker" in output
+    assert "Microphone: General microphone" in output
+
+
+def test_auto_prompt_shows_capture_difference_when_render_matches(capsys):
+    defaults = _role_defaults()
+    defaults["console_render"] = defaults["communications_render"]
+    record_one_click._select_role_pair(defaults, "auto", lambda _prompt: "")
+    output = capsys.readouterr().out
+    assert output.count("Speaker: Teams speaker") == 2
+    assert "Microphone: Teams microphone" in output
+    assert "Microphone: General microphone" in output
+
+
+@pytest.mark.parametrize(("missing_role", "expected_role"), [
+    ("communications", "console"),
+    ("console", "communications"),
+])
+def test_auto_selects_only_complete_role_without_prompt(
+        missing_role, expected_role):
+    defaults = _role_defaults()
+    defaults[f"{missing_role}_capture"] = None
+    selected = record_one_click._select_role_pair(
+        defaults, "auto",
+        lambda _prompt: pytest.fail("one complete pair must not prompt"))
+    assert selected[2] == expected_role
+    assert selected[3] == (
+        f"only {expected_role} role has a complete endpoint pair")
+
+
+def test_auto_rejects_when_neither_role_has_complete_pair():
+    defaults = _role_defaults()
+    defaults["communications_capture"] = None
+    defaults["console_render"] = None
+    with pytest.raises(ValueError, match="neither Windows role"):
+        record_one_click._select_role_pair(defaults, "auto")
 
 
 @pytest.mark.parametrize(("requested", "answer", "expected"), [

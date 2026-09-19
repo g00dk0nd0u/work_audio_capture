@@ -76,7 +76,7 @@ MP3 生成中にもう一度 `Ctrl+C` を押すと後処理をキャンセルし
 - one-click MP3 は録音開始前に、実際の render / microphone の sample rate が一致し、指定 bitrate の厳密な Media Foundation 出力形式がその周波数で利用できることを検査します。repair は現在の endpoint ではなく保存済み WAV の形式を使用します。
 - MP3 は 32 / 44.1 / 48 kHz に対応し、resampling と独立 clock の drift 補正は未実装です。
 - multichannel downmix は算術平均です。文字起こし向け source balancing はセッション単位の固定ゲインで実装済みです。channel-mask-aware weighting、AGC、limiter、loudness normalization は未実装です。
-- 既定 role から選んだ endpoint が無効化された場合は、その時点の同じ role の既定 endpoint を再解決して切り替えます。sample rate が変わった場合は resampling せず、その stream を unavailable として既存 recovery data を保持します。明示 endpoint は別の既定 endpoint へ切り替えません。
+- 既定 role から選んだ録音 endpoint が invalidated された場合に、その時点の同じ role の current default を再解決し、default が変わっていれば新 endpoint への復旧を試みます。常時の default 変更監視は行いません。sample rate が変わった場合は resampling せず、その stream を unavailable として既存 recovery data を保持します。明示 endpoint は別の既定 endpoint へ切り替えません。
 - representative な実 PC と長時間 hardware soak の検証は未完了です。
 - launcher / tray UI は reliability validation 後の予定です。
 
@@ -162,7 +162,7 @@ Inspect `audio_capture.log` in the repository/distribution directory for environ
 
 - Before a new one-click recording starts, the actual render/microphone rates must match and the exact requested Media Foundation bitrate must be available at that rate. Repair instead uses the saved WAV format and does not depend on current endpoints. MP3 supports 32/44.1/48 kHz without resampling.
 - Session-wide fixed-gain source balancing is implemented. Clock-drift correction, channel-mask-aware mixing, AGC/limiting, and loudness normalization are not implemented.
-- After invalidation, role-selected streams resolve the current default again and can switch endpoints. A sample-rate change safely degrades that stream without resampling and preserves existing recovery data; explicitly selected endpoints never roam.
+- When a role-selected recording endpoint is invalidated, recovery resolves that role's current default and tries the new endpoint if the default changed; defaults are not monitored continuously. A sample-rate change safely degrades that stream without resampling and preserves existing recovery data; explicitly selected endpoints never roam.
 - Representative real-PC validation and long-session hardware soak testing remain outstanding.
 - Launcher/tray UX is deferred until reliability is validated.
 

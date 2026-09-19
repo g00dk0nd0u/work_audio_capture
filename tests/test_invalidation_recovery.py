@@ -45,7 +45,7 @@ def test_invalidation_resolves_changed_role_default_and_keeps_timeline(
         tmp_path, monkeypatch, kind):
     monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS", (0,))
     old = Endpoint("A", "old", 2, 10, kind)
-    new = Endpoint("B", "new", 1, 10, kind)
+    new = Endpoint("B", "new", 3, 10, kind)
     recorder = None
 
     class Resumed(PacketStream):
@@ -64,7 +64,8 @@ def test_invalidation_resolves_changed_role_default_and_keeps_timeline(
     backend = SwitchingBackend([
         PacketStream([CapturePacket(b"\x01\x00\x03\x00", 1, 0, 0, 0),
                       invalidated()], rate=10, channels=2),
-        Resumed([packet(2, 0, 20_000_000)], rate=10, channels=1),
+        Resumed([CapturePacket(b"\x03\x00\x06\x00\x09\x00", 1, 0,
+                               20_000_000, 0)], rate=10, channels=3),
     ])
     recorder = ConcurrentRecorder(
         backend, chunk_duration_seconds=1, mono_output=True,
@@ -79,6 +80,7 @@ def test_invalidation_resolves_changed_role_default_and_keeps_timeline(
     assert stats.endpoint_switch_count == 1
     assert stats.stream_reopen_successes == 1
     assert stats.occupied_recovery_slots == 2
+    assert wav_frames(tmp_path / "audio_0003.wav") == (1, b"\x06\x00")
     assert session_health_fields(recorder.stream_statistics, [])["session_health_status"] == "recovered"
 
 
@@ -379,6 +381,76 @@ def test_known_channel_layout_change_after_reopen_degrades(tmp_path, monkeypatch
 def wav_frames(path):
     with wave.open(str(path), "rb") as source:
         return source.getnframes(), source.readframes(source.getnframes())
+
+
+def test_explicit_mono_channel_change_degrades_and_preserves_recovery(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS", (0,))
+    backend = ReopenBackend([
+        PacketStream([packet(7, 0, 0), invalidated()], channels=1),
+        PacketStream([], channels=2),
+    ])
+    recorder = ConcurrentRecorder(
+        backend, mono_output=True, chunk_duration_seconds=1,
+        session_qpc_clock=lambda: 0)
+    recorder.session_qpc_origin_100ns = 0
+    endpoint = Endpoint("same-id", "explicit", 1, 10, "microphone")
+
+    recorder._capture(endpoint, tmp_path / "mic.wav")
+
+    stats = recorder.stream_statistics[endpoint.kind]
+    assert stats.endpoint_unavailable
+    assert stats.terminal_status == "endpoint_unavailable"
+    assert not recorder.errors
+    assert wav_frames(tmp_path / "mic.wav") == (1, b"\x07\x00")
+
+
+def test_role_reopen_same_id_uses_fresh_channel_metadata(
+        tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS", (0,))
+    old = Endpoint("same-id", "old", 1, 10, "render-loopback")
+    fresh = Endpoint("same-id", "fresh", 2, 10, "render-loopback")
+    recorder = None
+
+    class Resumed(PacketStream):
+        def read_packet(self):
+            try:
+                return super().read_packet()
+            except StopIteration:
+                recorder.stop_event.set()
+                return None
+
+    class FreshMetadataBackend(ReopenBackend):
+        def resolve_default(self, _kind, _role):
+            return fresh
+
+    backend = FreshMetadataBackend([
+        PacketStream([invalidated()], channels=1),
+        Resumed([CapturePacket(b"\x02\x00\x06\x00", 1, 0, 0, 0)],
+                channels=2),
+    ])
+    recorder = ConcurrentRecorder(
+        backend, mono_output=True, chunk_duration_seconds=1,
+        session_qpc_clock=lambda: 0, default_device_role="communications")
+    recorder.session_qpc_origin_100ns = 0
+
+    recorder._capture(old, tmp_path / "render.wav")
+
+    stats = recorder.stream_statistics[old.kind]
+    assert not stats.endpoint_unavailable
+    assert stats.stream_reopen_successes == 1
+    assert wav_frames(tmp_path / "render.wav") == (1, b"\x04\x00")
+    switch = next(record for record in caplog.records
+                  if record.getMessage() == "endpoint_switch")
+    assert switch.endpoint_kind == "render-loopback"
+    assert switch.previous_endpoint_id == "same-id"
+    assert switch.previous_endpoint_name == "old"
+    assert switch.new_endpoint_id == "same-id"
+    assert switch.new_endpoint_name == "fresh"
+    assert switch.selected_device_role == "communications"
+    assert switch.switch_reason == "current_role_default"
+    assert switch.endpoint_switch_count == 0
+    assert switch.switch_success is True
 
 
 def test_no_packet_gap_reanchors_resumed_audio_after_closed_slot(tmp_path):

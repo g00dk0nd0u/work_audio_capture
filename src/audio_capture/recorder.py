@@ -684,6 +684,25 @@ class ConcurrentRecorder:
             except BaseException:
                 pass
 
+        def log_switch(event: str, *, previous: Endpoint,
+                       new: Endpoint | None, reason: str,
+                       success: bool) -> None:
+            """Emit one stable, searchable event without affecting capture."""
+            try:
+                LOGGER.warning(event, extra={
+                    "endpoint_kind": previous.kind,
+                    "previous_endpoint_id": str(previous.index),
+                    "previous_endpoint_name": previous.name,
+                    "new_endpoint_id": str(new.index) if new is not None else None,
+                    "new_endpoint_name": new.name if new is not None else None,
+                    "selected_device_role": self.default_device_role,
+                    "switch_reason": reason,
+                    "endpoint_switch_count": statistics.endpoint_switch_count,
+                    "switch_success": success,
+                })
+            except BaseException:
+                pass
+
         try:
             while not self.stop_event.is_set():
                 try:
@@ -712,8 +731,9 @@ class ConcurrentRecorder:
                         statistics.stream_reopen_attempts += 1
                         log("warning", "capture endpoint reopen attempt endpoint_kind=%s attempt=%d",
                             endpoint.kind, reopen_attempt)
+                        reopen_endpoint = endpoint
+                        fresh_endpoint_metadata = False
                         try:
-                            reopen_endpoint = endpoint
                             if (interruption_kind == "endpoint_or_resource_invalidated" and
                                     self.default_device_role is not None and
                                     hasattr(self.backend, "resolve_default")):
@@ -721,46 +741,64 @@ class ConcurrentRecorder:
                                     endpoint.kind, self.default_device_role)
                                 if resolved is not None:
                                     reopen_endpoint = resolved
-                                log("warning", "capture endpoint default resolved "
-                                    "endpoint_kind=%s previous_endpoint=%s new_endpoint=%s",
-                                    endpoint.kind, endpoint.index, reopen_endpoint.index)
+                                    fresh_endpoint_metadata = True
+                                log_switch(
+                                    "endpoint_re_resolution", previous=endpoint,
+                                    new=resolved, reason="endpoint_invalidated",
+                                    success=resolved is not None)
                             candidate = self.backend.open_input(reopen_endpoint, self.frames)
                             fmt = getattr(candidate, "format", None)
                             actual_mask = getattr(fmt, "channel_mask", None)
-                            if (fmt is not None and
-                                    (fmt.sample_rate != endpoint.sample_rate or
-                                     (not self.mono_output and
-                                      (fmt.channels != endpoint.channels or
-                                       (endpoint.channel_mask is not None and
-                                        actual_mask is not None and
-                                        actual_mask != endpoint.channel_mask))))):
+                            metadata_mask = reopen_endpoint.channel_mask
+                            candidate_matches_metadata = (
+                                fmt is not None and
+                                fmt.sample_rate == reopen_endpoint.sample_rate and
+                                fmt.channels == reopen_endpoint.channels and
+                                not (metadata_mask is not None and
+                                     actual_mask is not None and
+                                     actual_mask != metadata_mask))
+                            layout_changed = (
+                                reopen_endpoint.channels != endpoint.channels or
+                                (endpoint.channel_mask is not None and
+                                 metadata_mask is not None and
+                                 metadata_mask != endpoint.channel_mask))
+                            safe_format = (
+                                fmt is not None and
+                                fmt.sample_rate == endpoint.sample_rate and
+                                (candidate_matches_metadata
+                                 if fresh_endpoint_metadata else
+                                 (fmt.channels == endpoint.channels and
+                                  not (endpoint.channel_mask is not None and
+                                       actual_mask is not None and
+                                       actual_mask != endpoint.channel_mask))) and
+                                (self.mono_output or not layout_changed))
+                            if not safe_format:
                                 close_stream(candidate, report=False)
                                 statistics.endpoint_unavailable = True
                                 statistics.terminal_status = "endpoint_unavailable"
-                                log("warning", "capture endpoint format changed after reopen "
-                                    "endpoint_kind=%s previous_endpoint=%s new_endpoint=%s "
-                                    "switch_success=false expected_rate=%d expected_channels=%d "
-                                    "actual_rate=%d actual_channels=%d "
-                                    "expected_channel_mask=%s actual_channel_mask=%s",
-                                    endpoint.kind, endpoint.index, reopen_endpoint.index,
-                                    endpoint.sample_rate, endpoint.channels,
-                                    fmt.sample_rate, fmt.channels,
-                                    endpoint.channel_mask, actual_mask)
+                                log_switch(
+                                    "endpoint_switch", previous=endpoint,
+                                    new=reopen_endpoint,
+                                    reason="incompatible_reopen_format", success=False)
                                 return
                         except BaseException as reopen_error:
                             statistics.stream_reopen_failures += 1
-                            log("warning", "capture endpoint reopen failed endpoint_kind=%s "
-                                "attempt=%d previous_endpoint=%s new_endpoint=%s "
-                                "switch_success=false error=%s", endpoint.kind, reopen_attempt,
-                                endpoint.index, reopen_endpoint.index, reopen_error)
+                            log_switch(
+                                "endpoint_switch", previous=endpoint,
+                                new=reopen_endpoint, reason="reopen_failed",
+                                success=False)
+                            log("warning", "capture endpoint reopen failed "
+                                "endpoint_kind=%s attempt=%d error=%s",
+                                endpoint.kind, reopen_attempt, reopen_error)
                             continue
                         stream = candidate
                         if str(reopen_endpoint.index) != str(endpoint.index):
                             statistics.endpoint_switch_count += 1
-                            log("warning", "capture endpoint switch succeeded "
-                                "endpoint_kind=%s previous_endpoint=%s new_endpoint=%s "
-                                "endpoint_switch_count=%d", endpoint.kind, endpoint.index,
-                                reopen_endpoint.index, statistics.endpoint_switch_count)
+                        if fresh_endpoint_metadata:
+                            log_switch(
+                                "endpoint_switch", previous=endpoint,
+                                new=reopen_endpoint, reason="current_role_default",
+                                success=True)
                         endpoint = reopen_endpoint
                         statistics.stream_reopen_successes += 1
                         mapper.reset_stream_continuity()
