@@ -1,5 +1,7 @@
 import AVFoundation
+import AudioToolbox
 import CoreMedia
+import CoreGraphics
 import Foundation
 import ScreenCaptureKit
 
@@ -7,10 +9,19 @@ private struct Options {
     let duration: Double
     let outputDirectory: URL
 
-    static func parse() throws -> Options {
+    static let usage = """
+    Usage: sck-audio-spike --duration <seconds> --output-dir <path>
+    Build: swift build -c release
+    """
+
+    static func parse() throws -> Options? {
         var duration: Double?
         var outputDirectory: URL?
         var arguments = Array(CommandLine.arguments.dropFirst())
+        if arguments == ["--help"] || arguments == ["-h"] {
+            print(usage)
+            return nil
+        }
         while !arguments.isEmpty {
             let option = arguments.removeFirst()
             guard !arguments.isEmpty else { throw SpikeError.usage("missing value for \(option)") }
@@ -28,7 +39,7 @@ private struct Options {
             }
         }
         guard let duration, let outputDirectory else {
-            throw SpikeError.usage("usage: sck-audio-spike --duration <seconds> --output-dir <path>")
+            throw SpikeError.usage(usage)
         }
         return Options(duration: duration, outputDirectory: outputDirectory)
     }
@@ -45,19 +56,30 @@ private enum SpikeError: Error, CustomStringConvertible {
     }
 }
 
-private struct TimeEvidence: Codable {
+private struct TimeEvidence: Encodable {
     let value: Int64
     let timescale: Int32
-    let seconds: Double
+    let seconds: Double?
 
     init(_ time: CMTime) {
         value = time.value
         timescale = time.timescale
-        seconds = time.seconds
+        let candidate = time.seconds
+        seconds = time.isValid && !time.isIndefinite && candidate.isFinite ? candidate : nil
+    }
+
+    private enum CodingKeys: String, CodingKey { case value, timescale, seconds }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(value, forKey: .value)
+        try values.encode(timescale, forKey: .timescale)
+        if let seconds { try values.encode(seconds, forKey: .seconds) }
+        else { try values.encodeNil(forKey: .seconds) }
     }
 }
 
-private struct FormatEvidence: Codable {
+private struct FormatEvidence: Encodable {
     let sampleRate: Double
     let channels: UInt32
     let formatID: String
@@ -77,8 +99,8 @@ private struct FormatEvidence: Codable {
     }
 }
 
-private struct TrackEvidence: Codable {
-    var file: String
+private struct TrackEvidence: Encodable {
+    var sourcePath: String
     var format: FormatEvidence?
     var firstPTS: TimeEvidence?
     var lastPTS: TimeEvidence?
@@ -89,28 +111,151 @@ private struct TrackEvidence: Codable {
     var maxCallbackGapSeconds: Double = 0
     var buffersWithNonZeroBytes: Int64 = 0
     var buffersWithOnlyZeroBytes: Int64 = 0
+    var signalPresent: Bool?
+    var silenceOnly: Bool?
+
+    mutating func finalize() {
+        guard callbackCount > 0 else {
+            signalPresent = nil
+            silenceOnly = nil
+            return
+        }
+        signalPresent = buffersWithNonZeroBytes > 0
+        silenceOnly = buffersWithNonZeroBytes == 0
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sourcePath, format, firstPTS, lastPTS, firstCallbackUptimeNanoseconds
+        case lastCallbackUptimeNanoseconds, frameCount, callbackCount, maxCallbackGapSeconds
+        case buffersWithNonZeroBytes, buffersWithOnlyZeroBytes, signalPresent, silenceOnly
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(sourcePath, forKey: .sourcePath)
+        if let format { try values.encode(format, forKey: .format) } else { try values.encodeNil(forKey: .format) }
+        if let firstPTS { try values.encode(firstPTS, forKey: .firstPTS) } else { try values.encodeNil(forKey: .firstPTS) }
+        if let lastPTS { try values.encode(lastPTS, forKey: .lastPTS) } else { try values.encodeNil(forKey: .lastPTS) }
+        if let firstCallbackUptimeNanoseconds {
+            try values.encode(firstCallbackUptimeNanoseconds, forKey: .firstCallbackUptimeNanoseconds)
+        } else { try values.encodeNil(forKey: .firstCallbackUptimeNanoseconds) }
+        if let lastCallbackUptimeNanoseconds {
+            try values.encode(lastCallbackUptimeNanoseconds, forKey: .lastCallbackUptimeNanoseconds)
+        } else { try values.encodeNil(forKey: .lastCallbackUptimeNanoseconds) }
+        try values.encode(frameCount, forKey: .frameCount)
+        try values.encode(callbackCount, forKey: .callbackCount)
+        try values.encode(maxCallbackGapSeconds, forKey: .maxCallbackGapSeconds)
+        try values.encode(buffersWithNonZeroBytes, forKey: .buffersWithNonZeroBytes)
+        try values.encode(buffersWithOnlyZeroBytes, forKey: .buffersWithOnlyZeroBytes)
+        if let signalPresent { try values.encode(signalPresent, forKey: .signalPresent) }
+        else { try values.encodeNil(forKey: .signalPresent) }
+        if let silenceOnly { try values.encode(silenceOnly, forKey: .silenceOnly) }
+        else { try values.encodeNil(forKey: .silenceOnly) }
+    }
 }
 
-private struct RelativeStartEvidence: Codable {
+private struct RelativeStartEvidence: Encodable {
     let microphoneMinusSystemPTSSeconds: Double?
     let microphoneMinusSystemCallbackSeconds: Double?
+
+    private enum CodingKeys: String, CodingKey {
+        case microphoneMinusSystemPTSSeconds, microphoneMinusSystemCallbackSeconds
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        if let microphoneMinusSystemPTSSeconds {
+            try values.encode(microphoneMinusSystemPTSSeconds, forKey: .microphoneMinusSystemPTSSeconds)
+        } else { try values.encodeNil(forKey: .microphoneMinusSystemPTSSeconds) }
+        if let microphoneMinusSystemCallbackSeconds {
+            try values.encode(microphoneMinusSystemCallbackSeconds, forKey: .microphoneMinusSystemCallbackSeconds)
+        } else { try values.encodeNil(forKey: .microphoneMinusSystemCallbackSeconds) }
+    }
 }
 
-private struct ResultEvidence: Codable {
+private struct ResultEvidence: Encodable {
     let schemaVersion = 1
+    let candidate = "sck"
+    let macOSVersion: String
     let startedAt: String
     let finishedAt: String
     let requestedDurationSeconds: Double
+    let observedWallClockDurationSeconds: Double
     let stopReason: String
+    let captureLifecycleCompleted: Bool
+    let evidencePassed: Bool
     let succeeded: Bool
-    let error: String?
+    let streamOrDelegateError: String?
+    let permissions: PermissionEvidence
     let configuration: ConfigurationEvidence
     let system: TrackEvidence
     let microphone: TrackEvidence
     let relativeStart: RelativeStartEvidence
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, candidate, macOSVersion, startedAt, finishedAt
+        case requestedDurationSeconds, observedWallClockDurationSeconds, stopReason
+        case captureLifecycleCompleted, evidencePassed, succeeded, streamOrDelegateError
+        case permissions, configuration, system, microphone, relativeStart
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(schemaVersion, forKey: .schemaVersion)
+        try values.encode(candidate, forKey: .candidate)
+        try values.encode(macOSVersion, forKey: .macOSVersion)
+        try values.encode(startedAt, forKey: .startedAt)
+        try values.encode(finishedAt, forKey: .finishedAt)
+        try values.encode(requestedDurationSeconds, forKey: .requestedDurationSeconds)
+        try values.encode(observedWallClockDurationSeconds, forKey: .observedWallClockDurationSeconds)
+        try values.encode(stopReason, forKey: .stopReason)
+        try values.encode(captureLifecycleCompleted, forKey: .captureLifecycleCompleted)
+        try values.encode(evidencePassed, forKey: .evidencePassed)
+        try values.encode(succeeded, forKey: .succeeded)
+        if let streamOrDelegateError {
+            try values.encode(streamOrDelegateError, forKey: .streamOrDelegateError)
+        } else { try values.encodeNil(forKey: .streamOrDelegateError) }
+        try values.encode(permissions, forKey: .permissions)
+        try values.encode(configuration, forKey: .configuration)
+        try values.encode(system, forKey: .system)
+        try values.encode(microphone, forKey: .microphone)
+        try values.encode(relativeStart, forKey: .relativeStart)
+    }
 }
 
-private struct ConfigurationEvidence: Codable {
+private struct PermissionEvidence: Encodable {
+    let screenCapturePreflightPassedBeforeCapture: Bool
+    let screenCapturePreflightPassedAfterCapture: Bool
+    let screenCaptureAuthorizationAfterCapture: String?
+    let microphoneAuthorizationBeforeCapture: String
+    let microphoneAuthorizationAfterCapture: String
+
+    private enum CodingKeys: String, CodingKey {
+        case screenCapturePreflightPassedBeforeCapture, screenCapturePreflightPassedAfterCapture
+        case screenCaptureAuthorizationAfterCapture
+        case microphoneAuthorizationBeforeCapture, microphoneAuthorizationAfterCapture
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(screenCapturePreflightPassedBeforeCapture,
+                          forKey: .screenCapturePreflightPassedBeforeCapture)
+        try values.encode(screenCapturePreflightPassedAfterCapture,
+                          forKey: .screenCapturePreflightPassedAfterCapture)
+        if let screenCaptureAuthorizationAfterCapture {
+            try values.encode(screenCaptureAuthorizationAfterCapture,
+                              forKey: .screenCaptureAuthorizationAfterCapture)
+        } else {
+            try values.encodeNil(forKey: .screenCaptureAuthorizationAfterCapture)
+        }
+        try values.encode(microphoneAuthorizationBeforeCapture,
+                          forKey: .microphoneAuthorizationBeforeCapture)
+        try values.encode(microphoneAuthorizationAfterCapture,
+                          forKey: .microphoneAuthorizationAfterCapture)
+    }
+}
+
+private struct ConfigurationEvidence: Encodable {
     let oneSCStream = true
     let capturesSystemAudio = true
     let capturesMicrophone = true
@@ -122,11 +267,18 @@ private struct ConfigurationEvidence: Codable {
 
 private final class AudioTrackWriter {
     private var file: ExtAudioFileRef?
+    private let sourceName: String
+    private let originalFormat: AudioStreamBasicDescription
+    private let originalChannelLayout: Data?
 
-    init(url: URL, format: AudioStreamBasicDescription) throws {
+    init(sourceName: String, url: URL, format: AudioStreamBasicDescription,
+         channelLayout: Data?) throws {
         guard format.mFormatID == kAudioFormatLinearPCM else {
             throw SpikeError.message("unexpected non-PCM ScreenCaptureKit audio format")
         }
+        self.sourceName = sourceName
+        originalFormat = format
+        originalChannelLayout = channelLayout
         var description = format
         var output: ExtAudioFileRef?
         let createStatus = ExtAudioFileCreateWithURL(
@@ -146,8 +298,12 @@ private final class AudioTrackWriter {
         }
     }
 
-    func append(_ sampleBuffer: CMSampleBuffer, format: AudioStreamBasicDescription) throws -> Bool {
+    func append(_ sampleBuffer: CMSampleBuffer, format: AudioStreamBasicDescription,
+                channelLayout: Data?) throws -> Bool {
         guard let file else { throw SpikeError.message("audio file is not open") }
+        guard Self.compatible(format, originalFormat), channelLayout == originalChannelLayout else {
+            throw SpikeError.message("\(sourceName) audio format changed during capture")
+        }
         let buffers = AudioBufferList.allocate(maximumBuffers: max(1, Int(format.mChannelsPerFrame)))
         defer { free(buffers.unsafeMutablePointer) }
         var retainedBlockBuffer: CMBlockBuffer?
@@ -181,14 +337,26 @@ private final class AudioTrackWriter {
     }
 
     deinit { close() }
+
+    private static func compatible(_ lhs: AudioStreamBasicDescription,
+                                   _ rhs: AudioStreamBasicDescription) -> Bool {
+        lhs.mSampleRate == rhs.mSampleRate &&
+        lhs.mFormatID == rhs.mFormatID &&
+        lhs.mFormatFlags == rhs.mFormatFlags &&
+        lhs.mBytesPerPacket == rhs.mBytesPerPacket &&
+        lhs.mFramesPerPacket == rhs.mFramesPerPacket &&
+        lhs.mBytesPerFrame == rhs.mBytesPerFrame &&
+        lhs.mChannelsPerFrame == rhs.mChannelsPerFrame &&
+        lhs.mBitsPerChannel == rhs.mBitsPerChannel
+    }
 }
 
 private final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private let outputDirectory: URL
     private let finish: @Sendable (String, Error?) -> Void
-    private var system = TrackEvidence(file: "system.caf")
-    private var microphone = TrackEvidence(file: "microphone.caf")
+    private var system: TrackEvidence
+    private var microphone: TrackEvidence
     private var systemWriter: AudioTrackWriter?
     private var microphoneWriter: AudioTrackWriter?
     private var terminating = false
@@ -196,6 +364,8 @@ private final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, 
     init(outputDirectory: URL, finish: @escaping @Sendable (String, Error?) -> Void) {
         self.outputDirectory = outputDirectory
         self.finish = finish
+        system = TrackEvidence(sourcePath: outputDirectory.appendingPathComponent("system.caf").path)
+        microphone = TrackEvidence(sourcePath: outputDirectory.appendingPathComponent("microphone.caf").path)
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
@@ -215,26 +385,38 @@ private final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, 
                 throw SpikeError.message("audio sample did not contain an ASBD")
             }
             let format = pointer.pointee
+            let channelLayout = channelLayoutData(description)
             let now = DispatchTime.now().uptimeNanoseconds
             if outputType == .audio {
                 if systemWriter == nil {
                     systemWriter = try AudioTrackWriter(
-                        url: outputDirectory.appendingPathComponent(system.file), format: format)
+                        sourceName: "system", url: URL(fileURLWithPath: system.sourcePath),
+                        format: format, channelLayout: channelLayout)
                 }
-                let nonZero = try systemWriter?.append(sampleBuffer, format: format) ?? false
+                let nonZero = try systemWriter?.append(
+                    sampleBuffer, format: format, channelLayout: channelLayout) ?? false
                 update(&system, sampleBuffer: sampleBuffer, format: format, now: now, nonZero: nonZero)
             } else {
                 if microphoneWriter == nil {
                     microphoneWriter = try AudioTrackWriter(
-                        url: outputDirectory.appendingPathComponent(microphone.file), format: format)
+                        sourceName: "microphone", url: URL(fileURLWithPath: microphone.sourcePath),
+                        format: format, channelLayout: channelLayout)
                 }
-                let nonZero = try microphoneWriter?.append(sampleBuffer, format: format) ?? false
+                let nonZero = try microphoneWriter?.append(
+                    sampleBuffer, format: format, channelLayout: channelLayout) ?? false
                 update(&microphone, sampleBuffer: sampleBuffer, format: format, now: now, nonZero: nonZero)
             }
         } catch {
             terminating = true
             DispatchQueue.global().async { self.finish("failure", error) }
         }
+    }
+
+    private func channelLayoutData(_ description: CMAudioFormatDescription) -> Data? {
+        var size = 0
+        guard let layout = CMAudioFormatDescriptionGetChannelLayout(description, sizeOut: &size),
+              size > 0 else { return nil }
+        return Data(bytes: layout, count: size)
     }
 
     private func update(_ evidence: inout TrackEvidence, sampleBuffer: CMSampleBuffer,
@@ -279,6 +461,8 @@ private final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, 
         defer { lock.unlock() }
         systemWriter?.close()
         microphoneWriter?.close()
+        system.finalize()
+        microphone.finalize()
         return (system, microphone)
     }
 }
@@ -287,25 +471,53 @@ private final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, 
 private enum Main {
     static func main() async {
         do {
-            let options = try Options.parse()
-            try FileManager.default.createDirectory(
-                at: options.outputDirectory, withIntermediateDirectories: true)
+            guard let options = try Options.parse() else { return }
+            try prepareFreshOutputDirectory(options.outputDirectory)
             let started = Date()
             let formatter = ISO8601DateFormatter()
+            let permissionBefore = currentPermissionState()
 
-            let outcome = try await runCapture(options: options)
+            let outcome: (session: CaptureSession, reason: String, error: Error?)
+            do {
+                outcome = try await runCapture(options: options)
+            } catch {
+                let session = CaptureSession(outputDirectory: options.outputDirectory) { _, _ in }
+                outcome = (session, "setupFailure", error)
+            }
+            let finished = Date()
+            let permissionAfter = currentPermissionState()
+            let permissions = PermissionEvidence(
+                screenCapturePreflightPassedBeforeCapture: permissionBefore.screenPreflight,
+                screenCapturePreflightPassedAfterCapture: permissionAfter.screenPreflight,
+                screenCaptureAuthorizationAfterCapture:
+                    permissionAfter.screenPreflight ? "authorized" : nil,
+                microphoneAuthorizationBeforeCapture: permissionBefore.microphone,
+                microphoneAuthorizationAfterCapture: permissionAfter.microphone)
             let (system, microphone) = outcome.session.snapshot()
             let ptsOffset = offset(microphone.firstPTS?.seconds, system.firstPTS?.seconds)
             let hostOffset = offset(
                 microphone.firstCallbackUptimeNanoseconds.map { Double($0) / 1_000_000_000 },
                 system.firstCallbackUptimeNanoseconds.map { Double($0) / 1_000_000_000 })
+            let lifecycleCompleted = outcome.error == nil &&
+                (outcome.reason == "duration" || outcome.reason == "interrupt")
+            let systemHasCurrentData = system.callbackCount > 0 && system.frameCount > 0 &&
+                FileManager.default.fileExists(atPath: system.sourcePath)
+            let microphoneHasCurrentData = microphone.callbackCount > 0 && microphone.frameCount > 0 &&
+                FileManager.default.fileExists(atPath: microphone.sourcePath)
+            let evidencePassed = lifecycleCompleted && systemHasCurrentData && microphoneHasCurrentData &&
+                system.signalPresent == true && microphone.signalPresent == true
             let result = ResultEvidence(
+                macOSVersion: ProcessInfo.processInfo.operatingSystemVersionString,
                 startedAt: formatter.string(from: started),
-                finishedAt: formatter.string(from: Date()),
+                finishedAt: formatter.string(from: finished),
                 requestedDurationSeconds: options.duration,
+                observedWallClockDurationSeconds: finished.timeIntervalSince(started),
                 stopReason: outcome.reason,
-                succeeded: outcome.error == nil,
-                error: outcome.error.map { String(describing: $0) },
+                captureLifecycleCompleted: lifecycleCompleted,
+                evidencePassed: evidencePassed,
+                succeeded: evidencePassed,
+                streamOrDelegateError: outcome.error.map { String(describing: $0) },
+                permissions: permissions,
                 configuration: ConfigurationEvidence(),
                 system: system,
                 microphone: microphone,
@@ -317,6 +529,10 @@ private enum Main {
             if let error = outcome.error {
                 fputs("capture failed: \(error)\n", stderr)
                 Foundation.exit(EXIT_FAILURE)
+            }
+            if !evidencePassed {
+                fputs("capture completed, but simultaneous non-silent evidence did not pass\n", stderr)
+                Foundation.exit(3)
             }
             print("capture complete: \(options.outputDirectory.path)")
         } catch {
@@ -373,6 +589,35 @@ private enum Main {
     private static func offset(_ lhs: Double?, _ rhs: Double?) -> Double? {
         guard let lhs, let rhs else { return nil }
         return lhs - rhs
+    }
+
+    private static func prepareFreshOutputDirectory(_ url: URL) throws {
+        let manager = FileManager.default
+        var isDirectory: ObjCBool = false
+        if manager.fileExists(atPath: url.path, isDirectory: &isDirectory) {
+            guard isDirectory.boolValue else {
+                throw SpikeError.message("output path exists and is not a directory: \(url.path)")
+            }
+            let contents = try manager.contentsOfDirectory(atPath: url.path)
+            guard contents.isEmpty else {
+                throw SpikeError.message("output directory must be empty: \(url.path)")
+            }
+        } else {
+            try manager.createDirectory(at: url, withIntermediateDirectories: true)
+        }
+    }
+
+    private static func currentPermissionState() -> (screenPreflight: Bool, microphone: String) {
+        let screenPreflight = CGPreflightScreenCaptureAccess()
+        let microphone: String
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized: microphone = "authorized"
+        case .denied: microphone = "denied"
+        case .restricted: microphone = "restricted"
+        case .notDetermined: microphone = "notDetermined"
+        @unknown default: microphone = "unknown"
+        }
+        return (screenPreflight, microphone)
     }
 }
 
