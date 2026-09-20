@@ -798,10 +798,7 @@ class ConcurrentRecorder:
                                      str(endpoint.index) else "endpoint_reopen"),
                                     previous=endpoint,
                                     new=reopen_endpoint,
-                                    reason=(
-                                        "previous_endpoint_after_default_unavailable"
-                                        if default_unavailable else
-                                        "incompatible_reopen_format"),
+                                    reason="incompatible_reopen_format",
                                     success=False)
                                 return
                         except BaseException as reopen_error:
