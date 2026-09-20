@@ -735,6 +735,7 @@ class ConcurrentRecorder:
                         reopen_endpoint = endpoint
                         fresh_endpoint_metadata = False
                         resolution_failed = False
+                        default_unavailable = False
                         if (interruption_kind == "endpoint_or_resource_invalidated" and
                                 self.default_device_role is not None and
                                 hasattr(self.backend, "resolve_default")):
@@ -751,9 +752,14 @@ class ConcurrentRecorder:
                                 if resolved is not None:
                                     reopen_endpoint = resolved
                                     fresh_endpoint_metadata = True
+                                    resolution_reason = "endpoint_invalidated"
+                                else:
+                                    default_unavailable = True
+                                    resolution_reason = (
+                                        "current_role_default_unavailable")
                                 log_switch(
                                     "endpoint_re_resolution", previous=endpoint,
-                                    new=resolved, reason="endpoint_invalidated",
+                                    new=resolved, reason=resolution_reason,
                                     success=resolved is not None)
                         try:
                             candidate = self.backend.open_input(reopen_endpoint, self.frames)
@@ -792,7 +798,11 @@ class ConcurrentRecorder:
                                      str(endpoint.index) else "endpoint_reopen"),
                                     previous=endpoint,
                                     new=reopen_endpoint,
-                                    reason="incompatible_reopen_format", success=False)
+                                    reason=(
+                                        "previous_endpoint_after_default_unavailable"
+                                        if default_unavailable else
+                                        "incompatible_reopen_format"),
+                                    success=False)
                                 return
                         except BaseException as reopen_error:
                             statistics.stream_reopen_failures += 1
@@ -800,8 +810,11 @@ class ConcurrentRecorder:
                                 ("endpoint_switch" if str(reopen_endpoint.index) !=
                                  str(endpoint.index) else "endpoint_reopen"),
                                 previous=endpoint, new=reopen_endpoint,
-                                reason=("previous_endpoint_after_resolution_failure"
-                                        if resolution_failed else "reopen_failed"),
+                                reason=(
+                                    "previous_endpoint_after_resolution_failure"
+                                    if resolution_failed else
+                                    "previous_endpoint_after_default_unavailable"
+                                    if default_unavailable else "reopen_failed"),
                                 success=False)
                             log("warning", "capture endpoint reopen failed "
                                 "endpoint_kind=%s attempt=%d error=%s",
@@ -825,6 +838,12 @@ class ConcurrentRecorder:
                                 "endpoint_reopen", previous=endpoint,
                                 new=reopen_endpoint,
                                 reason="previous_endpoint_after_resolution_failure",
+                                success=True)
+                        elif default_unavailable:
+                            log_switch(
+                                "endpoint_reopen", previous=endpoint,
+                                new=reopen_endpoint,
+                                reason="previous_endpoint_after_default_unavailable",
                                 success=True)
                         endpoint = reopen_endpoint
                         statistics.stream_reopen_successes += 1

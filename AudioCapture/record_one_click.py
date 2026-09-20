@@ -241,8 +241,15 @@ def _select_role_pair(role_defaults, requested_role: str, input_fn=input):
             print("\n[2] General system audio")
             print(f"Speaker: {console[0].name}")
             print(f"Microphone: {console[1].name}\n")
-            answer = input_fn("Choose [1]: ").strip()
-            selected = "console" if answer == "2" else "communications"
+            while True:
+                answer = input_fn("Choose [1]: ").strip()
+                if answer in ("", "1"):
+                    selected = "communications"
+                    break
+                if answer == "2":
+                    selected = "console"
+                    break
+                print("Please enter 1 or 2.")
             reason = "user selected split-role default"
     render, microphone = pairs[selected]
     if render is None or microphone is None:
