@@ -73,11 +73,9 @@ def test_success_requires_non_silent_frames_from_both_sources(tracks, expected):
 
 
 def test_tracks_are_classified_input_first_then_tap(tmp_path):
-    source_dir = tmp_path / "source"
     output_dir = tmp_path / "output"
-    source_dir.mkdir()
     output_dir.mkdir()
-    paths = [source_dir / name for name in ("mic-1.wav", "mic-2.wav", "system.wav")]
+    paths = [output_dir / name for name in ("microphone-1.wav", "microphone-2.wav", "system.wav")]
     for path in paths:
         _write_wav(path, b"\1\0")
     snapshot = {
@@ -86,8 +84,21 @@ def test_tracks_are_classified_input_first_then_tap(tmp_path):
         "track_captured_only_silence": [False, False, False],
         "frames_recorded": [1, 1, 1],
     }
-    tracks = capture._publish_tracks(output_dir, snapshot, input_stream_count=2)
+    tracks = capture._publish_tracks(snapshot, input_stream_count=2)
     assert [track["source"] for track in tracks] == ["microphone", "microphone", "system_tap"]
+
+
+@pytest.mark.parametrize(
+    ("stream_count", "names"),
+    [
+        (1, ["microphone.wav", "system.wav"]),
+        (2, ["microphone-1.wav", "microphone-2.wav", "system.wav"]),
+    ],
+)
+def test_track_configuration_is_deterministic(tmp_path, stream_count, names):
+    paths, labels = capture._track_configuration(tmp_path, stream_count)
+    assert [Path(path).name for path in paths] == names
+    assert labels == [Path(name).stem for name in names]
 
 
 def test_stale_output_is_rejected(tmp_path):
@@ -105,9 +116,6 @@ def test_non_macos_writes_failed_result(tmp_path, monkeypatch):
 
 
 def test_run_uses_public_session_not_nonexistent_record(tmp_path, monkeypatch):
-    paths = [tmp_path / "mic.wav", tmp_path / "system.wav"]
-    for path in paths:
-        _write_wav(path, b"\1\0")
     calls = []
 
     class TapDescription:
@@ -117,17 +125,24 @@ def test_run_uses_public_session_not_nonexistent_record(tmp_path, monkeypatch):
             return "global-tap"
 
     class Session:
-        def __init__(self, tap_descriptions, audio_device_uid, audio_device_stream_count, output_directory):
-            calls.append(("session", tap_descriptions, audio_device_uid, audio_device_stream_count))
+        def __init__(self, tap_descriptions, output_paths, *, track_labels, input_device_uid, input_stream_count):
+            calls.append(
+                ("session", tap_descriptions, output_paths, track_labels, input_device_uid, input_stream_count)
+            )
+            for path in output_paths:
+                _write_wav(Path(path), b"\1\0")
             self.stream_formats = ["mic-format", "tap-format"]
             self.track_captured_only_silence = [False, False]
             self.frames_recorded = [1, 1]
             self.duration_seconds = 1.0
-            self.track_labels = ["microphone", "global system audio"]
-            self.output_paths = [str(path) for path in paths]
+            self.track_labels = track_labels
+            self.output_paths = output_paths
 
         def start(self):
             calls.append("start")
+
+        def wait_for_capture_failure(self, duration):
+            calls.append(("wait", duration))
 
         def stop(self):
             calls.append("stop")
@@ -136,19 +151,33 @@ def test_run_uses_public_session_not_nonexistent_record(tmp_path, monkeypatch):
             calls.append("close")
 
     fake_catap = SimpleNamespace(
-        __version__="0.6.9",
+        __version__="0.6.0",
         TapDescription=TapDescription,
         MultitrackRecordingSession=Session,
         list_audio_devices=lambda: [
-            SimpleNamespace(uid="mic-uid", name="Built-in Microphone", input_stream_count=1, is_default_input=True)
+            SimpleNamespace(uid="mic-uid", name="Built-in Microphone", input_streams=[object()], is_default_input=True)
         ],
         record=lambda **_kwargs: pytest.fail("nonexistent catap.record API must not be used"),
     )
-    monkeypatch.setattr(capture.time, "sleep", lambda _duration: None)
-    result, exit_code = capture.run(1, tmp_path / "result", fake_catap)
+    output_dir = tmp_path / "result"
+    result, exit_code = capture.run(1, output_dir, fake_catap)
     assert exit_code == 0
     assert result["candidate"] == "catap"
-    assert calls == [("tap", []), ("session", ["global-tap"], "mic-uid", 1), "start", "stop", "close"]
+    assert calls == [
+        ("tap", []),
+        (
+            "session",
+            ["global-tap"],
+            [str(output_dir / "microphone.wav"), str(output_dir / "system.wav")],
+            ["microphone", "system"],
+            "mic-uid",
+            1,
+        ),
+        "start",
+        ("wait", 1),
+        "stop",
+        "close",
+    ]
 
 
 @pytest.mark.parametrize("duration", [0, -1, float("inf"), float("nan")])

@@ -6,11 +6,9 @@ from __future__ import annotations
 import argparse
 import importlib
 import importlib.metadata
-import inspect
 import json
 import math
 import platform
-import shutil
 import sys
 import time
 import wave
@@ -27,16 +25,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--duration", required=True, type=float, help="capture seconds")
     parser.add_argument("--output-dir", required=True, type=Path)
     return parser
-
-
-def _version_tuple(version: str) -> tuple[int, ...]:
-    result = []
-    for part in version.split("."):
-        digits = "".join(character for character in part if character.isdigit())
-        if not digits:
-            break
-        result.append(int(digits))
-    return tuple(result)
 
 
 def _prepare_output_dir(output_dir: Path) -> None:
@@ -95,51 +83,20 @@ def _public_value(value: Any) -> Any:
     return str(value)
 
 
-def _attribute(value: Any, *names: str) -> Any:
-    for name in names:
-        if hasattr(value, name):
-            return getattr(value, name)
-    return None
-
-
 def _default_input_device(devices: Any) -> Any:
-    if isinstance(devices, tuple) and len(devices) == 2:
-        devices = devices[0]
-    inputs = [device for device in devices if (_attribute(device, "input_stream_count") or 0) > 0]
-    defaults = [
-        device
-        for device in inputs
-        if _attribute(device, "is_default_input", "is_default_input_device") is True
-    ]
-    if defaults:
-        return defaults[0]
+    for device in devices:
+        if device.is_default_input is True and len(device.input_streams) > 0:
+            return device
     raise RuntimeError("catap did not expose a default input device")
 
 
-def _session_kwargs(session_type: Any, tap: Any, device: Any, output_dir: Path) -> dict[str, Any]:
-    """Map catap 0.6 public constructor names without importing implementation modules."""
-    parameters = inspect.signature(session_type).parameters
-    choices = {
-        "tap_descriptions": [tap],
-        "taps": [tap],
-        "audio_device_uid": _attribute(device, "uid", "device_uid"),
-        "input_device_uid": _attribute(device, "uid", "device_uid"),
-        "audio_device_stream_count": _attribute(device, "input_stream_count"),
-        "input_stream_count": _attribute(device, "input_stream_count"),
-        "output_directory": str(output_dir),
-        "output_dir": str(output_dir),
-    }
-    kwargs = {name: choices[name] for name in parameters if name in choices}
-    for alternatives in (
-        ("tap_descriptions", "taps"),
-        ("audio_device_uid", "input_device_uid"),
-        ("audio_device_stream_count", "input_stream_count"),
-    ):
-        if not any(name in kwargs for name in alternatives):
-            raise RuntimeError(f"unsupported catap session signature: missing {alternatives[0]}")
-    if next((value for name, value in kwargs.items() if name.endswith("uid")), None) is None:
-        raise RuntimeError("default input device UID is unavailable")
-    return kwargs
+def _track_configuration(output_dir: Path, input_stream_count: int) -> tuple[list[str], list[str]]:
+    if input_stream_count == 1:
+        microphone_names = ["microphone"]
+    else:
+        microphone_names = [f"microphone-{index}" for index in range(1, input_stream_count + 1)]
+    labels = [*microphone_names, "system"]
+    return ([str(output_dir / f"{label}.wav") for label in labels], labels)
 
 
 def _session_snapshot(session: Any) -> dict[str, Any]:
@@ -156,18 +113,14 @@ def _session_snapshot(session: Any) -> dict[str, Any]:
     }
 
 
-def _publish_tracks(output_dir: Path, snapshot: dict[str, Any], input_stream_count: int) -> list[dict[str, Any]]:
+def _publish_tracks(snapshot: dict[str, Any], input_stream_count: int) -> list[dict[str, Any]]:
     paths = snapshot["output_paths"] or []
     labels = snapshot["track_labels"] or []
     silence = snapshot["track_captured_only_silence"] or []
     frames = snapshot["frames_recorded"] or []
     tracks = []
     for index, original in enumerate(paths):
-        source = Path(original)
-        destination = output_dir / source.name
-        if source.resolve() != destination.resolve():
-            shutil.copy2(source, destination)
-        evidence = _wav_metadata(destination)
+        evidence = _wav_metadata(Path(original))
         evidence.update(
             {
                 "index": index,
@@ -225,8 +178,8 @@ def run(duration: float, output_dir: Path, catap_module: Any | None = None) -> t
             if sys.platform != "darwin":
                 raise RuntimeError("catap capture requires macOS 14.2 or newer")
             version = importlib.metadata.version("catap")
-            if not ((0, 6) <= _version_tuple(version) < (0, 7)):
-                raise RuntimeError(f"catap 0.6.x is required; found {version}")
+            if version != "0.6.0":
+                raise RuntimeError(f"catap 0.6.0 is required; found {version}")
             catap_module = importlib.import_module("catap")
         else:
             version = getattr(catap_module, "__version__", "0.6.test")
@@ -234,22 +187,26 @@ def run(duration: float, output_dir: Path, catap_module: Any | None = None) -> t
 
         tap = catap_module.TapDescription.stereo_global_tap_excluding([])
         device = _default_input_device(catap_module.list_audio_devices())
-        uid = _attribute(device, "uid", "device_uid")
-        input_stream_count = _attribute(device, "input_stream_count")
+        input_stream_count = len(device.input_streams)
+        output_paths, track_labels = _track_configuration(output_dir, input_stream_count)
         result["capture"].update(
-            {"input_device": _attribute(device, "name"), "input_device_uid": uid, "input_stream_count": input_stream_count}
+            {"input_device": device.name, "input_device_uid": device.uid, "input_stream_count": input_stream_count}
         )
         session = catap_module.MultitrackRecordingSession(
-            **_session_kwargs(catap_module.MultitrackRecordingSession, tap, device, output_dir)
+            [tap],
+            output_paths,
+            track_labels=track_labels,
+            input_device_uid=device.uid,
+            input_stream_count=input_stream_count,
         )
         result["status"] = "capturing"
         session.start()
-        time.sleep(duration)
+        session.wait_for_capture_failure(duration)
         session.stop()
         stopped = True
         result["stop_reason"] = "duration_elapsed"
         result["session"] = _session_snapshot(session)
-        result["tracks"] = _publish_tracks(output_dir, result["session"], input_stream_count)
+        result["tracks"] = _publish_tracks(result["session"], input_stream_count)
         if not _successful(result["tracks"]):
             raise RuntimeError("both microphone and system tap require framed, non-silent evidence")
         result["status"] = "success"
@@ -272,7 +229,7 @@ def run(duration: float, output_dir: Path, catap_module: Any | None = None) -> t
                     stopped = True
                 result["session"] = _session_snapshot(session)
                 result["tracks"] = _publish_tracks(
-                    output_dir, result["session"], result["capture"]["input_stream_count"]
+                    result["session"], result["capture"]["input_stream_count"]
                 )
             except Exception as error:
                 cleanup_error = error
