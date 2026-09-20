@@ -265,7 +265,7 @@ private struct ConfigurationEvidence: Encodable {
 }
 
 private final class AudioTrackWriter {
-    private let file: AVAudioFile
+    private var file: AVAudioFile?
     private let sourceName: String
     private let originalFormat: AudioStreamBasicDescription
     private let originalChannelLayout: Data?
@@ -288,6 +288,9 @@ private final class AudioTrackWriter {
 
     func append(_ sampleBuffer: CMSampleBuffer, description: CMAudioFormatDescription,
                 format: AudioStreamBasicDescription, channelLayout: Data?) throws -> Bool {
+        guard let file else {
+            throw SpikeError.message("\(sourceName) CAF writer is closed")
+        }
         guard Self.compatible(format, originalFormat), channelLayout == originalChannelLayout else {
             throw SpikeError.message("\(sourceName) audio format changed during capture")
         }
@@ -315,6 +318,12 @@ private final class AudioTrackWriter {
         return containsNonZeroByte
     }
 
+    func close() {
+        // AVAudioFile finalizes its container when released; clearing the strong
+        // reference here does that deterministically rather than at process exit.
+        file = nil
+    }
+
     private static func compatible(_ lhs: AudioStreamBasicDescription,
                                    _ rhs: AudioStreamBasicDescription) -> Bool {
         lhs.mSampleRate == rhs.mSampleRate &&
@@ -333,6 +342,7 @@ private final class AudioTrackRecorder {
     private let sourceName: String
     private var evidence: TrackEvidence
     private var writer: AudioTrackWriter?
+    private var finalized = false
 
     init(sourceName: String, url: URL) {
         self.sourceName = sourceName
@@ -342,6 +352,9 @@ private final class AudioTrackRecorder {
     func append(_ sampleBuffer: CMSampleBuffer, arrivalUptimeNanoseconds: UInt64) throws {
         lock.lock()
         defer { lock.unlock() }
+        guard !finalized else {
+            throw SpikeError.message("\(sourceName) track is already finalized")
+        }
         guard let description = CMSampleBufferGetFormatDescription(sampleBuffer),
               let pointer = CMAudioFormatDescriptionGetStreamBasicDescription(description) else {
             throw SpikeError.message("\(sourceName) sample did not contain an ASBD")
@@ -359,9 +372,14 @@ private final class AudioTrackRecorder {
         update(sampleBuffer, format: format, now: arrivalUptimeNanoseconds, nonZero: nonZero)
     }
 
-    func snapshot() -> TrackEvidence {
+    func finalize() -> TrackEvidence {
         lock.lock()
         defer { lock.unlock() }
+        if !finalized {
+            finalized = true
+            writer?.close()
+            writer = nil
+        }
         var result = evidence
         result.finalize()
         return result
@@ -448,8 +466,8 @@ private final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, 
         lifecycleLock.unlock()
     }
 
-    func snapshot() -> (TrackEvidence, TrackEvidence) {
-        (system.snapshot(), microphone.snapshot())
+    func finalize() -> (TrackEvidence, TrackEvidence) {
+        (system.finalize(), microphone.finalize())
     }
 }
 
@@ -479,7 +497,10 @@ private enum Main {
                     permissionAfter.screenPreflight ? "authorized" : nil,
                 microphoneAuthorizationBeforeCapture: permissionBefore.microphone,
                 microphoneAuthorizationAfterCapture: permissionAfter.microphone)
-            let (system, microphone) = outcome.session.snapshot()
+            // runCapture returns only after stopCapture completes. Stop acceptance
+            // again for setup failures, then close both tracks before JSON or exit.
+            outcome.session.stopAcceptingBuffers()
+            let (system, microphone) = outcome.session.finalize()
             let ptsOffset = offset(microphone.firstPTS?.seconds, system.firstPTS?.seconds)
             let hostOffset = offset(
                 microphone.firstCallbackUptimeNanoseconds.map { Double($0) / 1_000_000_000 },

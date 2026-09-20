@@ -54,4 +54,6 @@ the first available display and the system-default microphone, performs no
 mixing/resampling/gain processing, and writes each source in the exact linear
 PCM format described by its first `CMSampleBuffer`. Each callback copies into
 a bounded `AVAudioPCMBuffer` and writes its CAF through `AVAudioFile`; audio is
-never accumulated in memory.
+never accumulated in memory. After `SCStream.stopCapture()` completes, normal,
+Ctrl+C, and handled failure paths explicitly finalize any created CAF tracks
+before writing `result.json` or exiting.
