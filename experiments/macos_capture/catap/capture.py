@@ -109,6 +109,9 @@ def _session_snapshot(session: Any) -> dict[str, Any]:
             "duration_seconds",
             "track_labels",
             "output_paths",
+            "capture_failed",
+            "needs_cleanup",
+            "max_pending_buffers",
         )
     }
 
@@ -120,7 +123,20 @@ def _publish_tracks(snapshot: dict[str, Any], input_stream_count: int) -> list[d
     frames = snapshot["frames_recorded"] or []
     tracks = []
     for index, original in enumerate(paths):
-        evidence = _wav_metadata(Path(original))
+        path = Path(original)
+        evidence = {
+            "path": str(path.resolve()),
+            "exists": path.is_file(),
+            "sample_rate": None,
+            "channels": None,
+            "sample_width_bytes": None,
+            "frame_count": None,
+            "duration_seconds": None,
+            "peak_sample": None,
+            "silence_only": None,
+        }
+        if evidence["exists"]:
+            evidence.update(_wav_metadata(path))
         evidence.update(
             {
                 "index": index,
@@ -138,7 +154,7 @@ def _successful(tracks: list[dict[str, Any]]) -> bool:
     def has_evidence(source: str) -> bool:
         return any(
             track["source"] == source
-            and track["frame_count"] > 0
+            and (track["frame_count"] or 0) > 0
             and track["silence_only"] is False
             and track["session_silence_only"] is not True
             for track in tracks
@@ -159,6 +175,7 @@ def _base_result(duration: float, output_dir: Path) -> dict[str, Any]:
         "status": "not_started",
         "stop_reason": None,
         "failure": None,
+        "cleanup_failure": None,
         "timing": {"started_unix_seconds": None, "ended_unix_seconds": None, "elapsed_seconds": None},
     }
 
@@ -171,7 +188,6 @@ def run(duration: float, output_dir: Path, catap_module: Any | None = None) -> t
     started = time.monotonic()
     result["timing"]["started_unix_seconds"] = time.time()
     session = None
-    stopped = False
     exit_code = 1
     try:
         if catap_module is None:
@@ -203,7 +219,6 @@ def run(duration: float, output_dir: Path, catap_module: Any | None = None) -> t
         session.start()
         session.wait_for_capture_failure(duration)
         session.stop()
-        stopped = True
         result["stop_reason"] = "duration_elapsed"
         result["session"] = _session_snapshot(session)
         result["tracks"] = _publish_tracks(result["session"], input_stream_count)
@@ -222,25 +237,31 @@ def run(duration: float, output_dir: Path, catap_module: Any | None = None) -> t
         result["failure"] = {"type": type(exc).__name__, "message": str(exc)}
     finally:
         if session is not None:
-            cleanup_error = None
             try:
-                if not stopped:
-                    session.stop()
-                    stopped = True
                 result["session"] = _session_snapshot(session)
                 result["tracks"] = _publish_tracks(
                     result["session"], result["capture"]["input_stream_count"]
                 )
             except Exception as error:
-                cleanup_error = error
+                result["cleanup_failure"] = {"type": type(error).__name__, "message": str(error)}
             try:
                 session.close()
             except Exception as error:
-                cleanup_error = cleanup_error or error
-            if cleanup_error is not None:
+                if result["cleanup_failure"] is None:
+                    result["cleanup_failure"] = {"type": type(error).__name__, "message": str(error)}
+            else:
+                try:
+                    result["session"] = _session_snapshot(session)
+                    result["tracks"] = _publish_tracks(
+                        result["session"], result["capture"]["input_stream_count"]
+                    )
+                except Exception as error:
+                    if result["cleanup_failure"] is None:
+                        result["cleanup_failure"] = {"type": type(error).__name__, "message": str(error)}
+            if result["cleanup_failure"] is not None and result["failure"] is None:
                 result["status"] = "failed"
                 result["stop_reason"] = "cleanup_failure"
-                result["failure"] = {"type": type(cleanup_error).__name__, "message": str(cleanup_error)}
+                result["failure"] = dict(result["cleanup_failure"])
                 exit_code = 1
         result["timing"]["ended_unix_seconds"] = time.time()
         result["timing"]["elapsed_seconds"] = time.monotonic() - started

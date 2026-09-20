@@ -180,6 +180,72 @@ def test_run_uses_public_session_not_nonexistent_record(tmp_path, monkeypatch):
     ]
 
 
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_stop_failure_is_primary_and_missing_track_is_evidence(tmp_path, close_fails):
+    calls = []
+
+    class PrimaryCaptureError(RuntimeError):
+        pass
+
+    class TapDescription:
+        @staticmethod
+        def stereo_global_tap_excluding(_excluded):
+            return "global-tap"
+
+    class Session:
+        def __init__(self, _taps, output_paths, *, track_labels, input_device_uid, input_stream_count):
+            del input_device_uid, input_stream_count
+            self.output_paths = output_paths
+            self.track_labels = track_labels
+            self.stream_formats = ["mic-format", "tap-format"]
+            self.track_captured_only_silence = [False, None]
+            self.frames_recorded = [1, 0]
+            self.duration_seconds = 0.25
+            self.capture_failed = True
+            self.needs_cleanup = True
+            self.max_pending_buffers = 17
+            _write_wav(Path(output_paths[0]), b"\1\0")
+
+        def start(self):
+            calls.append("start")
+
+        def wait_for_capture_failure(self, _duration):
+            calls.append("wait")
+
+        def stop(self):
+            calls.append("stop")
+            raise PrimaryCaptureError("primary capture failure")
+
+        def close(self):
+            calls.append("close")
+            if close_fails:
+                raise RuntimeError("secondary cleanup failure")
+
+    fake_catap = SimpleNamespace(
+        __version__="0.6.0",
+        TapDescription=TapDescription,
+        MultitrackRecordingSession=Session,
+        list_audio_devices=lambda: [
+            SimpleNamespace(uid="mic-uid", name="Built-in Microphone", input_streams=[object()], is_default_input=True)
+        ],
+    )
+    result, exit_code = capture.run(1, tmp_path / "result", fake_catap)
+
+    assert exit_code == 1
+    assert calls == ["start", "wait", "stop", "close"]
+    assert result["failure"] == {"type": "PrimaryCaptureError", "message": "primary capture failure"}
+    assert result["cleanup_failure"] == (
+        {"type": "RuntimeError", "message": "secondary cleanup failure"} if close_fails else None
+    )
+    assert result["session"]["capture_failed"] is True
+    assert result["session"]["needs_cleanup"] is True
+    assert result["session"]["max_pending_buffers"] == 17
+    assert result["tracks"][0]["exists"] is True
+    assert result["tracks"][1]["exists"] is False
+    assert result["tracks"][1]["frame_count"] is None
+    assert result["tracks"][1]["silence_only"] is None
+
+
 @pytest.mark.parametrize("duration", [0, -1, float("inf"), float("nan")])
 def test_invalid_duration_is_rejected(tmp_path, duration):
     with pytest.raises(ValueError):
