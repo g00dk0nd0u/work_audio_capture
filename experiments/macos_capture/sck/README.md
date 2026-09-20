@@ -52,4 +52,6 @@ This is a research spike, not production recording code, and **has not yet
 been compiled or validated on real Mac hardware**. It always selects
 the first available display and the system-default microphone, performs no
 mixing/resampling/gain processing, and writes each source in the exact linear
-PCM format described by its first `CMSampleBuffer`.
+PCM format described by its first `CMSampleBuffer`. Each callback copies into
+a bounded `AVAudioPCMBuffer` and writes its CAF through `AVAudioFile`; audio is
+never accumulated in memory.

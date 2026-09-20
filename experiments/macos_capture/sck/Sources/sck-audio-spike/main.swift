@@ -1,5 +1,4 @@
 import AVFoundation
-import AudioToolbox
 import CoreMedia
 import CoreGraphics
 import Foundation
@@ -266,77 +265,55 @@ private struct ConfigurationEvidence: Encodable {
 }
 
 private final class AudioTrackWriter {
-    private var file: ExtAudioFileRef?
+    private let file: AVAudioFile
     private let sourceName: String
     private let originalFormat: AudioStreamBasicDescription
     private let originalChannelLayout: Data?
 
-    init(sourceName: String, url: URL, format: AudioStreamBasicDescription,
-         channelLayout: Data?) throws {
+    init(sourceName: String, url: URL, description: CMAudioFormatDescription,
+         format: AudioStreamBasicDescription, channelLayout: Data?) throws {
         guard format.mFormatID == kAudioFormatLinearPCM else {
             throw SpikeError.message("unexpected non-PCM ScreenCaptureKit audio format")
+        }
+        guard let audioFormat = AVAudioFormat(cmAudioFormatDescription: description) else {
+            throw SpikeError.message("could not derive AVAudioFormat for \(sourceName)")
         }
         self.sourceName = sourceName
         originalFormat = format
         originalChannelLayout = channelLayout
-        var description = format
-        var output: ExtAudioFileRef?
-        let createStatus = ExtAudioFileCreateWithURL(
-            url as CFURL, kAudioFileCAFType, &description, nil,
-            AudioFileFlags.eraseFile.rawValue, &output)
-        guard createStatus == noErr, let output else {
-            throw SpikeError.message("ExtAudioFileCreateWithURL failed: \(createStatus)")
-        }
-        file = output
-        let clientStatus = ExtAudioFileSetProperty(
-            output, kExtAudioFileProperty_ClientDataFormat,
-            UInt32(MemoryLayout<AudioStreamBasicDescription>.size), &description)
-        guard clientStatus == noErr else {
-            ExtAudioFileDispose(output)
-            file = nil
-            throw SpikeError.message("ExtAudioFile client format failed: \(clientStatus)")
-        }
+        file = try AVAudioFile(
+            forWriting: url, settings: audioFormat.settings,
+            commonFormat: audioFormat.commonFormat, interleaved: audioFormat.isInterleaved)
     }
 
-    func append(_ sampleBuffer: CMSampleBuffer, format: AudioStreamBasicDescription,
-                channelLayout: Data?) throws -> Bool {
-        guard let file else { throw SpikeError.message("audio file is not open") }
+    func append(_ sampleBuffer: CMSampleBuffer, description: CMAudioFormatDescription,
+                format: AudioStreamBasicDescription, channelLayout: Data?) throws -> Bool {
         guard Self.compatible(format, originalFormat), channelLayout == originalChannelLayout else {
             throw SpikeError.message("\(sourceName) audio format changed during capture")
         }
-        let buffers = AudioBufferList.allocate(maximumBuffers: max(1, Int(format.mChannelsPerFrame)))
-        defer { free(buffers.unsafeMutablePointer) }
-        var retainedBlockBuffer: CMBlockBuffer?
-        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-            sampleBuffer, bufferListSizeNeededOut: nil,
-            bufferListOut: buffers.unsafeMutablePointer,
-            bufferListSize: buffers.sizeInBytes,
-            blockBufferAllocator: kCFAllocatorDefault,
-            blockBufferMemoryAllocator: kCFAllocatorDefault,
-            flags: UInt32(kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment),
-            blockBufferOut: &retainedBlockBuffer)
+        guard let audioFormat = AVAudioFormat(cmAudioFormatDescription: description) else {
+            throw SpikeError.message("could not derive AVAudioFormat for \(sourceName)")
+        }
+        let frameCount = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: audioFormat, frameCapacity: frameCount) else {
+            throw SpikeError.message("could not allocate PCM buffer for \(sourceName)")
+        }
+        buffer.frameLength = frameCount
+        let status = CMSampleBufferCopyPCMDataIntoAudioBufferList(
+            sampleBuffer, at: 0, frameCount: Int32(frameCount),
+            into: buffer.mutableAudioBufferList)
         guard status == noErr else {
-            throw SpikeError.message("extracting audio buffers failed: \(status)")
+            throw SpikeError.message("copying \(sourceName) PCM data failed: \(status)")
         }
-        let containsNonZeroByte = buffers.contains { buffer in
-            guard let data = buffer.mData else { return false }
-            return UnsafeRawBufferPointer(start: data, count: Int(buffer.mDataByteSize)).contains { $0 != 0 }
+        let containsNonZeroByte = UnsafeMutableAudioBufferListPointer(
+            buffer.mutableAudioBufferList).contains { audioBuffer in
+                guard let data = audioBuffer.mData else { return false }
+                return UnsafeRawBufferPointer(
+                    start: data, count: Int(audioBuffer.mDataByteSize)).contains { $0 != 0 }
         }
-        let frames = UInt32(CMSampleBufferGetNumSamples(sampleBuffer))
-        let writeStatus = ExtAudioFileWrite(file, frames, buffers.unsafePointer)
-        guard writeStatus == noErr else {
-            throw SpikeError.message("writing CAF failed: \(writeStatus)")
-        }
-        _ = retainedBlockBuffer
+        try file.write(from: buffer)
         return containsNonZeroByte
     }
-
-    func close() {
-        if let file { ExtAudioFileDispose(file) }
-        file = nil
-    }
-
-    deinit { close() }
 
     private static func compatible(_ lhs: AudioStreamBasicDescription,
                                    _ rhs: AudioStreamBasicDescription) -> Bool {
@@ -351,76 +328,47 @@ private final class AudioTrackWriter {
     }
 }
 
-private final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+private final class AudioTrackRecorder {
     private let lock = NSLock()
-    private let outputDirectory: URL
-    private let finish: @Sendable (String, Error?) -> Void
-    private var system: TrackEvidence
-    private var microphone: TrackEvidence
-    private var systemWriter: AudioTrackWriter?
-    private var microphoneWriter: AudioTrackWriter?
-    private var terminating = false
+    private let sourceName: String
+    private var evidence: TrackEvidence
+    private var writer: AudioTrackWriter?
 
-    init(outputDirectory: URL, finish: @escaping @Sendable (String, Error?) -> Void) {
-        self.outputDirectory = outputDirectory
-        self.finish = finish
-        system = TrackEvidence(sourcePath: outputDirectory.appendingPathComponent("system.caf").path)
-        microphone = TrackEvidence(sourcePath: outputDirectory.appendingPathComponent("microphone.caf").path)
+    init(sourceName: String, url: URL) {
+        self.sourceName = sourceName
+        evidence = TrackEvidence(sourcePath: url.path)
     }
 
-    func stream(_ stream: SCStream, didStopWithError error: Error) {
-        fail(error)
-    }
-
-    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
-                of outputType: SCStreamOutputType) {
-        guard outputType == .audio || outputType == .microphone else { return }
-        guard sampleBuffer.isValid, CMSampleBufferDataIsReady(sampleBuffer) else { return }
+    func append(_ sampleBuffer: CMSampleBuffer, arrivalUptimeNanoseconds: UInt64) throws {
         lock.lock()
         defer { lock.unlock() }
-        guard !terminating else { return }
-        do {
-            guard let description = CMSampleBufferGetFormatDescription(sampleBuffer),
-                  let pointer = CMAudioFormatDescriptionGetStreamBasicDescription(description) else {
-                throw SpikeError.message("audio sample did not contain an ASBD")
-            }
-            let format = pointer.pointee
-            let channelLayout = channelLayoutData(description)
-            let now = DispatchTime.now().uptimeNanoseconds
-            if outputType == .audio {
-                if systemWriter == nil {
-                    systemWriter = try AudioTrackWriter(
-                        sourceName: "system", url: URL(fileURLWithPath: system.sourcePath),
-                        format: format, channelLayout: channelLayout)
-                }
-                let nonZero = try systemWriter?.append(
-                    sampleBuffer, format: format, channelLayout: channelLayout) ?? false
-                update(&system, sampleBuffer: sampleBuffer, format: format, now: now, nonZero: nonZero)
-            } else {
-                if microphoneWriter == nil {
-                    microphoneWriter = try AudioTrackWriter(
-                        sourceName: "microphone", url: URL(fileURLWithPath: microphone.sourcePath),
-                        format: format, channelLayout: channelLayout)
-                }
-                let nonZero = try microphoneWriter?.append(
-                    sampleBuffer, format: format, channelLayout: channelLayout) ?? false
-                update(&microphone, sampleBuffer: sampleBuffer, format: format, now: now, nonZero: nonZero)
-            }
-        } catch {
-            terminating = true
-            DispatchQueue.global().async { self.finish("failure", error) }
+        guard let description = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let pointer = CMAudioFormatDescriptionGetStreamBasicDescription(description) else {
+            throw SpikeError.message("\(sourceName) sample did not contain an ASBD")
         }
+        let format = pointer.pointee
+        let channelLayout = Self.channelLayoutData(description)
+        if writer == nil {
+            writer = try AudioTrackWriter(
+                sourceName: sourceName, url: URL(fileURLWithPath: evidence.sourcePath),
+                description: description, format: format, channelLayout: channelLayout)
+        }
+        let nonZero = try writer?.append(
+            sampleBuffer, description: description, format: format,
+            channelLayout: channelLayout) ?? false
+        update(sampleBuffer, format: format, now: arrivalUptimeNanoseconds, nonZero: nonZero)
     }
 
-    private func channelLayoutData(_ description: CMAudioFormatDescription) -> Data? {
-        var size = 0
-        guard let layout = CMAudioFormatDescriptionGetChannelLayout(description, sizeOut: &size),
-              size > 0 else { return nil }
-        return Data(bytes: layout, count: size)
+    func snapshot() -> TrackEvidence {
+        lock.lock()
+        defer { lock.unlock() }
+        var result = evidence
+        result.finalize()
+        return result
     }
 
-    private func update(_ evidence: inout TrackEvidence, sampleBuffer: CMSampleBuffer,
-                        format: AudioStreamBasicDescription, now: UInt64, nonZero: Bool) {
+    private func update(_ sampleBuffer: CMSampleBuffer, format: AudioStreamBasicDescription,
+                        now: UInt64, nonZero: Bool) {
         if evidence.format == nil { evidence.format = FormatEvidence(format) }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if evidence.firstPTS == nil {
@@ -435,35 +383,73 @@ private final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, 
         evidence.lastCallbackUptimeNanoseconds = now
         evidence.frameCount += Int64(CMSampleBufferGetNumSamples(sampleBuffer))
         evidence.callbackCount += 1
-        if nonZero {
-            evidence.buffersWithNonZeroBytes += 1
-        } else {
-            evidence.buffersWithOnlyZeroBytes += 1
+        if nonZero { evidence.buffersWithNonZeroBytes += 1 }
+        else { evidence.buffersWithOnlyZeroBytes += 1 }
+    }
+
+    private static func channelLayoutData(_ description: CMAudioFormatDescription) -> Data? {
+        var size = 0
+        guard let layout = CMAudioFormatDescriptionGetChannelLayout(description, sizeOut: &size),
+              size > 0 else { return nil }
+        return Data(bytes: layout, count: size)
+    }
+}
+
+private final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+    private let lifecycleLock = NSLock()
+    private let finish: @Sendable (String, Error?) -> Void
+    private let system: AudioTrackRecorder
+    private let microphone: AudioTrackRecorder
+    private var terminating = false
+
+    init(outputDirectory: URL, finish: @escaping @Sendable (String, Error?) -> Void) {
+        self.finish = finish
+        system = AudioTrackRecorder(
+            sourceName: "system", url: outputDirectory.appendingPathComponent("system.caf"))
+        microphone = AudioTrackRecorder(
+            sourceName: "microphone", url: outputDirectory.appendingPathComponent("microphone.caf"))
+    }
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        fail(error)
+    }
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
+                of outputType: SCStreamOutputType) {
+        guard outputType == .audio || outputType == .microphone else { return }
+        let arrivalUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+        guard sampleBuffer.isValid, CMSampleBufferDataIsReady(sampleBuffer) else { return }
+        lifecycleLock.lock()
+        let acceptingBuffers = !terminating
+        lifecycleLock.unlock()
+        guard acceptingBuffers else { return }
+        do {
+            if outputType == .audio {
+                try system.append(sampleBuffer, arrivalUptimeNanoseconds: arrivalUptimeNanoseconds)
+            } else {
+                try microphone.append(sampleBuffer, arrivalUptimeNanoseconds: arrivalUptimeNanoseconds)
+            }
+        } catch {
+            fail(error)
         }
     }
 
     private func fail(_ error: Error) {
-        lock.lock()
+        lifecycleLock.lock()
         let shouldFinish = !terminating
         terminating = true
-        lock.unlock()
+        lifecycleLock.unlock()
         if shouldFinish { finish("streamFailure", error) }
     }
 
     func stopAcceptingBuffers() {
-        lock.lock()
+        lifecycleLock.lock()
         terminating = true
-        lock.unlock()
+        lifecycleLock.unlock()
     }
 
     func snapshot() -> (TrackEvidence, TrackEvidence) {
-        lock.lock()
-        defer { lock.unlock() }
-        systemWriter?.close()
-        microphoneWriter?.close()
-        system.finalize()
-        microphone.finalize()
-        return (system, microphone)
+        (system.snapshot(), microphone.snapshot())
     }
 }
 
