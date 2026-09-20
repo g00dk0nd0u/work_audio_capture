@@ -1321,6 +1321,30 @@ def test_auto_split_roles_enter_selects_communications(capsys):
     assert "Microphone: General microphone" in output
 
 
+@pytest.mark.parametrize(("answers", "expected_role"), [
+    (["invalid", "2"], "console"),
+    (["3", ""], "communications"),
+    (["1"], "communications"),
+    (["2"], "console"),
+])
+def test_auto_split_roles_accepts_only_explicit_choices(
+        answers, expected_role, capsys):
+    prompts = []
+    responses = iter(answers)
+
+    def choose(prompt):
+        prompts.append(prompt)
+        return next(responses)
+
+    selected = record_one_click._select_role_pair(
+        _role_defaults(), "auto", choose)
+
+    assert selected[2] == expected_role
+    assert len(prompts) == len(answers)
+    output = capsys.readouterr().out
+    assert output.count("Please enter 1 or 2.") == len(answers) - 1
+
+
 def test_auto_prompt_shows_capture_difference_when_render_matches(capsys):
     defaults = _role_defaults()
     defaults["console_render"] = defaults["communications_render"]

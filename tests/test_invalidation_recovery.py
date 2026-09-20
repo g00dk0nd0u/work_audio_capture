@@ -523,6 +523,100 @@ def test_default_resolution_failure_is_distinct_from_bounded_open_retry(
                for record in reopen_events)
 
 
+@pytest.mark.parametrize("reopen_succeeds", [True, False])
+def test_unavailable_role_default_retries_previous_endpoint_distinctly(
+        tmp_path, monkeypatch, caplog, reopen_succeeds):
+    monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS",
+                        (0, 0))
+    endpoint = Endpoint("A", "old", 1, 10, "microphone")
+    recorder = None
+
+    class Resumed(PacketStream):
+        def read_packet(self):
+            try:
+                return super().read_packet()
+            except StopIteration:
+                recorder.stop_event.set()
+                return None
+
+    class MissingDefaultBackend(ReopenBackend):
+        def resolve_default(self, _kind, _role):
+            return None
+
+    reopen_actions = ([RuntimeError("temporarily unavailable"),
+                       Resumed([packet(4, 0, 0)])]
+                      if reopen_succeeds else
+                      [RuntimeError("unavailable") for _ in range(2)])
+    backend = MissingDefaultBackend([
+        PacketStream([invalidated()]), *reopen_actions])
+    recorder = ConcurrentRecorder(
+        backend, mono_output=True, chunk_duration_seconds=1,
+        session_qpc_clock=lambda: 0, default_device_role="communications")
+    recorder.session_qpc_origin_100ns = 0
+
+    recorder._capture(endpoint, tmp_path / "mic.wav")
+
+    stats = recorder.stream_statistics[endpoint.kind]
+    expected_attempts = 2
+    assert stats.stream_reopen_attempts == expected_attempts
+    assert stats.endpoint_switch_count == 0
+    assert not any(record.getMessage() == "endpoint_switch"
+                   for record in caplog.records)
+    resolutions = [record for record in caplog.records
+                   if record.getMessage() == "endpoint_re_resolution"]
+    assert len(resolutions) == expected_attempts
+    assert all(record.switch_success is False for record in resolutions)
+    assert all(record.switch_reason == "current_role_default_unavailable"
+               for record in resolutions)
+    assert all(record.resolver_error is None for record in resolutions)
+    reopens = [record for record in caplog.records
+               if record.getMessage() == "endpoint_reopen"]
+    assert [record.switch_success for record in reopens] == (
+        [False, True] if reopen_succeeds else [False, False])
+    assert all(record.switch_reason ==
+               "previous_endpoint_after_default_unavailable"
+               for record in reopens)
+
+
+def test_unavailable_role_default_preserves_incompatible_format_reason(
+        tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr("audio_capture.recorder.STREAM_REOPEN_DELAYS_SECONDS", (0,))
+    endpoint = Endpoint("A", "old", 1, 10, "microphone")
+
+    class MissingDefaultBackend(ReopenBackend):
+        def resolve_default(self, _kind, _role):
+            return None
+
+    backend = MissingDefaultBackend([
+        PacketStream([packet(7, 0, 0), invalidated()]),
+        PacketStream([], rate=20),
+    ])
+    recorder = ConcurrentRecorder(
+        backend, mono_output=True, chunk_duration_seconds=1,
+        session_qpc_clock=lambda: 0, default_device_role="communications")
+    recorder.session_qpc_origin_100ns = 0
+
+    recorder._capture(endpoint, tmp_path / "mic.wav")
+
+    stats = recorder.stream_statistics[endpoint.kind]
+    assert stats.endpoint_unavailable
+    assert stats.stream_reopen_attempts == 1
+    assert stats.stream_reopen_successes == 0
+    assert stats.stream_reopen_failures == 1
+    assert stats.endpoint_switch_count == 0
+    assert wav_frames(tmp_path / "mic.wav") == (1, b"\x07\x00")
+    resolution = next(record for record in caplog.records
+                      if record.getMessage() == "endpoint_re_resolution")
+    assert resolution.switch_success is False
+    assert resolution.switch_reason == "current_role_default_unavailable"
+    reopen = next(record for record in caplog.records
+                  if record.getMessage() == "endpoint_reopen")
+    assert reopen.switch_success is False
+    assert reopen.switch_reason == "incompatible_reopen_format"
+    assert not any(record.getMessage() == "endpoint_switch"
+                   for record in caplog.records)
+
+
 def test_no_packet_gap_reanchors_resumed_audio_after_closed_slot(tmp_path):
     output = tmp_path / "render.wav"
     recorder = None
