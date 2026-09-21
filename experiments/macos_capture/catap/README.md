@@ -29,17 +29,19 @@ python3 capture.py --duration 30 --output-dir ./capture-30s
 
 The directory contains the WAV tracks written directly by catap and a
 `result.json`. A successful process exit requires framed, non-silent evidence
-from both a microphone track and the system track; startup alone is not treated
-as proof of capture. Pressing Ctrl+C requests an early stop and records an
-`interrupted` result rather than success.
+from both a microphone track and the system track **plus matching sample rates
+and frame counts across those tracks**. Startup alone is not treated as proof
+of capture. Pressing Ctrl+C requests an early stop and records an `interrupted`
+result rather than success.
 
 This controlled research spike pins catap 0.6.0 and uses only its public `TapDescription`,
 `MultitrackRecordingSession`, and `list_audio_devices` APIs. It builds one
 `stereo_global_tap_excluding([])` tap and places the default microphone input
 streams before that tap in the same session/aggregate. The session's public
 track paths, labels, formats, frame counts, durations, and silence flags are
-recorded when available; unavailable values remain `null`. No private catap
-module or symbol is inspected.
+recorded when available; unavailable values remain `null`. The selected default
+input and output device stream formats are also recorded so a source-format
+mismatch is visible in evidence. No private catap module or symbol is inspected.
 
 The output directory must not already contain `result.json` or WAV files. This
 prevents an earlier run from being counted as evidence for the current run.
