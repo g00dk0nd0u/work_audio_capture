@@ -77,6 +77,14 @@ hard-coded compensation; a permission-prompt run differed substantially. A
 90-second system-silence/resume run completed without a stream/delegate error,
 and callbacks continued for both sources.
 
+Bluetooth/HFP was also exercised on the same Mac. With Bluetooth playback and
+microphone capture active, the microphone arrived as 16 kHz mono while system
+audio remained 48 kHz stereo, and a full 60-second run completed with both
+sources continuing. An output-device switch Mac -> Bluetooth -> Mac also
+completed without observed source dropout in that run. These are observations
+from this hardware and do not establish a universal macOS guarantee or prove
+acoustic routing beyond the recorded evidence.
+
 After adding capture-stop freshness validation, a release build on a real Mac
 running macOS 15.5 (Build 24F74) passed a normal 30-second run. The source-end
 separation was 0.003301875 seconds; the system and microphone trailing gaps to
@@ -93,14 +101,15 @@ were 0.016845818 and 57.409217648 seconds. Consequently,
 `evidencePassed`, and `succeeded` were all `false`. These observations do not
 establish the exact physical disconnect timestamp.
 
-Candidate A has not yet met the full acceptance matrix. Broader Bluetooth/HFP
-behavior beyond the disconnect observation above, device changes,
-permission-denied behavior, a 30--60 minute run, and abnormal termination still
-require real-hardware validation.
+Candidate A has not yet met the full acceptance matrix. Permission-denied
+behavior, a 30--60 minute run, abnormal termination, and additional hardware
+coverage still require real-hardware validation.
 
 The spike always selects the first available display and the system-default
-microphone. Source sample rate, channels, and PCM characteristics are derived
-from the incoming buffer, and raw/lossless PCM evidence is preserved.
+microphone at capture start. Source sample rate, channels, and PCM
+characteristics are derived from the incoming buffer, and raw/lossless PCM
+evidence is preserved. A default microphone change during an active stream is
+not assumed to migrate the already captured microphone source automatically.
 `AVAudioFile` may adapt interleaving for the CAF file representation, so the
 file is not promised to retain the source buffer's memory/interleaving layout.
 Our code applies no gain normalization, AGC, mixing, resampling, or time
