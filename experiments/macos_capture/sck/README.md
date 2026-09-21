@@ -35,9 +35,20 @@ The CAF files are created only after that source delivers its first audio
 sample, so a missing file is itself evidence that no buffer was received.
 The output directory must be new or empty; the CLI rejects a non-empty one so
 old CAF files cannot be mistaken for current-run evidence.
-`result.json` reports both media-PTS and callback-host-clock relative start
-offsets. Positive `microphoneMinusSystem*` values mean the microphone was
-observed later. `captureLifecycleCompleted` only means the stream stopped in a
+`result.json` keeps the original media-PTS and callback-host-clock relative
+start offsets and also reports `postCaptureAlignment` and `timingDiagnostics`.
+Media PTS is the primary basis for placing both raw tracks on a future common
+post-capture timeline; callback uptime is only a cross-check. Positive
+`microphoneMinusSystem*` values mean the microphone was observed later.
+Leading-silence fields are placement recommendations only: neither CAF is
+modified. Native-frame recommendations use each source's measured sample rate
+and round to the nearest frame (Swift's default rule: halfway values away from
+zero). Missing or invalid inputs produce JSON `null`. The diagnostics compare
+PTS spans with callback-host spans and track the change in the relative
+PTS-versus-host residual; they are timing/drift diagnostics, not by themselves
+proof of acoustic synchronization error or a correction policy.
+Because these objects only add evidence fields, `schemaVersion` remains `1`.
+`captureLifecycleCompleted` only means the stream stopped in a
 controlled way. `evidencePassed` and its compatibility alias `succeeded` are
 true only when both sources produced current-run frames and both contained
 non-zero audio bytes. Per-source `signalPresent` and `silenceOnly` are `null`
@@ -48,12 +59,27 @@ after capture; an unresolvable screen authorization is `null`, not guessed.
 
 ## Limitations
 
-This is a research spike, not production recording code, and **has not yet
-been compiled or validated on real Mac hardware**. It always selects
-the first available display and the system-default microphone, performs no
-mixing/resampling/gain processing, and writes each source in the exact linear
-PCM format described by its first `CMSampleBuffer`. Each callback copies into
-a bounded `AVAudioPCMBuffer` and writes its CAF through `AVAudioFile`; audio is
-never accumulated in memory. After `SCStream.stopCapture()` completes, normal,
-Ctrl+C, and handled failure paths explicitly finalize any created CAF tracks
-before writing `result.json` or exiting.
+This is a research spike, not production recording code. On macOS 15.5, a
+real-Mac release build and simultaneous capture from built-in output and the
+built-in microphone succeeded, with non-silent evidence from both sources.
+Repeated authorized runs measured an approximately 0.697--0.699 second
+microphone-minus-system PTS start offset. That is machine/run evidence, never a
+hard-coded compensation; a permission-prompt run differed substantially. A
+90-second system-silence/resume run completed without a stream/delegate error,
+and callbacks continued for both sources.
+
+Candidate A has not yet met the full acceptance matrix. Bluetooth/HFP, device
+changes, permission-denied behavior, a 30--60 minute run, and abnormal
+termination still require real-hardware validation.
+
+The spike always selects the first available display and the system-default
+microphone. Source sample rate, channels, and PCM characteristics are derived
+from the incoming buffer, and raw/lossless PCM evidence is preserved.
+`AVAudioFile` may adapt interleaving for the CAF file representation, so the
+file is not promised to retain the source buffer's memory/interleaving layout.
+Our code applies no gain normalization, AGC, mixing, resampling, or time
+stretching. Each callback copies into a bounded `AVAudioPCMBuffer` and writes
+its CAF through `AVAudioFile`; audio is never accumulated in memory. After
+`SCStream.stopCapture()` completes, normal, Ctrl+C, and handled failure paths
+explicitly finalize any created CAF tracks before writing `result.json` or
+exiting.
