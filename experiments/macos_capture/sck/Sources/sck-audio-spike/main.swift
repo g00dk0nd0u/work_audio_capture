@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreMedia
 import CoreGraphics
+import Darwin
 import Foundation
 import ScreenCaptureKit
 
@@ -54,6 +55,12 @@ private enum SpikeError: Error, CustomStringConvertible {
         }
     }
 }
+
+private typealias CaptureOutcome = (
+    session: CaptureSession,
+    reason: String,
+    error: Error?
+)
 
 private struct TimeEvidence: Encodable {
     let value: Int64
@@ -275,9 +282,7 @@ private final class AudioTrackWriter {
         guard format.mFormatID == kAudioFormatLinearPCM else {
             throw SpikeError.message("unexpected non-PCM ScreenCaptureKit audio format")
         }
-        guard let audioFormat = AVAudioFormat(cmAudioFormatDescription: description) else {
-            throw SpikeError.message("could not derive AVAudioFormat for \(sourceName)")
-        }
+        let audioFormat = AVAudioFormat(cmAudioFormatDescription: description)
         self.sourceName = sourceName
         originalFormat = format
         originalChannelLayout = channelLayout
@@ -294,9 +299,7 @@ private final class AudioTrackWriter {
         guard Self.compatible(format, originalFormat), channelLayout == originalChannelLayout else {
             throw SpikeError.message("\(sourceName) audio format changed during capture")
         }
-        guard let audioFormat = AVAudioFormat(cmAudioFormatDescription: description) else {
-            throw SpikeError.message("could not derive AVAudioFormat for \(sourceName)")
-        }
+        let audioFormat = AVAudioFormat(cmAudioFormatDescription: description)
         let frameCount = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
         guard let buffer = AVAudioPCMBuffer(pcmFormat: audioFormat, frameCapacity: frameCount) else {
             throw SpikeError.message("could not allocate PCM buffer for \(sourceName)")
@@ -481,12 +484,12 @@ private enum Main {
             let formatter = ISO8601DateFormatter()
             let permissionBefore = currentPermissionState()
 
-            let outcome: (session: CaptureSession, reason: String, error: Error?)
+            let outcome: CaptureOutcome
             do {
                 outcome = try await runCapture(options: options)
             } catch {
                 let session = CaptureSession(outputDirectory: options.outputDirectory) { _, _ in }
-                outcome = (session, "setupFailure", error)
+                outcome = (session: session, reason: "setupFailure", error: error)
             }
             let finished = Date()
             let permissionAfter = currentPermissionState()
@@ -549,7 +552,7 @@ private enum Main {
     }
 
     private static func runCapture(options: Options) async throws
-        -> (session: CaptureSession, reason: String, error: Error?) {
+        -> CaptureOutcome {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         guard let display = content.displays.first else { throw SpikeError.message("no display is available") }
         let filter = SCContentFilter(display: display, excludingWindows: [])
@@ -630,14 +633,14 @@ private enum Main {
 
 private final class CompletionGate: @unchecked Sendable {
     private let lock = NSLock()
-    private var continuation: CheckedContinuation<(CaptureSession, String, Error?), Never>?
+    private var continuation: CheckedContinuation<CaptureOutcome, Never>?
     var session: CaptureSession?
     var stream: SCStream?
     private var timer: DispatchSourceTimer?
-    private var signal: DispatchSourceSignal?
+    private var signalSource: DispatchSourceSignal?
     private var completed = false
 
-    init(continuation: CheckedContinuation<(CaptureSession, String, Error?), Never>) {
+    init(continuation: CheckedContinuation<CaptureOutcome, Never>) {
         self.continuation = continuation
     }
 
@@ -650,10 +653,10 @@ private final class CompletionGate: @unchecked Sendable {
     }
 
     func installSignalHandler() {
-        signal(SIGINT, SIG_IGN)
+        Darwin.signal(SIGINT, SIG_IGN)
         let source = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
         source.setEventHandler { [weak self] in self?.complete(session: nil, reason: "interrupt", error: nil) }
-        signal = source
+        signalSource = source
         source.resume()
     }
 
@@ -664,19 +667,29 @@ private final class CompletionGate: @unchecked Sendable {
         let session = suppliedSession ?? self.session
         let stream = self.stream
         timer?.cancel()
-        signal?.cancel()
+        signalSource?.cancel()
         lock.unlock()
         guard let session else { return }
         session.stopAcceptingBuffers()
         Task {
             var finalError = error
             do { try await stream?.stopCapture() } catch { if finalError == nil { finalError = error } }
-            lock.lock()
-            let continuation = self.continuation
-            self.continuation = nil
-            lock.unlock()
-            continuation?.resume(returning: (session, reason, finalError))
+            let continuation = self.takeContinuation()
+            continuation?.resume(returning: (
+                session: session,
+                reason: reason,
+                error: finalError
+            ))
         }
+    }
+
+    private func takeContinuation() -> CheckedContinuation<CaptureOutcome, Never>? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let result = continuation
+        continuation = nil
+        return result
     }
 }
 
