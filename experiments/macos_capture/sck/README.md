@@ -51,7 +51,15 @@ Because these objects only add evidence fields, `schemaVersion` remains `1`.
 `captureLifecycleCompleted` only means the stream stopped in a
 controlled way. `evidencePassed` and its compatibility alias `succeeded` are
 true only when both sources produced current-run frames and both contained
-non-zero audio bytes. Per-source `signalPresent` and `silenceOnly` are `null`
+non-zero audio bytes, their callback ends are within 1.0 second of each other,
+and both callback ends are within 1.0 second of the capture-stop boundary where
+the session stopped accepting buffers. `captureCoverage` reports both the
+source-to-source end separation and each source's freshness at that boundary;
+missing or unexpectedly ordered uptime values produce explicit JSON `null`
+gaps and fail the corresponding coverage check. This conservative 1.0-second
+tolerance is only a source-liveness threshold, not an audio synchronization,
+drift-correction, resampling, or time-stretch threshold. Per-source
+`signalPresent` and `silenceOnly` are `null`
 when no buffers arrived; an entirely zero-valued source is explicitly marked
 as silent and does not pass evidence validation. Permission fields report the
 screen preflight and microphone authorization states observable before and

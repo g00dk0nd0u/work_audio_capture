@@ -59,7 +59,8 @@ private enum SpikeError: Error, CustomStringConvertible {
 private typealias CaptureOutcome = (
     session: CaptureSession,
     reason: String,
-    error: Error?
+    error: Error?,
+    captureStopUptimeNanoseconds: UInt64?
 )
 
 private struct TimeEvidence: Encodable {
@@ -304,6 +305,55 @@ private struct TimingDiagnostics: Encodable {
     let relative: RelativeTimingDiagnostics
 }
 
+private struct CaptureCoverageEvidence: Encodable {
+    let captureStopUptimeNanoseconds: UInt64?
+    let sourceEndSeparationSeconds: Double?
+    let systemTrailingGapToPeerSeconds: Double?
+    let microphoneTrailingGapToPeerSeconds: Double?
+    let systemTrailingGapToCaptureStopSeconds: Double?
+    let microphoneTrailingGapToCaptureStopSeconds: Double?
+    let sourceEndFreshnessToleranceSeconds: Double
+    let bothSourcesReachedCommonEnd: Bool
+    let bothSourcesFreshAtCaptureStop: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case captureStopUptimeNanoseconds, sourceEndSeparationSeconds
+        case systemTrailingGapToPeerSeconds, microphoneTrailingGapToPeerSeconds
+        case systemTrailingGapToCaptureStopSeconds, microphoneTrailingGapToCaptureStopSeconds
+        case sourceEndFreshnessToleranceSeconds, bothSourcesReachedCommonEnd
+        case bothSourcesFreshAtCaptureStop
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        if let captureStopUptimeNanoseconds {
+            try values.encode(captureStopUptimeNanoseconds, forKey: .captureStopUptimeNanoseconds)
+        } else { try values.encodeNil(forKey: .captureStopUptimeNanoseconds) }
+        if let sourceEndSeparationSeconds {
+            try values.encode(sourceEndSeparationSeconds, forKey: .sourceEndSeparationSeconds)
+        } else { try values.encodeNil(forKey: .sourceEndSeparationSeconds) }
+        if let systemTrailingGapToPeerSeconds {
+            try values.encode(systemTrailingGapToPeerSeconds, forKey: .systemTrailingGapToPeerSeconds)
+        } else { try values.encodeNil(forKey: .systemTrailingGapToPeerSeconds) }
+        if let microphoneTrailingGapToPeerSeconds {
+            try values.encode(microphoneTrailingGapToPeerSeconds,
+                              forKey: .microphoneTrailingGapToPeerSeconds)
+        } else { try values.encodeNil(forKey: .microphoneTrailingGapToPeerSeconds) }
+        if let systemTrailingGapToCaptureStopSeconds {
+            try values.encode(systemTrailingGapToCaptureStopSeconds,
+                              forKey: .systemTrailingGapToCaptureStopSeconds)
+        } else { try values.encodeNil(forKey: .systemTrailingGapToCaptureStopSeconds) }
+        if let microphoneTrailingGapToCaptureStopSeconds {
+            try values.encode(microphoneTrailingGapToCaptureStopSeconds,
+                              forKey: .microphoneTrailingGapToCaptureStopSeconds)
+        } else { try values.encodeNil(forKey: .microphoneTrailingGapToCaptureStopSeconds) }
+        try values.encode(sourceEndFreshnessToleranceSeconds,
+                          forKey: .sourceEndFreshnessToleranceSeconds)
+        try values.encode(bothSourcesReachedCommonEnd, forKey: .bothSourcesReachedCommonEnd)
+        try values.encode(bothSourcesFreshAtCaptureStop, forKey: .bothSourcesFreshAtCaptureStop)
+    }
+}
+
 private struct ResultEvidence: Encodable {
     let schemaVersion = 1
     let candidate = "sck"
@@ -324,13 +374,14 @@ private struct ResultEvidence: Encodable {
     let relativeStart: RelativeStartEvidence
     let postCaptureAlignment: PostCaptureAlignmentEvidence
     let timingDiagnostics: TimingDiagnostics
+    let captureCoverage: CaptureCoverageEvidence
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, candidate, macOSVersion, startedAt, finishedAt
         case requestedDurationSeconds, observedWallClockDurationSeconds, stopReason
         case captureLifecycleCompleted, evidencePassed, succeeded, streamOrDelegateError
         case permissions, configuration, system, microphone, relativeStart
-        case postCaptureAlignment, timingDiagnostics
+        case postCaptureAlignment, timingDiagnostics, captureCoverage
     }
 
     func encode(to encoder: Encoder) throws {
@@ -356,6 +407,7 @@ private struct ResultEvidence: Encodable {
         try values.encode(relativeStart, forKey: .relativeStart)
         try values.encode(postCaptureAlignment, forKey: .postCaptureAlignment)
         try values.encode(timingDiagnostics, forKey: .timingDiagnostics)
+        try values.encode(captureCoverage, forKey: .captureCoverage)
     }
 }
 
@@ -619,7 +671,8 @@ private enum Main {
                 outcome = try await runCapture(options: options)
             } catch {
                 let session = CaptureSession(outputDirectory: options.outputDirectory) { _, _ in }
-                outcome = (session: session, reason: "setupFailure", error: error)
+                outcome = (session: session, reason: "setupFailure", error: error,
+                           captureStopUptimeNanoseconds: nil)
             }
             let finished = Date()
             let permissionAfter = currentPermissionState()
@@ -642,6 +695,10 @@ private enum Main {
                 system: system, microphone: microphone,
                 ptsOffset: ptsOffset, callbackOffset: hostOffset)
             let timingDiagnostics = timingDiagnostics(system: system, microphone: microphone)
+            let captureCoverage = captureCoverage(
+                systemLastCallbackUptimeNanoseconds: system.lastCallbackUptimeNanoseconds,
+                microphoneLastCallbackUptimeNanoseconds: microphone.lastCallbackUptimeNanoseconds,
+                captureStopUptimeNanoseconds: outcome.captureStopUptimeNanoseconds)
             let lifecycleCompleted = outcome.error == nil &&
                 (outcome.reason == "duration" || outcome.reason == "interrupt")
             let systemHasCurrentData = system.callbackCount > 0 && system.frameCount > 0 &&
@@ -649,7 +706,9 @@ private enum Main {
             let microphoneHasCurrentData = microphone.callbackCount > 0 && microphone.frameCount > 0 &&
                 FileManager.default.fileExists(atPath: microphone.sourcePath)
             let evidencePassed = lifecycleCompleted && systemHasCurrentData && microphoneHasCurrentData &&
-                system.signalPresent == true && microphone.signalPresent == true
+                system.signalPresent == true && microphone.signalPresent == true &&
+                captureCoverage.bothSourcesReachedCommonEnd &&
+                captureCoverage.bothSourcesFreshAtCaptureStop
             let result = ResultEvidence(
                 macOSVersion: ProcessInfo.processInfo.operatingSystemVersionString,
                 startedAt: formatter.string(from: started),
@@ -669,7 +728,8 @@ private enum Main {
                     microphoneMinusSystemPTSSeconds: ptsOffset,
                     microphoneMinusSystemCallbackSeconds: hostOffset),
                 postCaptureAlignment: alignment,
-                timingDiagnostics: timingDiagnostics)
+                timingDiagnostics: timingDiagnostics,
+                captureCoverage: captureCoverage)
             let data = try JSONEncoder.pretty.encode(result)
             try data.write(to: options.outputDirectory.appendingPathComponent("result.json"), options: .atomic)
             if let error = outcome.error {
@@ -749,6 +809,56 @@ private enum Main {
         guard let first, let last, last >= first else { return nil }
         let result = Double(last - first) / 1_000_000_000
         return result.isFinite ? result : nil
+    }
+
+    private static func trailingGapSeconds(end: UInt64?, boundary: UInt64?) -> Double? {
+        guard let end, let boundary, boundary >= end else { return nil }
+        let result = Double(boundary - end) / 1_000_000_000
+        return result.isFinite ? result : nil
+    }
+
+    private static func captureCoverage(
+        systemLastCallbackUptimeNanoseconds: UInt64?,
+        microphoneLastCallbackUptimeNanoseconds: UInt64?,
+        captureStopUptimeNanoseconds: UInt64?
+    ) -> CaptureCoverageEvidence {
+        let tolerance = 1.0
+        let separation = callbackOffsetSeconds(
+            systemLastCallbackUptimeNanoseconds,
+            microphoneLastCallbackUptimeNanoseconds).map(abs)
+        let commonEnd: UInt64?
+        if let systemLastCallbackUptimeNanoseconds,
+           let microphoneLastCallbackUptimeNanoseconds {
+            commonEnd = max(
+                systemLastCallbackUptimeNanoseconds,
+                microphoneLastCallbackUptimeNanoseconds)
+        } else {
+            commonEnd = nil
+        }
+        let systemPeerGap = trailingGapSeconds(
+            end: systemLastCallbackUptimeNanoseconds,
+            boundary: commonEnd)
+        let microphonePeerGap = trailingGapSeconds(
+            end: microphoneLastCallbackUptimeNanoseconds,
+            boundary: commonEnd)
+        let systemStopGap = trailingGapSeconds(
+            end: systemLastCallbackUptimeNanoseconds,
+            boundary: captureStopUptimeNanoseconds)
+        let microphoneStopGap = trailingGapSeconds(
+            end: microphoneLastCallbackUptimeNanoseconds,
+            boundary: captureStopUptimeNanoseconds)
+        return CaptureCoverageEvidence(
+            captureStopUptimeNanoseconds: captureStopUptimeNanoseconds,
+            sourceEndSeparationSeconds: separation,
+            systemTrailingGapToPeerSeconds: systemPeerGap,
+            microphoneTrailingGapToPeerSeconds: microphonePeerGap,
+            systemTrailingGapToCaptureStopSeconds: systemStopGap,
+            microphoneTrailingGapToCaptureStopSeconds: microphoneStopGap,
+            sourceEndFreshnessToleranceSeconds: tolerance,
+            bothSourcesReachedCommonEnd: systemPeerGap.map { $0 <= tolerance } == true &&
+                microphonePeerGap.map { $0 <= tolerance } == true,
+            bothSourcesFreshAtCaptureStop: systemStopGap.map { $0 <= tolerance } == true &&
+                microphoneStopGap.map { $0 <= tolerance } == true)
     }
 
     private static func nativeFrames(seconds: Double?, sampleRate: Double?) -> Int64? {
@@ -887,6 +997,7 @@ private final class CompletionGate: @unchecked Sendable {
         lock.unlock()
         guard let session else { return }
         session.stopAcceptingBuffers()
+        let captureStopUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
         Task {
             var finalError = error
             do { try await stream?.stopCapture() } catch { if finalError == nil { finalError = error } }
@@ -894,7 +1005,8 @@ private final class CompletionGate: @unchecked Sendable {
             continuation?.resume(returning: (
                 session: session,
                 reason: reason,
-                error: finalError
+                error: finalError,
+                captureStopUptimeNanoseconds: captureStopUptimeNanoseconds
             ))
         }
     }
