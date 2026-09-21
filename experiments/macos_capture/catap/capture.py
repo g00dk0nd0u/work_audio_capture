@@ -90,6 +90,32 @@ def _default_input_device(devices: Any) -> Any:
     raise RuntimeError("catap did not expose a default input device")
 
 
+def _default_output_device(devices: Any) -> Any | None:
+    for device in devices:
+        if device.is_default_output is True and len(device.output_streams) > 0:
+            return device
+    return None
+
+
+def _device_evidence(device: Any | None, direction: str) -> dict[str, Any] | None:
+    if device is None:
+        return None
+    streams = device.input_streams if direction == "input" else device.output_streams
+    return {
+        "name": device.name,
+        "uid": device.uid,
+        "streams": [
+            {
+                "stream_index": stream.stream_index,
+                "sample_rate": stream.sample_rate,
+                "channels": stream.num_channels,
+                "bits_per_channel": stream.bits_per_channel,
+            }
+            for stream in streams
+        ],
+    }
+
+
 def _track_configuration(output_dir: Path, input_stream_count: int) -> tuple[list[str], list[str]]:
     if input_stream_count == 1:
         microphone_names = ["microphone"]
@@ -160,7 +186,26 @@ def _successful(tracks: list[dict[str, Any]]) -> bool:
             for track in tracks
         )
 
-    return has_evidence("microphone") and has_evidence("system_tap")
+    if not (has_evidence("microphone") and has_evidence("system_tap")):
+        return False
+
+    rates = {
+        int(track["sample_rate"])
+        for track in tracks
+        if track["source"] in {"microphone", "system_tap"} and track["sample_rate"] is not None
+    }
+    if len(rates) != 1:
+        return False
+
+    durations = [
+        float(track["duration_seconds"])
+        for track in tracks
+        if track["source"] in {"microphone", "system_tap"} and track["duration_seconds"] is not None
+    ]
+    if not durations or max(durations) - min(durations) > 0.1:
+        return False
+
+    return True
 
 
 def _base_result(duration: float, output_dir: Path) -> dict[str, Any]:
@@ -169,7 +214,13 @@ def _base_result(duration: float, output_dir: Path) -> dict[str, Any]:
         "versions": {"python": platform.python_version(), "macos": platform.mac_ver()[0] or None, "catap": None},
         "requested_duration_seconds": duration,
         "output_directory": str(output_dir.resolve()),
-        "capture": {"scope": "global_system_output", "input_device": None, "input_stream_count": None},
+        "capture": {
+            "scope": "global_system_output",
+            "input_device": None,
+            "input_stream_count": None,
+            "input_device_evidence": None,
+            "output_device_evidence": None,
+        },
         "session": _session_snapshot(None),
         "tracks": [],
         "status": "not_started",
@@ -202,11 +253,19 @@ def run(duration: float, output_dir: Path, catap_module: Any | None = None) -> t
         result["versions"]["catap"] = version
 
         tap = catap_module.TapDescription.stereo_global_tap_excluding([])
-        device = _default_input_device(catap_module.list_audio_devices())
+        devices = catap_module.list_audio_devices()
+        device = _default_input_device(devices)
+        output_device = _default_output_device(devices)
         input_stream_count = len(device.input_streams)
         output_paths, track_labels = _track_configuration(output_dir, input_stream_count)
         result["capture"].update(
-            {"input_device": device.name, "input_device_uid": device.uid, "input_stream_count": input_stream_count}
+            {
+                "input_device": device.name,
+                "input_device_uid": device.uid,
+                "input_stream_count": input_stream_count,
+                "input_device_evidence": _device_evidence(device, "input"),
+                "output_device_evidence": _device_evidence(output_device, "output"),
+            }
         )
         session = catap_module.MultitrackRecordingSession(
             [tap],
@@ -223,7 +282,9 @@ def run(duration: float, output_dir: Path, catap_module: Any | None = None) -> t
         result["session"] = _session_snapshot(session)
         result["tracks"] = _publish_tracks(result["session"], input_stream_count)
         if not _successful(result["tracks"]):
-            raise RuntimeError("both microphone and system tap require framed, non-silent evidence")
+            raise RuntimeError(
+                "microphone/system tracks require framed non-silent evidence and a consistent media timeline"
+            )
         result["status"] = "success"
         exit_code = 0
     except KeyboardInterrupt:
