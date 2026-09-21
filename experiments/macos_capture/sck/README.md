@@ -58,7 +58,8 @@ source-to-source end separation and each source's freshness at that boundary;
 missing or unexpectedly ordered uptime values produce explicit JSON `null`
 gaps and fail the corresponding coverage check. This conservative 1.0-second
 tolerance is only a source-liveness threshold, not an audio synchronization,
-drift-correction, resampling, or time-stretch threshold. Per-source
+drift-correction, resampling, time-stretch, or start-offset-compensation
+threshold. Per-source
 `signalPresent` and `silenceOnly` are `null`
 when no buffers arrived; an entirely zero-valued source is explicitly marked
 as silent and does not pass evidence validation. Permission fields report the
@@ -92,9 +93,10 @@ were 0.016845818 and 57.409217648 seconds. Consequently,
 `evidencePassed`, and `succeeded` were all `false`. These observations do not
 establish the exact physical disconnect timestamp.
 
-Candidate A has not yet met the full acceptance matrix. Bluetooth/HFP, device
-changes, permission-denied behavior, a 30--60 minute run, and abnormal
-termination still require real-hardware validation.
+Candidate A has not yet met the full acceptance matrix. Broader Bluetooth/HFP
+behavior beyond the disconnect observation above, device changes,
+permission-denied behavior, a 30--60 minute run, and abnormal termination still
+require real-hardware validation.
 
 The spike always selects the first available display and the system-default
 microphone. Source sample rate, channels, and PCM characteristics are derived
