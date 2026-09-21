@@ -177,35 +177,30 @@ def _publish_tracks(snapshot: dict[str, Any], input_stream_count: int) -> list[d
 
 
 def _successful(tracks: list[dict[str, Any]]) -> bool:
+    relevant = [
+        track
+        for track in tracks
+        if track["source"] in {"microphone", "system_tap"}
+    ]
+
     def has_evidence(source: str) -> bool:
         return any(
             track["source"] == source
             and (track["frame_count"] or 0) > 0
             and track["silence_only"] is False
             and track["session_silence_only"] is not True
-            for track in tracks
+            for track in relevant
         )
 
     if not (has_evidence("microphone") and has_evidence("system_tap")):
         return False
 
-    rates = {
-        int(track["sample_rate"])
-        for track in tracks
-        if track["source"] in {"microphone", "system_tap"} and track["sample_rate"] is not None
-    }
-    if len(rates) != 1:
+    if any(track["sample_rate"] is None or track["frame_count"] is None for track in relevant):
         return False
 
-    durations = [
-        float(track["duration_seconds"])
-        for track in tracks
-        if track["source"] in {"microphone", "system_tap"} and track["duration_seconds"] is not None
-    ]
-    if not durations or max(durations) - min(durations) > 0.1:
-        return False
-
-    return True
+    sample_rates = {int(track["sample_rate"]) for track in relevant}
+    frame_counts = {int(track["frame_count"]) for track in relevant}
+    return len(sample_rates) == 1 and len(frame_counts) == 1
 
 
 def _base_result(duration: float, output_dir: Path) -> dict[str, Any]:
@@ -283,7 +278,7 @@ def run(duration: float, output_dir: Path, catap_module: Any | None = None) -> t
         result["tracks"] = _publish_tracks(result["session"], input_stream_count)
         if not _successful(result["tracks"]):
             raise RuntimeError(
-                "microphone/system tracks require framed non-silent evidence and a consistent media timeline"
+                "microphone/system tracks require framed non-silent evidence with matching sample rates and frame counts"
             )
         result["status"] = "success"
         exit_code = 0
