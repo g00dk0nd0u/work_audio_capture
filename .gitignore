@@ -8,3 +8,5 @@ __pycache__/
 /recordings/
 /AudioCapture/recordings/
 /AudioCapture.zip
+.build/
+.DS_Store
