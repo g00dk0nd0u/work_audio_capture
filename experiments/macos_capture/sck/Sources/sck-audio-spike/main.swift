@@ -319,6 +319,7 @@ private struct ResultEvidence: Encodable {
     let streamOrDelegateError: String?
     let permissions: PermissionEvidence
     let configuration: ConfigurationEvidence
+    let captureCoverage: CaptureCoverageEvidence
     let system: TrackEvidence
     let microphone: TrackEvidence
     let relativeStart: RelativeStartEvidence
@@ -329,7 +330,7 @@ private struct ResultEvidence: Encodable {
         case schemaVersion, candidate, macOSVersion, startedAt, finishedAt
         case requestedDurationSeconds, observedWallClockDurationSeconds, stopReason
         case captureLifecycleCompleted, evidencePassed, succeeded, streamOrDelegateError
-        case permissions, configuration, system, microphone, relativeStart
+        case permissions, configuration, captureCoverage, system, microphone, relativeStart
         case postCaptureAlignment, timingDiagnostics
     }
 
@@ -351,6 +352,7 @@ private struct ResultEvidence: Encodable {
         } else { try values.encodeNil(forKey: .streamOrDelegateError) }
         try values.encode(permissions, forKey: .permissions)
         try values.encode(configuration, forKey: .configuration)
+        try values.encode(captureCoverage, forKey: .captureCoverage)
         try values.encode(system, forKey: .system)
         try values.encode(microphone, forKey: .microphone)
         try values.encode(relativeStart, forKey: .relativeStart)
@@ -642,6 +644,9 @@ private enum Main {
                 system: system, microphone: microphone,
                 ptsOffset: ptsOffset, callbackOffset: hostOffset)
             let timingDiagnostics = timingDiagnostics(system: system, microphone: microphone)
+            let captureCoverage = CaptureCoverage.evidence(
+                systemLastCallbackUptimeNanoseconds: system.lastCallbackUptimeNanoseconds,
+                microphoneLastCallbackUptimeNanoseconds: microphone.lastCallbackUptimeNanoseconds)
             let lifecycleCompleted = outcome.error == nil &&
                 (outcome.reason == "duration" || outcome.reason == "interrupt")
             let systemHasCurrentData = system.callbackCount > 0 && system.frameCount > 0 &&
@@ -649,7 +654,8 @@ private enum Main {
             let microphoneHasCurrentData = microphone.callbackCount > 0 && microphone.frameCount > 0 &&
                 FileManager.default.fileExists(atPath: microphone.sourcePath)
             let evidencePassed = lifecycleCompleted && systemHasCurrentData && microphoneHasCurrentData &&
-                system.signalPresent == true && microphone.signalPresent == true
+                system.signalPresent == true && microphone.signalPresent == true &&
+                captureCoverage.bothSourcesReachedCommonEnd
             let result = ResultEvidence(
                 macOSVersion: ProcessInfo.processInfo.operatingSystemVersionString,
                 startedAt: formatter.string(from: started),
@@ -663,6 +669,7 @@ private enum Main {
                 streamOrDelegateError: outcome.error.map { String(describing: $0) },
                 permissions: permissions,
                 configuration: ConfigurationEvidence(),
+                captureCoverage: captureCoverage,
                 system: system,
                 microphone: microphone,
                 relativeStart: RelativeStartEvidence(
@@ -677,7 +684,7 @@ private enum Main {
                 Foundation.exit(EXIT_FAILURE)
             }
             if !evidencePassed {
-                fputs("capture completed, but simultaneous non-silent evidence did not pass\n", stderr)
+                fputs("capture completed, but evidence validation did not pass\n", stderr)
                 Foundation.exit(3)
             }
             print("capture complete: \(options.outputDirectory.path)")
