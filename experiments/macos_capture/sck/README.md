@@ -76,6 +76,22 @@ hard-coded compensation; a permission-prompt run differed substantially. A
 90-second system-silence/resume run completed without a stream/delegate error,
 and callbacks continued for both sources.
 
+After adding capture-stop freshness validation, a release build on a real Mac
+running macOS 15.5 (Build 24F74) passed a normal 30-second run. The source-end
+separation was 0.003301875 seconds; the system and microphone trailing gaps to
+the capture-stop boundary were 0.003129326 and 0.006431201 seconds,
+respectively. Both coverage checks, `evidencePassed`, and `succeeded` were
+`true`.
+
+In a separate 90-second run where the Bluetooth microphone was disconnected,
+`captureLifecycleCompleted` remained `true`, `stopReason` was `duration`, and
+`streamOrDelegateError` was `null`. The source-end separation was
+57.39237183 seconds; the system and microphone trailing gaps to capture stop
+were 0.016845818 and 57.409217648 seconds. Consequently,
+`bothSourcesReachedCommonEnd`, `bothSourcesFreshAtCaptureStop`,
+`evidencePassed`, and `succeeded` were all `false`. These observations do not
+establish the exact physical disconnect timestamp.
+
 Candidate A has not yet met the full acceptance matrix. Bluetooth/HFP, device
 changes, permission-denied behavior, a 30--60 minute run, and abnormal
 termination still require real-hardware validation.

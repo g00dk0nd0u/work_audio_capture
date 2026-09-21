@@ -305,55 +305,6 @@ private struct TimingDiagnostics: Encodable {
     let relative: RelativeTimingDiagnostics
 }
 
-private struct CaptureCoverageEvidence: Encodable {
-    let captureStopUptimeNanoseconds: UInt64?
-    let sourceEndSeparationSeconds: Double?
-    let systemTrailingGapToPeerSeconds: Double?
-    let microphoneTrailingGapToPeerSeconds: Double?
-    let systemTrailingGapToCaptureStopSeconds: Double?
-    let microphoneTrailingGapToCaptureStopSeconds: Double?
-    let sourceEndFreshnessToleranceSeconds: Double
-    let bothSourcesReachedCommonEnd: Bool
-    let bothSourcesFreshAtCaptureStop: Bool
-
-    private enum CodingKeys: String, CodingKey {
-        case captureStopUptimeNanoseconds, sourceEndSeparationSeconds
-        case systemTrailingGapToPeerSeconds, microphoneTrailingGapToPeerSeconds
-        case systemTrailingGapToCaptureStopSeconds, microphoneTrailingGapToCaptureStopSeconds
-        case sourceEndFreshnessToleranceSeconds, bothSourcesReachedCommonEnd
-        case bothSourcesFreshAtCaptureStop
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var values = encoder.container(keyedBy: CodingKeys.self)
-        if let captureStopUptimeNanoseconds {
-            try values.encode(captureStopUptimeNanoseconds, forKey: .captureStopUptimeNanoseconds)
-        } else { try values.encodeNil(forKey: .captureStopUptimeNanoseconds) }
-        if let sourceEndSeparationSeconds {
-            try values.encode(sourceEndSeparationSeconds, forKey: .sourceEndSeparationSeconds)
-        } else { try values.encodeNil(forKey: .sourceEndSeparationSeconds) }
-        if let systemTrailingGapToPeerSeconds {
-            try values.encode(systemTrailingGapToPeerSeconds, forKey: .systemTrailingGapToPeerSeconds)
-        } else { try values.encodeNil(forKey: .systemTrailingGapToPeerSeconds) }
-        if let microphoneTrailingGapToPeerSeconds {
-            try values.encode(microphoneTrailingGapToPeerSeconds,
-                              forKey: .microphoneTrailingGapToPeerSeconds)
-        } else { try values.encodeNil(forKey: .microphoneTrailingGapToPeerSeconds) }
-        if let systemTrailingGapToCaptureStopSeconds {
-            try values.encode(systemTrailingGapToCaptureStopSeconds,
-                              forKey: .systemTrailingGapToCaptureStopSeconds)
-        } else { try values.encodeNil(forKey: .systemTrailingGapToCaptureStopSeconds) }
-        if let microphoneTrailingGapToCaptureStopSeconds {
-            try values.encode(microphoneTrailingGapToCaptureStopSeconds,
-                              forKey: .microphoneTrailingGapToCaptureStopSeconds)
-        } else { try values.encodeNil(forKey: .microphoneTrailingGapToCaptureStopSeconds) }
-        try values.encode(sourceEndFreshnessToleranceSeconds,
-                          forKey: .sourceEndFreshnessToleranceSeconds)
-        try values.encode(bothSourcesReachedCommonEnd, forKey: .bothSourcesReachedCommonEnd)
-        try values.encode(bothSourcesFreshAtCaptureStop, forKey: .bothSourcesFreshAtCaptureStop)
-    }
-}
-
 private struct ResultEvidence: Encodable {
     let schemaVersion = 1
     let candidate = "sck"
@@ -695,7 +646,7 @@ private enum Main {
                 system: system, microphone: microphone,
                 ptsOffset: ptsOffset, callbackOffset: hostOffset)
             let timingDiagnostics = timingDiagnostics(system: system, microphone: microphone)
-            let captureCoverage = captureCoverage(
+            let captureCoverage = CaptureCoverage.evidence(
                 systemLastCallbackUptimeNanoseconds: system.lastCallbackUptimeNanoseconds,
                 microphoneLastCallbackUptimeNanoseconds: microphone.lastCallbackUptimeNanoseconds,
                 captureStopUptimeNanoseconds: outcome.captureStopUptimeNanoseconds)
@@ -737,7 +688,7 @@ private enum Main {
                 Foundation.exit(EXIT_FAILURE)
             }
             if !evidencePassed {
-                fputs("capture completed, but simultaneous non-silent evidence did not pass\n", stderr)
+                fputs("capture completed, but evidence validation did not pass\n", stderr)
                 Foundation.exit(3)
             }
             print("capture complete: \(options.outputDirectory.path)")
@@ -809,56 +760,6 @@ private enum Main {
         guard let first, let last, last >= first else { return nil }
         let result = Double(last - first) / 1_000_000_000
         return result.isFinite ? result : nil
-    }
-
-    private static func trailingGapSeconds(end: UInt64?, boundary: UInt64?) -> Double? {
-        guard let end, let boundary, boundary >= end else { return nil }
-        let result = Double(boundary - end) / 1_000_000_000
-        return result.isFinite ? result : nil
-    }
-
-    private static func captureCoverage(
-        systemLastCallbackUptimeNanoseconds: UInt64?,
-        microphoneLastCallbackUptimeNanoseconds: UInt64?,
-        captureStopUptimeNanoseconds: UInt64?
-    ) -> CaptureCoverageEvidence {
-        let tolerance = 1.0
-        let separation = callbackOffsetSeconds(
-            systemLastCallbackUptimeNanoseconds,
-            microphoneLastCallbackUptimeNanoseconds).map(abs)
-        let commonEnd: UInt64?
-        if let systemLastCallbackUptimeNanoseconds,
-           let microphoneLastCallbackUptimeNanoseconds {
-            commonEnd = max(
-                systemLastCallbackUptimeNanoseconds,
-                microphoneLastCallbackUptimeNanoseconds)
-        } else {
-            commonEnd = nil
-        }
-        let systemPeerGap = trailingGapSeconds(
-            end: systemLastCallbackUptimeNanoseconds,
-            boundary: commonEnd)
-        let microphonePeerGap = trailingGapSeconds(
-            end: microphoneLastCallbackUptimeNanoseconds,
-            boundary: commonEnd)
-        let systemStopGap = trailingGapSeconds(
-            end: systemLastCallbackUptimeNanoseconds,
-            boundary: captureStopUptimeNanoseconds)
-        let microphoneStopGap = trailingGapSeconds(
-            end: microphoneLastCallbackUptimeNanoseconds,
-            boundary: captureStopUptimeNanoseconds)
-        return CaptureCoverageEvidence(
-            captureStopUptimeNanoseconds: captureStopUptimeNanoseconds,
-            sourceEndSeparationSeconds: separation,
-            systemTrailingGapToPeerSeconds: systemPeerGap,
-            microphoneTrailingGapToPeerSeconds: microphonePeerGap,
-            systemTrailingGapToCaptureStopSeconds: systemStopGap,
-            microphoneTrailingGapToCaptureStopSeconds: microphoneStopGap,
-            sourceEndFreshnessToleranceSeconds: tolerance,
-            bothSourcesReachedCommonEnd: systemPeerGap.map { $0 <= tolerance } == true &&
-                microphonePeerGap.map { $0 <= tolerance } == true,
-            bothSourcesFreshAtCaptureStop: systemStopGap.map { $0 <= tolerance } == true &&
-                microphoneStopGap.map { $0 <= tolerance } == true)
     }
 
     private static func nativeFrames(seconds: Double?, sampleRate: Double?) -> Int64? {
