@@ -179,6 +179,39 @@ private struct RelativeStartEvidence: Encodable {
     }
 }
 
+private struct PostCaptureAlignmentEvidence: Encodable {
+    let basis = "mediaPTS"
+    let microphoneMinusSystemStartPTSSeconds: Double?
+    let microphoneMinusSystemStartCallbackSeconds: Double?
+    let startPTSMinusCallbackDisagreementSeconds: Double?
+    let systemLeadingSilenceSeconds: Double?
+    let microphoneLeadingSilenceSeconds: Double?
+    let systemLeadingSilenceFramesAtNativeRate: Int64?
+    let microphoneLeadingSilenceFramesAtNativeRate: Int64?
+}
+
+private struct TrackTimingDiagnostics: Encodable {
+    let ptsSpanSeconds: Double?
+    let callbackSpanSeconds: Double?
+    let ptsMinusCallbackSpanSeconds: Double?
+}
+
+private struct RelativeTimingDiagnostics: Encodable {
+    let startPTSOffsetSeconds: Double?
+    let startCallbackOffsetSeconds: Double?
+    let startPTSMinusCallbackResidualSeconds: Double?
+    let endPTSOffsetSeconds: Double?
+    let endCallbackOffsetSeconds: Double?
+    let endPTSMinusCallbackResidualSeconds: Double?
+    let relativeTimingResidualChangeSeconds: Double?
+}
+
+private struct TimingDiagnostics: Encodable {
+    let system: TrackTimingDiagnostics
+    let microphone: TrackTimingDiagnostics
+    let relative: RelativeTimingDiagnostics
+}
+
 private struct ResultEvidence: Encodable {
     let schemaVersion = 1
     let candidate = "sck"
@@ -197,12 +230,15 @@ private struct ResultEvidence: Encodable {
     let system: TrackEvidence
     let microphone: TrackEvidence
     let relativeStart: RelativeStartEvidence
+    let postCaptureAlignment: PostCaptureAlignmentEvidence
+    let timingDiagnostics: TimingDiagnostics
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, candidate, macOSVersion, startedAt, finishedAt
         case requestedDurationSeconds, observedWallClockDurationSeconds, stopReason
         case captureLifecycleCompleted, evidencePassed, succeeded, streamOrDelegateError
         case permissions, configuration, system, microphone, relativeStart
+        case postCaptureAlignment, timingDiagnostics
     }
 
     func encode(to encoder: Encoder) throws {
@@ -226,6 +262,8 @@ private struct ResultEvidence: Encodable {
         try values.encode(system, forKey: .system)
         try values.encode(microphone, forKey: .microphone)
         try values.encode(relativeStart, forKey: .relativeStart)
+        try values.encode(postCaptureAlignment, forKey: .postCaptureAlignment)
+        try values.encode(timingDiagnostics, forKey: .timingDiagnostics)
     }
 }
 
@@ -505,9 +543,13 @@ private enum Main {
             outcome.session.stopAcceptingBuffers()
             let (system, microphone) = outcome.session.finalize()
             let ptsOffset = offset(microphone.firstPTS?.seconds, system.firstPTS?.seconds)
-            let hostOffset = offset(
-                microphone.firstCallbackUptimeNanoseconds.map { Double($0) / 1_000_000_000 },
-                system.firstCallbackUptimeNanoseconds.map { Double($0) / 1_000_000_000 })
+            let hostOffset = callbackOffsetSeconds(
+                microphone.firstCallbackUptimeNanoseconds,
+                system.firstCallbackUptimeNanoseconds)
+            let alignment = postCaptureAlignment(
+                system: system, microphone: microphone,
+                ptsOffset: ptsOffset, callbackOffset: hostOffset)
+            let timingDiagnostics = timingDiagnostics(system: system, microphone: microphone)
             let lifecycleCompleted = outcome.error == nil &&
                 (outcome.reason == "duration" || outcome.reason == "interrupt")
             let systemHasCurrentData = system.callbackCount > 0 && system.frameCount > 0 &&
@@ -533,7 +575,9 @@ private enum Main {
                 microphone: microphone,
                 relativeStart: RelativeStartEvidence(
                     microphoneMinusSystemPTSSeconds: ptsOffset,
-                    microphoneMinusSystemCallbackSeconds: hostOffset))
+                    microphoneMinusSystemCallbackSeconds: hostOffset),
+                postCaptureAlignment: alignment,
+                timingDiagnostics: timingDiagnostics)
             let data = try JSONEncoder.pretty.encode(result)
             try data.write(to: options.outputDirectory.appendingPathComponent("result.json"), options: .atomic)
             if let error = outcome.error {
@@ -597,8 +641,88 @@ private enum Main {
     }
 
     private static func offset(_ lhs: Double?, _ rhs: Double?) -> Double? {
+        guard let lhs, let rhs, lhs.isFinite, rhs.isFinite else { return nil }
+        let result = lhs - rhs
+        return result.isFinite ? result : nil
+    }
+
+    private static func callbackOffsetSeconds(_ lhs: UInt64?, _ rhs: UInt64?) -> Double? {
         guard let lhs, let rhs else { return nil }
-        return lhs - rhs
+        let nanoseconds = lhs >= rhs ? Double(lhs - rhs) : -Double(rhs - lhs)
+        let result = nanoseconds / 1_000_000_000
+        return result.isFinite ? result : nil
+    }
+
+    private static func callbackSpanSeconds(first: UInt64?, last: UInt64?) -> Double? {
+        guard let first, let last, last >= first else { return nil }
+        let result = Double(last - first) / 1_000_000_000
+        return result.isFinite ? result : nil
+    }
+
+    private static func nativeFrames(seconds: Double?, sampleRate: Double?) -> Int64? {
+        guard let seconds, let sampleRate,
+              seconds.isFinite, seconds >= 0, sampleRate.isFinite, sampleRate > 0 else { return nil }
+        let rounded = (seconds * sampleRate).rounded()
+        guard rounded.isFinite else { return nil }
+        return Int64(exactly: rounded)
+    }
+
+    private static func postCaptureAlignment(
+        system: TrackEvidence, microphone: TrackEvidence,
+        ptsOffset: Double?, callbackOffset: Double?
+    ) -> PostCaptureAlignmentEvidence {
+        let disagreement = offset(ptsOffset, callbackOffset)
+        let systemSilence = ptsOffset.map { max(-$0, 0) }
+        let microphoneSilence = ptsOffset.map { max($0, 0) }
+        return PostCaptureAlignmentEvidence(
+            microphoneMinusSystemStartPTSSeconds: ptsOffset,
+            microphoneMinusSystemStartCallbackSeconds: callbackOffset,
+            startPTSMinusCallbackDisagreementSeconds: disagreement,
+            systemLeadingSilenceSeconds: systemSilence,
+            microphoneLeadingSilenceSeconds: microphoneSilence,
+            systemLeadingSilenceFramesAtNativeRate: nativeFrames(
+                seconds: systemSilence, sampleRate: system.format?.sampleRate),
+            microphoneLeadingSilenceFramesAtNativeRate: nativeFrames(
+                seconds: microphoneSilence, sampleRate: microphone.format?.sampleRate))
+    }
+
+    private static func trackTimingDiagnostics(_ track: TrackEvidence) -> TrackTimingDiagnostics {
+        let ptsSpan = offset(track.lastPTS?.seconds, track.firstPTS?.seconds).flatMap {
+            $0 >= 0 ? $0 : nil
+        }
+        let callbackSpan = callbackSpanSeconds(
+            first: track.firstCallbackUptimeNanoseconds,
+            last: track.lastCallbackUptimeNanoseconds)
+        return TrackTimingDiagnostics(
+            ptsSpanSeconds: ptsSpan,
+            callbackSpanSeconds: callbackSpan,
+            ptsMinusCallbackSpanSeconds: offset(ptsSpan, callbackSpan))
+    }
+
+    private static func timingDiagnostics(
+        system: TrackEvidence, microphone: TrackEvidence
+    ) -> TimingDiagnostics {
+        let startPTS = offset(microphone.firstPTS?.seconds, system.firstPTS?.seconds)
+        let startCallback = callbackOffsetSeconds(
+            microphone.firstCallbackUptimeNanoseconds,
+            system.firstCallbackUptimeNanoseconds)
+        let startResidual = offset(startPTS, startCallback)
+        let endPTS = offset(microphone.lastPTS?.seconds, system.lastPTS?.seconds)
+        let endCallback = callbackOffsetSeconds(
+            microphone.lastCallbackUptimeNanoseconds,
+            system.lastCallbackUptimeNanoseconds)
+        let endResidual = offset(endPTS, endCallback)
+        return TimingDiagnostics(
+            system: trackTimingDiagnostics(system),
+            microphone: trackTimingDiagnostics(microphone),
+            relative: RelativeTimingDiagnostics(
+                startPTSOffsetSeconds: startPTS,
+                startCallbackOffsetSeconds: startCallback,
+                startPTSMinusCallbackResidualSeconds: startResidual,
+                endPTSOffsetSeconds: endPTS,
+                endCallbackOffsetSeconds: endCallback,
+                endPTSMinusCallbackResidualSeconds: endResidual,
+                relativeTimingResidualChangeSeconds: offset(endResidual, startResidual)))
     }
 
     private static func prepareFreshOutputDirectory(_ url: URL) throws {
