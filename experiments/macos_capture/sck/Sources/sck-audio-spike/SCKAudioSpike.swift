@@ -59,7 +59,8 @@ private enum SpikeError: Error, CustomStringConvertible {
 private typealias CaptureOutcome = (
     session: CaptureSession,
     reason: String,
-    error: Error?
+    error: Error?,
+    captureStopUptimeNanoseconds: UInt64?
 )
 
 private struct TimeEvidence: Encodable {
@@ -324,13 +325,14 @@ private struct ResultEvidence: Encodable {
     let relativeStart: RelativeStartEvidence
     let postCaptureAlignment: PostCaptureAlignmentEvidence
     let timingDiagnostics: TimingDiagnostics
+    let captureCoverage: CaptureCoverageEvidence
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, candidate, macOSVersion, startedAt, finishedAt
         case requestedDurationSeconds, observedWallClockDurationSeconds, stopReason
         case captureLifecycleCompleted, evidencePassed, succeeded, streamOrDelegateError
         case permissions, configuration, system, microphone, relativeStart
-        case postCaptureAlignment, timingDiagnostics
+        case postCaptureAlignment, timingDiagnostics, captureCoverage
     }
 
     func encode(to encoder: Encoder) throws {
@@ -356,6 +358,7 @@ private struct ResultEvidence: Encodable {
         try values.encode(relativeStart, forKey: .relativeStart)
         try values.encode(postCaptureAlignment, forKey: .postCaptureAlignment)
         try values.encode(timingDiagnostics, forKey: .timingDiagnostics)
+        try values.encode(captureCoverage, forKey: .captureCoverage)
     }
 }
 
@@ -619,7 +622,8 @@ private enum Main {
                 outcome = try await runCapture(options: options)
             } catch {
                 let session = CaptureSession(outputDirectory: options.outputDirectory) { _, _ in }
-                outcome = (session: session, reason: "setupFailure", error: error)
+                outcome = (session: session, reason: "setupFailure", error: error,
+                           captureStopUptimeNanoseconds: nil)
             }
             let finished = Date()
             let permissionAfter = currentPermissionState()
@@ -642,6 +646,10 @@ private enum Main {
                 system: system, microphone: microphone,
                 ptsOffset: ptsOffset, callbackOffset: hostOffset)
             let timingDiagnostics = timingDiagnostics(system: system, microphone: microphone)
+            let captureCoverage = CaptureCoverage.evidence(
+                systemLastCallbackUptimeNanoseconds: system.lastCallbackUptimeNanoseconds,
+                microphoneLastCallbackUptimeNanoseconds: microphone.lastCallbackUptimeNanoseconds,
+                captureStopUptimeNanoseconds: outcome.captureStopUptimeNanoseconds)
             let lifecycleCompleted = outcome.error == nil &&
                 (outcome.reason == "duration" || outcome.reason == "interrupt")
             let systemHasCurrentData = system.callbackCount > 0 && system.frameCount > 0 &&
@@ -649,7 +657,9 @@ private enum Main {
             let microphoneHasCurrentData = microphone.callbackCount > 0 && microphone.frameCount > 0 &&
                 FileManager.default.fileExists(atPath: microphone.sourcePath)
             let evidencePassed = lifecycleCompleted && systemHasCurrentData && microphoneHasCurrentData &&
-                system.signalPresent == true && microphone.signalPresent == true
+                system.signalPresent == true && microphone.signalPresent == true &&
+                captureCoverage.bothSourcesReachedCommonEnd &&
+                captureCoverage.bothSourcesFreshAtCaptureStop
             let result = ResultEvidence(
                 macOSVersion: ProcessInfo.processInfo.operatingSystemVersionString,
                 startedAt: formatter.string(from: started),
@@ -669,7 +679,8 @@ private enum Main {
                     microphoneMinusSystemPTSSeconds: ptsOffset,
                     microphoneMinusSystemCallbackSeconds: hostOffset),
                 postCaptureAlignment: alignment,
-                timingDiagnostics: timingDiagnostics)
+                timingDiagnostics: timingDiagnostics,
+                captureCoverage: captureCoverage)
             let data = try JSONEncoder.pretty.encode(result)
             try data.write(to: options.outputDirectory.appendingPathComponent("result.json"), options: .atomic)
             if let error = outcome.error {
@@ -677,7 +688,7 @@ private enum Main {
                 Foundation.exit(EXIT_FAILURE)
             }
             if !evidencePassed {
-                fputs("capture completed, but simultaneous non-silent evidence did not pass\n", stderr)
+                fputs("capture completed, but evidence validation did not pass\n", stderr)
                 Foundation.exit(3)
             }
             print("capture complete: \(options.outputDirectory.path)")
@@ -887,6 +898,7 @@ private final class CompletionGate: @unchecked Sendable {
         lock.unlock()
         guard let session else { return }
         session.stopAcceptingBuffers()
+        let captureStopUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
         Task {
             var finalError = error
             do { try await stream?.stopCapture() } catch { if finalError == nil { finalError = error } }
@@ -894,7 +906,8 @@ private final class CompletionGate: @unchecked Sendable {
             continuation?.resume(returning: (
                 session: session,
                 reason: reason,
-                error: finalError
+                error: finalError,
+                captureStopUptimeNanoseconds: captureStopUptimeNanoseconds
             ))
         }
     }

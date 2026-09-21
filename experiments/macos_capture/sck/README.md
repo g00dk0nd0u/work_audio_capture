@@ -51,7 +51,16 @@ Because these objects only add evidence fields, `schemaVersion` remains `1`.
 `captureLifecycleCompleted` only means the stream stopped in a
 controlled way. `evidencePassed` and its compatibility alias `succeeded` are
 true only when both sources produced current-run frames and both contained
-non-zero audio bytes. Per-source `signalPresent` and `silenceOnly` are `null`
+non-zero audio bytes, their callback ends are within 1.0 second of each other,
+and both callback ends are within 1.0 second of the capture-stop boundary where
+the session stopped accepting buffers. `captureCoverage` reports both the
+source-to-source end separation and each source's freshness at that boundary;
+missing or unexpectedly ordered uptime values produce explicit JSON `null`
+gaps and fail the corresponding coverage check. This conservative 1.0-second
+tolerance is only a source-liveness threshold, not an audio synchronization,
+drift-correction, resampling, time-stretch, or start-offset-compensation
+threshold. Per-source
+`signalPresent` and `silenceOnly` are `null`
 when no buffers arrived; an entirely zero-valued source is explicitly marked
 as silent and does not pass evidence validation. Permission fields report the
 screen preflight and microphone authorization states observable before and
@@ -68,13 +77,39 @@ hard-coded compensation; a permission-prompt run differed substantially. A
 90-second system-silence/resume run completed without a stream/delegate error,
 and callbacks continued for both sources.
 
-Candidate A has not yet met the full acceptance matrix. Bluetooth/HFP, device
-changes, permission-denied behavior, a 30--60 minute run, and abnormal
-termination still require real-hardware validation.
+Bluetooth/HFP was also exercised on the same Mac. With Bluetooth playback and
+microphone capture active, the microphone arrived as 16 kHz mono while system
+audio remained 48 kHz stereo, and a full 60-second run completed with both
+sources continuing. An output-device switch Mac -> Bluetooth -> Mac also
+completed without observed source dropout in that run. These are observations
+from this hardware and do not establish a universal macOS guarantee or prove
+acoustic routing beyond the recorded evidence.
+
+After adding capture-stop freshness validation, a release build on a real Mac
+running macOS 15.5 (Build 24F74) passed a normal 30-second run. The source-end
+separation was 0.003301875 seconds; the system and microphone trailing gaps to
+the capture-stop boundary were 0.003129326 and 0.006431201 seconds,
+respectively. Both coverage checks, `evidencePassed`, and `succeeded` were
+`true`.
+
+In a separate 90-second run where the Bluetooth microphone was disconnected,
+`captureLifecycleCompleted` remained `true`, `stopReason` was `duration`, and
+`streamOrDelegateError` was `null`. The source-end separation was
+57.39237183 seconds; the system and microphone trailing gaps to capture stop
+were 0.016845818 and 57.409217648 seconds. Consequently,
+`bothSourcesReachedCommonEnd`, `bothSourcesFreshAtCaptureStop`,
+`evidencePassed`, and `succeeded` were all `false`. These observations do not
+establish the exact physical disconnect timestamp.
+
+Candidate A has not yet met the full acceptance matrix. Permission-denied
+behavior, a 30--60 minute run, abnormal termination, and additional hardware
+coverage still require real-hardware validation.
 
 The spike always selects the first available display and the system-default
-microphone. Source sample rate, channels, and PCM characteristics are derived
-from the incoming buffer, and raw/lossless PCM evidence is preserved.
+microphone at capture start. Source sample rate, channels, and PCM
+characteristics are derived from the incoming buffer, and raw/lossless PCM
+evidence is preserved. A default microphone change during an active stream is
+not assumed to migrate the already captured microphone source automatically.
 `AVAudioFile` may adapt interleaving for the CAF file representation, so the
 file is not promised to retain the source buffer's memory/interleaving layout.
 Our code applies no gain normalization, AGC, mixing, resampling, or time
