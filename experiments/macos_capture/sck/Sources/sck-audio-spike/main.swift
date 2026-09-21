@@ -188,12 +188,69 @@ private struct PostCaptureAlignmentEvidence: Encodable {
     let microphoneLeadingSilenceSeconds: Double?
     let systemLeadingSilenceFramesAtNativeRate: Int64?
     let microphoneLeadingSilenceFramesAtNativeRate: Int64?
+
+    private enum CodingKeys: String, CodingKey {
+        case basis, microphoneMinusSystemStartPTSSeconds
+        case microphoneMinusSystemStartCallbackSeconds
+        case startPTSMinusCallbackDisagreementSeconds
+        case systemLeadingSilenceSeconds, microphoneLeadingSilenceSeconds
+        case systemLeadingSilenceFramesAtNativeRate
+        case microphoneLeadingSilenceFramesAtNativeRate
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(basis, forKey: .basis)
+        if let microphoneMinusSystemStartPTSSeconds {
+            try values.encode(microphoneMinusSystemStartPTSSeconds,
+                              forKey: .microphoneMinusSystemStartPTSSeconds)
+        } else { try values.encodeNil(forKey: .microphoneMinusSystemStartPTSSeconds) }
+        if let microphoneMinusSystemStartCallbackSeconds {
+            try values.encode(microphoneMinusSystemStartCallbackSeconds,
+                              forKey: .microphoneMinusSystemStartCallbackSeconds)
+        } else { try values.encodeNil(forKey: .microphoneMinusSystemStartCallbackSeconds) }
+        if let startPTSMinusCallbackDisagreementSeconds {
+            try values.encode(startPTSMinusCallbackDisagreementSeconds,
+                              forKey: .startPTSMinusCallbackDisagreementSeconds)
+        } else { try values.encodeNil(forKey: .startPTSMinusCallbackDisagreementSeconds) }
+        if let systemLeadingSilenceSeconds {
+            try values.encode(systemLeadingSilenceSeconds, forKey: .systemLeadingSilenceSeconds)
+        } else { try values.encodeNil(forKey: .systemLeadingSilenceSeconds) }
+        if let microphoneLeadingSilenceSeconds {
+            try values.encode(microphoneLeadingSilenceSeconds,
+                              forKey: .microphoneLeadingSilenceSeconds)
+        } else { try values.encodeNil(forKey: .microphoneLeadingSilenceSeconds) }
+        if let systemLeadingSilenceFramesAtNativeRate {
+            try values.encode(systemLeadingSilenceFramesAtNativeRate,
+                              forKey: .systemLeadingSilenceFramesAtNativeRate)
+        } else { try values.encodeNil(forKey: .systemLeadingSilenceFramesAtNativeRate) }
+        if let microphoneLeadingSilenceFramesAtNativeRate {
+            try values.encode(microphoneLeadingSilenceFramesAtNativeRate,
+                              forKey: .microphoneLeadingSilenceFramesAtNativeRate)
+        } else { try values.encodeNil(forKey: .microphoneLeadingSilenceFramesAtNativeRate) }
+    }
 }
 
 private struct TrackTimingDiagnostics: Encodable {
     let ptsSpanSeconds: Double?
     let callbackSpanSeconds: Double?
     let ptsMinusCallbackSpanSeconds: Double?
+
+    private enum CodingKeys: String, CodingKey {
+        case ptsSpanSeconds, callbackSpanSeconds, ptsMinusCallbackSpanSeconds
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        if let ptsSpanSeconds { try values.encode(ptsSpanSeconds, forKey: .ptsSpanSeconds) }
+        else { try values.encodeNil(forKey: .ptsSpanSeconds) }
+        if let callbackSpanSeconds {
+            try values.encode(callbackSpanSeconds, forKey: .callbackSpanSeconds)
+        } else { try values.encodeNil(forKey: .callbackSpanSeconds) }
+        if let ptsMinusCallbackSpanSeconds {
+            try values.encode(ptsMinusCallbackSpanSeconds, forKey: .ptsMinusCallbackSpanSeconds)
+        } else { try values.encodeNil(forKey: .ptsMinusCallbackSpanSeconds) }
+    }
 }
 
 private struct RelativeTimingDiagnostics: Encodable {
@@ -204,6 +261,41 @@ private struct RelativeTimingDiagnostics: Encodable {
     let endCallbackOffsetSeconds: Double?
     let endPTSMinusCallbackResidualSeconds: Double?
     let relativeTimingResidualChangeSeconds: Double?
+
+    private enum CodingKeys: String, CodingKey {
+        case startPTSOffsetSeconds, startCallbackOffsetSeconds
+        case startPTSMinusCallbackResidualSeconds, endPTSOffsetSeconds
+        case endCallbackOffsetSeconds, endPTSMinusCallbackResidualSeconds
+        case relativeTimingResidualChangeSeconds
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        if let startPTSOffsetSeconds {
+            try values.encode(startPTSOffsetSeconds, forKey: .startPTSOffsetSeconds)
+        } else { try values.encodeNil(forKey: .startPTSOffsetSeconds) }
+        if let startCallbackOffsetSeconds {
+            try values.encode(startCallbackOffsetSeconds, forKey: .startCallbackOffsetSeconds)
+        } else { try values.encodeNil(forKey: .startCallbackOffsetSeconds) }
+        if let startPTSMinusCallbackResidualSeconds {
+            try values.encode(startPTSMinusCallbackResidualSeconds,
+                              forKey: .startPTSMinusCallbackResidualSeconds)
+        } else { try values.encodeNil(forKey: .startPTSMinusCallbackResidualSeconds) }
+        if let endPTSOffsetSeconds {
+            try values.encode(endPTSOffsetSeconds, forKey: .endPTSOffsetSeconds)
+        } else { try values.encodeNil(forKey: .endPTSOffsetSeconds) }
+        if let endCallbackOffsetSeconds {
+            try values.encode(endCallbackOffsetSeconds, forKey: .endCallbackOffsetSeconds)
+        } else { try values.encodeNil(forKey: .endCallbackOffsetSeconds) }
+        if let endPTSMinusCallbackResidualSeconds {
+            try values.encode(endPTSMinusCallbackResidualSeconds,
+                              forKey: .endPTSMinusCallbackResidualSeconds)
+        } else { try values.encodeNil(forKey: .endPTSMinusCallbackResidualSeconds) }
+        if let relativeTimingResidualChangeSeconds {
+            try values.encode(relativeTimingResidualChangeSeconds,
+                              forKey: .relativeTimingResidualChangeSeconds)
+        } else { try values.encodeNil(forKey: .relativeTimingResidualChangeSeconds) }
+    }
 }
 
 private struct TimingDiagnostics: Encodable {
