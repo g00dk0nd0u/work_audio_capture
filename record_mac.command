@@ -44,9 +44,9 @@ if [[ $# -eq 1 ]]; then
   recorder_command+=(--duration "$1")
 fi
 "${recorder_command[@]}"
-status=$?
+exit_code=$?
 
 echo "Recording stopped."
 echo "Saved:"
 echo "$session"
-exit $status
+exit $exit_code
