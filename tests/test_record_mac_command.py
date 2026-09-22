@@ -3,8 +3,14 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 REPOSITORY = Path(__file__).resolve().parents[1]
+pytestmark = pytest.mark.skipif(
+    os.name == "nt",
+    reason="record_mac.command is a macOS-only launcher",
+)
 
 
 def _write_executable(path: Path, contents: str) -> None:
@@ -12,7 +18,13 @@ def _write_executable(path: Path, contents: str) -> None:
     path.chmod(0o755)
 
 
-def _run_launcher(tmp_path: Path, *, mp3_failure: bool = False, open_failure: bool = False):
+def _run_launcher(
+    tmp_path: Path,
+    *,
+    recorder_failure: bool = False,
+    mp3_failure: bool = False,
+    open_failure: bool = False,
+):
     launcher = tmp_path / "record_mac.command"
     launcher.write_bytes((REPOSITORY / "record_mac.command").read_bytes())
     (tmp_path / "experiments/macos_capture/sck").mkdir(parents=True)
@@ -32,6 +44,7 @@ cat > "$package_path/.build/release/sck-audio-spike" <<'EOF'
 while [ "$1" != "--output-dir" ]; do shift; done
 session=$2
 touch "$session/system.caf" "$session/microphone.caf" "$session/result.json"
+exit "${RECORDER_FAIL:-0}"
 EOF
 chmod +x "$package_path/.build/release/sck-audio-spike"
 """,
@@ -56,6 +69,7 @@ exit "${OPEN_FAIL:-0}"
     env.update(
         PATH=f"{bin_dir}:{env['PATH']}",
         OPEN_LOG=str(tmp_path / "open.log"),
+        RECORDER_FAIL="6" if recorder_failure else "0",
         MAKE_MP3_FAIL="1" if mp3_failure else "0",
         OPEN_FAIL="9" if open_failure else "0",
     )
@@ -83,6 +97,15 @@ def test_failed_mp3_creation_does_not_open_finder(tmp_path):
     result, open_log = _run_launcher(tmp_path, mp3_failure=True)
 
     assert result.returncode == 7
+    assert not open_log.exists()
+
+
+def test_failed_recording_with_created_mp3_does_not_open_finder(tmp_path):
+    result, open_log = _run_launcher(tmp_path, recorder_failure=True)
+
+    session = tmp_path / "recordings/mac/2026-09-22_22-28-54"
+    assert result.returncode == 6
+    assert (session / "recording.mp3").is_file()
     assert not open_log.exists()
 
 

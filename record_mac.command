@@ -69,7 +69,7 @@ echo "$session"
 if [[ -f "$session/recording.mp3" ]]; then
   echo "MP3:"
   echo "$session/recording.mp3"
-  if [[ $mp3_exit_code -eq 0 ]] && ! open "$session"; then
+  if [[ $recording_exit_code -eq 0 && $mp3_exit_code -eq 0 ]] && ! open "$session"; then
     echo "Recording saved, but could not open output folder: $session" >&2
   fi
 fi
