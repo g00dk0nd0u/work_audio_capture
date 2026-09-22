@@ -15,6 +15,11 @@ if ! command -v swift >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "Error: python3 is unavailable." >&2
+  exit 1
+fi
+
 repo_root="$(cd -- "$(dirname -- "$0")" && pwd -P)" || exit $?
 package_path="$repo_root/experiments/macos_capture/sck"
 
@@ -44,9 +49,24 @@ if [[ $# -eq 1 ]]; then
   recorder_command+=(--duration "$1")
 fi
 "${recorder_command[@]}"
-exit_code=$?
+recording_exit_code=$?
+
+mp3_exit_code=0
+if [[ -f "$session/system.caf" && -f "$session/microphone.caf" && -f "$session/result.json" ]]; then
+  echo "Creating listening MP3..."
+  python3 "$repo_root/make_mac_mp3.py" "$session"
+  mp3_exit_code=$?
+fi
 
 echo "Recording stopped."
 echo "Saved:"
 echo "$session"
-exit $exit_code
+if [[ -f "$session/recording.mp3" ]]; then
+  echo "MP3:"
+  echo "$session/recording.mp3"
+fi
+
+if [[ $recording_exit_code -ne 0 ]]; then
+  exit $recording_exit_code
+fi
+exit $mp3_exit_code
