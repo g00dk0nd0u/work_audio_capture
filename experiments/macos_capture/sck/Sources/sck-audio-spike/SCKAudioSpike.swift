@@ -6,11 +6,13 @@ import Foundation
 import ScreenCaptureKit
 
 private struct Options {
-    let duration: Double
+    let duration: Double?
     let outputDirectory: URL
 
     static let usage = """
-    Usage: sck-audio-spike --duration <seconds> --output-dir <path>
+    Usage: sck-audio-spike [--duration <seconds>] --output-dir <path>
+      --duration  Stop after the specified number of seconds (otherwise, press Ctrl+C)
+      --output-dir  Write raw CAF files and result.json to this directory (required)
     Build: swift build -c release
     """
 
@@ -38,7 +40,7 @@ private struct Options {
                 throw SpikeError.usage("unknown option: \(option)")
             }
         }
-        guard let duration, let outputDirectory else {
+        guard let outputDirectory else {
             throw SpikeError.usage(usage)
         }
         return Options(duration: duration, outputDirectory: outputDirectory)
@@ -311,7 +313,7 @@ private struct ResultEvidence: Encodable {
     let macOSVersion: String
     let startedAt: String
     let finishedAt: String
-    let requestedDurationSeconds: Double
+    let requestedDurationSeconds: Double?
     let observedWallClockDurationSeconds: Double
     let stopReason: String
     let captureLifecycleCompleted: Bool
@@ -342,7 +344,9 @@ private struct ResultEvidence: Encodable {
         try values.encode(macOSVersion, forKey: .macOSVersion)
         try values.encode(startedAt, forKey: .startedAt)
         try values.encode(finishedAt, forKey: .finishedAt)
-        try values.encode(requestedDurationSeconds, forKey: .requestedDurationSeconds)
+        if let requestedDurationSeconds {
+            try values.encode(requestedDurationSeconds, forKey: .requestedDurationSeconds)
+        } else { try values.encodeNil(forKey: .requestedDurationSeconds) }
         try values.encode(observedWallClockDurationSeconds, forKey: .observedWallClockDurationSeconds)
         try values.encode(stopReason, forKey: .stopReason)
         try values.encode(captureLifecycleCompleted, forKey: .captureLifecycleCompleted)
@@ -735,7 +739,9 @@ private enum Main {
             Task {
                 do {
                     try await stream.startCapture()
-                    gate.armDuration(seconds: options.duration)
+                    if let duration = options.duration {
+                        gate.armDuration(seconds: duration)
+                    }
                 } catch {
                     gate.complete(session: session, reason: "startFailure", error: error)
                 }
