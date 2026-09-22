@@ -19,14 +19,15 @@ import sys
 import tempfile
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from audio_capture import transcription_balance  # noqa: E402
+
+
 SAMPLE_RATE = 48000
 MP3_BITRATE = "48k"
 MIX_FRAMES = 262144
-BALANCE_BLOCK_SECONDS = 0.2
-BALANCE_ABSOLUTE_GATE_DBFS = -55.0
-BALANCE_RELATIVE_GATE_DB = 25.0
-BALANCE_MIN_EVIDENCE_SECONDS = 3.0
-BALANCE_MAX_ADDED_CLIPPING_FRACTION = 0.001
 
 
 def _fail(message: str, code: int = 4) -> int:
@@ -56,64 +57,6 @@ def _pcm16_bytes(samples: array) -> bytes:
     if sys.byteorder != "little":
         copied.byteswap()
     return copied.tobytes()
-
-
-def _dbfs_rms(samples: array) -> float | None:
-    if not samples:
-        return None
-    square = sum(int(value) * int(value) for value in samples) / len(samples)
-    return 10.0 * math.log10(square / (32768.0 ** 2)) if square else None
-
-
-class _LevelHistogram:
-    """Same bounded 0.1 dB histogram used by the Windows post-processor."""
-
-    def __init__(self) -> None:
-        self.counts = [0] * 1201
-
-    def add(self, level: float | None) -> None:
-        if level is not None:
-            self.counts[max(0, min(1200, round((level + 120.0) * 10)))] += 1
-
-    def percentile(self, fraction: float, gate: float = -120.0) -> float | None:
-        first = max(0, round((gate + 120.0) * 10))
-        total = sum(self.counts[first:])
-        if not total:
-            return None
-        target = int((total - 1) * fraction)
-        seen = 0
-        for index in range(first, len(self.counts)):
-            seen += self.counts[index]
-            if seen > target:
-                return index / 10.0 - 120.0
-        return 0.0
-
-    def active_level(self) -> tuple[float | None, float]:
-        reference = self.percentile(0.75)
-        if reference is None:
-            return None, 0.0
-        gate = max(BALANCE_ABSOLUTE_GATE_DBFS,
-                   reference - BALANCE_RELATIVE_GATE_DB)
-
-        # Mirror the Windows noise-floor guard: if a persistent upper
-        # population exists at least 12 dB above a low reference, use that
-        # upper population as the speech reference.
-        minimum_blocks = math.ceil(
-            BALANCE_MIN_EVIDENCE_SECONDS / BALANCE_BLOCK_SECONDS)
-        upper_count = 0
-        upper_floor = None
-        for index in range(len(self.counts) - 1, -1, -1):
-            upper_count += self.counts[index]
-            if upper_count >= minimum_blocks:
-                upper_floor = index / 10.0 - 120.0
-                break
-        if (reference <= -35.0 and upper_floor is not None and
-                upper_floor >= reference + 12.0):
-            gate = max(gate, upper_floor - 6.0)
-
-        level = self.percentile(0.5, gate)
-        first = max(0, round((gate + 120.0) * 10))
-        return level, sum(self.counts[first:]) * BALANCE_BLOCK_SECONDS
 
 
 def _decode_mono_pcm16(ffmpeg: str, source: Path, destination: Path) -> None:
@@ -179,141 +122,15 @@ def _iter_aligned_mono_blocks(system_pcm: Path, microphone_pcm: Path,
 
 
 def _gain_plan(system_pcm: Path, microphone_pcm: Path,
-               system_delay_frames: int, microphone_delay_frames: int) -> dict[str, object]:
-    """Mirror the Windows session-wide transcription-oriented gain plan."""
-    block_frames = max(1, round(SAMPLE_RATE * BALANCE_BLOCK_SECONDS))
-    system_levels, microphone_levels = _LevelHistogram(), _LevelHistogram()
-
-    for system, microphone in _iter_aligned_mono_blocks(
+               system_delay_frames: int,
+               microphone_delay_frames: int) -> dict[str, object]:
+    """Adapt aligned macOS PCM files to the shared balancing policy."""
+    def block_pairs(block_frames: int):
+        return _iter_aligned_mono_blocks(
             system_pcm, microphone_pcm, system_delay_frames,
-            microphone_delay_frames, block_frames):
-        system_levels.add(_dbfs_rms(system))
-        microphone_levels.add(_dbfs_rms(microphone))
+            microphone_delay_frames, block_frames)
 
-    system_level, system_seconds = system_levels.active_level()
-    microphone_level, microphone_seconds = microphone_levels.active_level()
-    plan: dict[str, object] = {
-        "render_active_level_dbfs": system_level,
-        "microphone_active_level_dbfs": microphone_level,
-        "render_active_evidence_seconds": system_seconds,
-        "microphone_active_evidence_seconds": microphone_seconds,
-        "quieter_source": None,
-        "measured_level_difference_db": None,
-        "requested_gain_db": 0.0,
-        "safe_gain_db": 0.0,
-        "applied_render_gain_db": 0.0,
-        "applied_microphone_gain_db": 0.0,
-        "residual_difference_db": None,
-        "baseline_clipping": 0,
-        "balanced_clipping": 0,
-        "active_headroom_sample_count": 0,
-        "baseline_clipping_fraction": 0.0,
-        "balanced_clipping_fraction": 0.0,
-        "transcription_balance_state": "skipped",
-        "transcription_balance_skip_reason": None,
-    }
-
-    if (system_level is None or microphone_level is None or
-            system_seconds < BALANCE_MIN_EVIDENCE_SECONDS or
-            microphone_seconds < BALANCE_MIN_EVIDENCE_SECONDS):
-        plan["transcription_balance_skip_reason"] = "insufficient_active_evidence"
-        return plan
-
-    difference = abs(system_level - microphone_level)
-    plan["measured_level_difference_db"] = difference
-    if difference < 0.05:
-        plan["transcription_balance_skip_reason"] = "levels_already_balanced"
-        plan["residual_difference_db"] = difference
-        return plan
-
-    quieter = "render" if system_level < microphone_level else "microphone"
-    plan["quieter_source"] = quieter
-    plan["requested_gain_db"] = difference
-
-    # Same clipping-headroom policy as Windows: one fixed gain for the whole
-    # session, only on the quieter source, bounded by sustained active-audio
-    # clipping. A single ~200 ms high transient is ignored; consecutive high
-    # blocks participate in the headroom analysis.
-    clipping_onset = [0] * 12001
-    baseline = 0
-    active_samples = 0
-
-    def add_headroom_block(system: array, microphone: array) -> None:
-        nonlocal baseline, active_samples
-        for system_sample, microphone_sample in zip(system, microphone):
-            quiet, loud = ((system_sample, microphone_sample)
-                           if quieter == "render"
-                           else (microphone_sample, system_sample))
-            original = int(system_sample) + int(microphone_sample)
-            baseline += int(original > 32767 or original < -32768)
-            active_samples += 1
-            if quiet == 0:
-                continue
-            limit = 32767 if quiet > 0 else -32768
-            factor_limit = (limit - loud) / quiet
-            onset_db = (0.0 if factor_limit <= 1.0 else
-                        20.0 * math.log10(factor_limit))
-            clipping_onset[
-                max(0, min(12000, math.ceil(onset_db * 100)))] += 1
-
-    pending_high_block = None
-    in_high_run = False
-    for system, microphone in _iter_aligned_mono_blocks(
-            system_pcm, microphone_pcm, system_delay_frames,
-            microphone_delay_frames, block_frames):
-        system_db = _dbfs_rms(system)
-        microphone_db = _dbfs_rms(microphone)
-        audible = [value for value in (system_db, microphone_db) if value is not None]
-        if not audible or max(audible) < BALANCE_ABSOLUTE_GATE_DBFS:
-            pending_high_block = None
-            in_high_run = False
-            continue
-        high = ((system_db is not None and system_db > system_level + 12.0) or
-                (microphone_db is not None and
-                 microphone_db > microphone_level + 12.0))
-        if high and pending_high_block is None and not in_high_run:
-            pending_high_block = (system, microphone)
-            continue
-        if high:
-            if pending_high_block is not None:
-                add_headroom_block(*pending_high_block)
-                pending_high_block = None
-                in_high_run = True
-        else:
-            pending_high_block = None
-            in_high_run = False
-        add_headroom_block(system, microphone)
-
-    def clipping(gain_db: float) -> int:
-        index = max(0, min(12000, math.floor(gain_db * 100)))
-        return sum(clipping_onset[:index + 1])
-
-    requested_clipping = clipping(difference)
-    allowance = baseline + int(active_samples * BALANCE_MAX_ADDED_CLIPPING_FRACTION)
-    safe = difference
-    if requested_clipping > allowance:
-        low, high = 0.0, difference
-        for _ in range(16):
-            candidate = (low + high) / 2.0
-            if clipping(candidate) <= allowance:
-                low = candidate
-            else:
-                high = candidate
-        safe = low
-
-    balanced = clipping(safe)
-    plan.update({
-        "safe_gain_db": safe,
-        f"applied_{quieter}_gain_db": safe,
-        "residual_difference_db": max(0.0, difference - safe),
-        "baseline_clipping": baseline,
-        "balanced_clipping": balanced,
-        "active_headroom_sample_count": active_samples,
-        "baseline_clipping_fraction": baseline / active_samples if active_samples else 0.0,
-        "balanced_clipping_fraction": balanced / active_samples if active_samples else 0.0,
-        "transcription_balance_state": "full" if safe >= difference - 0.05 else "partial",
-    })
-    return plan
+    return transcription_balance.gain_plan(SAMPLE_RATE, block_pairs)
 
 
 def _mix_to_pcm(system_pcm: Path, microphone_pcm: Path, mixed_pcm: Path,
