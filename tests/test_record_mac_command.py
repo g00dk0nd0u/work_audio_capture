@@ -1,6 +1,10 @@
 import os
+import selectors
+import signal
 import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -25,6 +29,7 @@ def _run_launcher(
     mp3_failure: bool = False,
     open_failure: bool = False,
     tee_failure: bool = False,
+    interrupt_recorder: bool = False,
 ):
     launcher = tmp_path / "record_mac.command"
     launcher.write_bytes((REPOSITORY / "record_mac.command").read_bytes())
@@ -40,14 +45,31 @@ def _run_launcher(
 while [ "$1" != "--package-path" ]; do shift; done
 package_path=$2
 mkdir -p "$package_path/.build/release"
-cat > "$package_path/.build/release/sck-audio-spike" <<'EOF'
-#!/bin/sh
-while [ "$1" != "--output-dir" ]; do shift; done
-session=$2
-echo "capture complete: test capture"
-echo "capture warning: test warning" >&2
-touch "$session/system.caf" "$session/microphone.caf" "$session/result.json"
-exit "${RECORDER_FAIL:-0}"
+cat > "$package_path/.build/release/sck-audio-spike" <<EOF
+#!${SYSTEM_PYTHON}
+import os
+from pathlib import Path
+import signal
+import sys
+
+session = Path(sys.argv[sys.argv.index("--output-dir") + 1])
+if os.environ.get("INTERRUPT_RECORDER") == "1":
+    def stop(_signum, _frame):
+        print("capture complete: interrupted test capture", flush=True)
+        print("capture warning: test warning", file=sys.stderr, flush=True)
+        for name in ("system.caf", "microphone.caf", "result.json"):
+            (session / name).touch()
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGINT, stop)
+    print("mock recorder ready", flush=True)
+    signal.pause()
+else:
+    print("capture complete: test capture", flush=True)
+    print("capture warning: test warning", file=sys.stderr, flush=True)
+    for name in ("system.caf", "microphone.caf", "result.json"):
+        (session / name).touch()
+    raise SystemExit(int(os.environ.get("RECORDER_FAIL", "0")))
 EOF
 chmod +x "$package_path/.build/release/sck-audio-spike"
 """,
@@ -79,15 +101,41 @@ exit "${OPEN_FAIL:-0}"
         RECORDER_FAIL="6" if recorder_failure else "0",
         MAKE_MP3_FAIL="1" if mp3_failure else "0",
         OPEN_FAIL="9" if open_failure else "0",
+        INTERRUPT_RECORDER="1" if interrupt_recorder else "0",
+        SYSTEM_PYTHON=sys.executable,
     )
-    result = subprocess.run(
-        [shutil.which("zsh") or "bash", str(launcher)],
-        cwd=tmp_path,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    command = [shutil.which("zsh") or "bash", str(launcher)]
+    if interrupt_recorder:
+        process = subprocess.Popen(
+            command, cwd=tmp_path, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        ready_output = ""
+        deadline = time.monotonic() + 10
+        while "mock recorder ready" not in ready_output:
+            events = selector.select(timeout=max(0, deadline - time.monotonic()))
+            if not events:
+                break
+            ready_output += process.stdout.readline()
+        if "mock recorder ready" not in ready_output:
+            process.kill()
+            stdout, stderr = process.communicate(timeout=5)
+            pytest.fail(
+                f"mock recorder did not become ready: {ready_output + stdout!r} {stderr!r}"
+            )
+        os.killpg(process.pid, signal.SIGINT)
+        stdout, stderr = process.communicate(timeout=10)
+        result = subprocess.CompletedProcess(
+            command, process.returncode, ready_output + stdout, stderr
+        )
+    else:
+        result = subprocess.run(
+            command, cwd=tmp_path, env=env, text=True,
+            capture_output=True, check=False,
+        )
     return result, Path(env["OPEN_LOG"])
 
 
@@ -128,6 +176,29 @@ def test_tee_failure_does_not_invalidate_recording(tmp_path):
     session = tmp_path / "recordings/mac/2026-09-22_22-28-54"
     assert result.returncode == 0
     assert (session / "recording.mp3").is_file()
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "killpg") or not hasattr(os, "setsid"),
+    reason="requires POSIX foreground-process-group signal semantics",
+)
+def test_session_log_survives_sigint_and_captures_postprocessing(tmp_path):
+    result, open_log = _run_launcher(tmp_path, interrupt_recorder=True)
+
+    session = tmp_path / "recordings/mac/2026-09-22_22-28-54"
+    transcript = (session / "session.log").read_text()
+    assert result.returncode == 0
+    assert open_log.read_text().splitlines() == [str(session)]
+    for expected in (
+        "capture complete: interrupted test capture",
+        "Creating listening MP3...",
+        "Balance:",
+        "MP3 created:",
+        "Recording stopped.",
+        "Saved:",
+        "MP3:",
+    ):
+        assert expected in transcript
 
 
 def test_failed_mp3_creation_does_not_open_finder(tmp_path):
