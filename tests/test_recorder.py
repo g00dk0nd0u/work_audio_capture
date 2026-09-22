@@ -555,13 +555,15 @@ def test_chunk_rotation_keeps_capture_files_bounded(tmp_path):
         render, microphone, tmp_path / "render_0001.wav", tmp_path / "microphone_0001.wav"))
     worker.start()
     deadline = time.monotonic() + 2
-    while not (tmp_path / "render_0002.wav").exists() and time.monotonic() < deadline:
+    rotated_paths = (
+        tmp_path / "render_0002.wav", tmp_path / "microphone_0002.wav")
+    while (not all(path.exists() for path in rotated_paths)
+           and time.monotonic() < deadline):
         worker.join(0.01)
-    assert (tmp_path / "render_0002.wav").exists()
+    assert all(path.exists() for path in rotated_paths)
     recorder.stop()
     worker.join(2)
     assert not worker.is_alive()
-    assert (tmp_path / "microphone_0002.wav").exists()
 
 
 def test_chunk_rotation_also_obeys_pcm_data_limit(tmp_path, monkeypatch):
