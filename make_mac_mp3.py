@@ -28,11 +28,27 @@ from audio_capture import transcription_balance  # noqa: E402
 SAMPLE_RATE = 48000
 MP3_BITRATE = "48k"
 MIX_FRAMES = 262144
+POSTPROCESS_SCHEMA_VERSION = 1
 
 
 def _fail(message: str, code: int = 4) -> int:
     print(message, file=sys.stderr)
     return code
+
+
+def _write_postprocess(path: Path, diagnostic: dict[str, object]) -> None:
+    """Atomically persist the post-processing outcome beside capture evidence."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(diagnostic, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def _nonnegative_seconds(value: object) -> float:
@@ -193,29 +209,44 @@ def main() -> int:
     result_path = session / "result.json"
     output_path = session / "recording.mp3"
     part_path = session / "recording.part.mp3"
-
-    for path in (system_path, microphone_path, result_path):
-        if not path.is_file():
-            return _fail(f"MP3 not created: missing {path.name}: {path}")
-
-    ffmpeg = shutil.which("ffmpeg")
-    if ffmpeg is None:
-        return _fail(
-            "MP3 not created: ffmpeg is required once. Install it with: brew install ffmpeg"
-        )
-
+    postprocess_path = session / "postprocess.json"
+    diagnostic: dict[str, object] = {
+        "schemaVersion": POSTPROCESS_SCHEMA_VERSION,
+        "systemActiveLevelDbfs": None,
+        "microphoneActiveLevelDbfs": None,
+        "appliedSystemGainDb": None,
+        "appliedMicrophoneGainDb": None,
+        "transcriptionBalanceState": None,
+        "transcriptionBalanceSkipReason": None,
+        "mp3SampleRate": SAMPLE_RATE,
+        "mp3Bitrate": MP3_BITRATE,
+        "mp3Channels": 1,
+        "mp3Path": str(output_path),
+        "mp3Created": False,
+        "postprocessSucceeded": False,
+    }
     try:
-        result = json.loads(result_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return _fail(f"MP3 not created: could not read result.json: {exc}")
+        for path in (system_path, microphone_path, result_path):
+            if not path.is_file():
+                return _fail(f"MP3 not created: missing {path.name}: {path}")
 
-    alignment = result.get("postCaptureAlignment") or {}
-    system_delay_frames = round(
-        _nonnegative_seconds(alignment.get("systemLeadingSilenceSeconds")) * SAMPLE_RATE)
-    microphone_delay_frames = round(
-        _nonnegative_seconds(alignment.get("microphoneLeadingSilenceSeconds")) * SAMPLE_RATE)
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            return _fail(
+                "MP3 not created: ffmpeg is required once. Install it with: brew install ffmpeg"
+            )
 
-    try:
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return _fail(f"MP3 not created: could not read result.json: {exc}")
+
+        alignment = result.get("postCaptureAlignment") or {}
+        system_delay_frames = round(
+            _nonnegative_seconds(alignment.get("systemLeadingSilenceSeconds")) * SAMPLE_RATE)
+        microphone_delay_frames = round(
+            _nonnegative_seconds(alignment.get("microphoneLeadingSilenceSeconds")) * SAMPLE_RATE)
+
         with tempfile.TemporaryDirectory(prefix="work-audio-mac-") as temporary:
             temporary_dir = Path(temporary)
             system_pcm = temporary_dir / "system.s16le"
@@ -227,6 +258,16 @@ def main() -> int:
             plan = _gain_plan(
                 system_pcm, microphone_pcm,
                 system_delay_frames, microphone_delay_frames)
+
+            diagnostic.update({
+                "systemActiveLevelDbfs": plan["render_active_level_dbfs"],
+                "microphoneActiveLevelDbfs": plan["microphone_active_level_dbfs"],
+                "appliedSystemGainDb": plan["applied_render_gain_db"],
+                "appliedMicrophoneGainDb": plan["applied_microphone_gain_db"],
+                "transcriptionBalanceState": plan["transcription_balance_state"],
+                "transcriptionBalanceSkipReason": plan[
+                    "transcription_balance_skip_reason"],
+            })
 
             system_gain_db = float(plan["applied_render_gain_db"])
             microphone_gain_db = float(plan["applied_microphone_gain_db"])
@@ -250,10 +291,20 @@ def main() -> int:
             if not part_path.is_file() or part_path.stat().st_size == 0:
                 raise RuntimeError("MP3 encoder produced no output")
             part_path.replace(output_path)
+            diagnostic["mp3Created"] = True
+            diagnostic["postprocessSucceeded"] = True
     except (OSError, RuntimeError) as exc:
         if part_path.exists():
             part_path.unlink()
         return _fail(f"MP3 not created: {exc}")
+    finally:
+        try:
+            _write_postprocess(postprocess_path, diagnostic)
+        except OSError as exc:
+            print(
+                f"Warning: could not write postprocess diagnostics: {exc}",
+                file=sys.stderr,
+            )
 
     print(f"MP3 created: {output_path}")
     return 0

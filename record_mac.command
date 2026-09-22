@@ -39,6 +39,16 @@ while ! mkdir "$session" 2>/dev/null; do
   (( suffix++ ))
 done
 
+session_log="$session/session.log"
+if : > "$session_log" 2>/dev/null; then
+  # Keep the terminal interactive while preserving both output streams for
+  # troubleshooting. A tee failure must never invalidate captured audio.
+  exec > >(trap '' INT; exec tee -a "$session_log") \
+    2> >(trap '' INT; exec tee -a "$session_log" >&2)
+else
+  echo "Warning: could not create session log: $session_log" >&2
+fi
+
 echo "Recording..."
 echo "Press Ctrl+C to stop."
 echo "Session:"
