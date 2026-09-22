@@ -13,6 +13,8 @@ import sys
 
 
 SILENCE_DB = -70.0
+SYSTEM_MIX_GAIN = 0.4
+MICROPHONE_MIX_GAIN = 0.6
 
 
 def _fail(message: str, code: int = 4) -> int:
@@ -118,15 +120,15 @@ def main() -> int:
         _nonnegative_seconds(alignment.get("microphoneLeadingSilenceSeconds")) * 1000.0
     ))
 
-    # MVP listening copy only. Raw CAF evidence is never modified. Keep the
-    # filter graph deliberately simple and let ffmpeg negotiate sample format
-    # and channel layout. PTS is rebased before applying the measured start
-    # offset. Do not attenuate both inputs: the previous 0.5-per-track mix made
-    # already-quiet captures unnecessarily hard to hear.
+    # MVP listening copy only. Raw CAF evidence is never modified. PTS is
+    # rebased before applying the measured start offset. Keep fixed mix gains
+    # conservative and favor the microphone slightly so speech is easier to
+    # hear against loud system/YouTube audio. Gains sum to 1.0, leaving simple
+    # worst-case headroom without AGC, compression, or normalization.
     if system_has_signal and microphone_has_signal:
         filter_graph = (
-            f"[0:a]aresample=48000,asetpts=PTS-STARTPTS,adelay={system_delay_ms}|{system_delay_ms}[system];"
-            f"[1:a]aresample=48000,asetpts=PTS-STARTPTS,adelay={microphone_delay_ms}|{microphone_delay_ms}[mic];"
+            f"[0:a]aresample=48000,asetpts=PTS-STARTPTS,adelay={system_delay_ms}|{system_delay_ms},volume={SYSTEM_MIX_GAIN}[system];"
+            f"[1:a]aresample=48000,asetpts=PTS-STARTPTS,adelay={microphone_delay_ms}|{microphone_delay_ms},volume={MICROPHONE_MIX_GAIN}[mic];"
             "[system][mic]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[mix]"
         )
         command = [
