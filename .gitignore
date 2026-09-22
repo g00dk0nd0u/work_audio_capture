@@ -11,3 +11,4 @@ __pycache__/
 .build/
 .DS_Store
 /experiments/macos_capture/sck/capture-*/
+/experiments/macos_capture/catap/capture-*/
