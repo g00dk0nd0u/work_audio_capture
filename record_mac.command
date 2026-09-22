@@ -48,8 +48,13 @@ recorder_command=("$package_path/.build/release/sck-audio-spike" --output-dir "$
 if [[ $# -eq 1 ]]; then
   recorder_command+=(--duration "$1")
 fi
+
+# Ctrl+C is handled by the Swift recorder. Ignore SIGINT in this wrapper while
+# the child is running so the wrapper can continue to MP3 creation afterward.
+trap '' INT
 "${recorder_command[@]}"
 recording_exit_code=$?
+trap - INT
 
 mp3_exit_code=0
 if [[ -f "$session/system.caf" && -f "$session/microphone.caf" && -f "$session/result.json" ]]; then
