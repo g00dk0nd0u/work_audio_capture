@@ -5,6 +5,25 @@ microphone from one `SCStream`. A minimal 2x2, approximately 1 fps screen
 output is attached because ScreenCaptureKit is screen-capture oriented; its
 frames are discarded. Audio is not mixed or processed.
 
+## Quick macOS MVP recording
+
+From the repository root on a Mac running macOS 15 or newer, run:
+
+```bash
+./record_mac.command
+```
+
+Recording continues until you press Ctrl+C. Each session preserves its raw
+files under `recordings/mac/<timestamp>/`. For a timed developer test, pass one
+duration argument, for example `./record_mac.command 30`.
+
+On first use, macOS may ask for **Screen & System Audio Recording** and
+**Microphone** access. Grant both to Terminal (or the process used to launch
+the recorder) in **System Settings > Privacy & Security**, then rerun if
+needed. The MVP deliberately writes separate `system.caf` and
+`microphone.caf` raw recordings plus `result.json`; creating a resampled,
+aligned, combined listening file is intentionally deferred.
+
 ## Build and run
 
 In Terminal on a Mac running macOS 15 or newer:
