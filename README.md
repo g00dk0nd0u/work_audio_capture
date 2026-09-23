@@ -13,6 +13,8 @@ Windows PC の再生音声（Teams / Zoom / YouTube など）とマイク音声�
 
 Xcode Command Line Tools（Swift）と ffmpeg を用意し、リポジトリ直下で次を実行します。
 
+初回は macOS が **Screen & System Audio Recording** と **Microphone** へのアクセスを求める場合があります。**System Settings > Privacy & Security** で Terminal（または起動に使うアプリ／プロセス）に両方を許可し、必要に応じて再実行してください。
+
 ```bash
 ./record_mac.command
 ```

@@ -12,6 +12,13 @@ devices, permission lifecycles, or interruption scenarios.
 - Python 3
 - ffmpeg, used only for macOS MP3 post-processing
 
+On first use, macOS may request both **Screen & System Audio Recording** and
+**Microphone** access. Grant both permissions to Terminal, or to the app or
+process used to launch the recorder, under **System Settings > Privacy &
+Security**. If permission is granted for the first time or was previously
+denied, rerun `./record_mac.command` if needed. A run without the required
+permissions may finish without producing a valid MP3.
+
 From the repository root, run:
 
 ```bash
