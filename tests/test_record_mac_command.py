@@ -53,6 +53,9 @@ import signal
 import sys
 
 session = Path(sys.argv[sys.argv.index("--output-dir") + 1])
+if any(session.iterdir()):
+    print("session directory was not empty at recorder startup", file=sys.stderr)
+    raise SystemExit(8)
 if os.environ.get("INTERRUPT_RECORDER") == "1":
     def stop(_signum, _frame):
         print("capture complete: interrupted test capture", flush=True)
