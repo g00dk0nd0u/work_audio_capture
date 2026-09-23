@@ -41,8 +41,8 @@ recording.mp3
 ```
 
 - `system.caf` and `microphone.caf` are the separate lossless raw tracks.
-- `result.json` records capture evidence, including source and timing data.
-- `postprocess.json` records alignment, balancing, and MP3 diagnostics.
+- `result.json` records capture, timing, and alignment evidence.
+- `postprocess.json` records balancing and MP3/post-processing diagnostics.
 - `session.log` preserves the terminal and capture transcript for diagnosis.
 - `recording.mp3` is the normal mono listening output.
 
