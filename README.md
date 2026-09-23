@@ -1,11 +1,35 @@
 # Work Audio Capture
 
+Windows 版は、公開・配布済みの established implementation です。リポジトリには macOS 15 以降向けの ScreenCaptureKit 実装もありますが、幅広い実機構成での検証は今後の課題です。Windows の通常経路は引き続き ffmpeg や実行時 `pip` package を必要とせず、ffmpeg は macOS で MP3 を後処理するためにのみ必要です。
+
 Windows PC の再生音声（Teams / Zoom / YouTube など）とマイク音声を同時に録音し、録音セッションごとに **1 本の mono MP3** を作る軽量ツールです。既定経路は Python 標準ライブラリから Windows MMDevice / WASAPI と Media Foundation を直接使うため、NumPy、ffmpeg、追加 DLL、実行時の `pip install` は不要です。
 
 - Windows 専用、Python 3.10 以降
 - system playback + microphone の同時 native WASAPI capture
 - Media Foundation による mono MP3（通常は 48 kbps、明示指定時は 80 kbps。silent fallback なし）
 - 約 10 分ごとの recovery WAV と 12 時間の録音安全上限
+
+## macOS 15+（実機検証を拡大中）
+
+Xcode Command Line Tools（Swift）と ffmpeg を用意し、リポジトリ直下で次を実行します。
+
+```bash
+./record_mac.command
+```
+
+ScreenCaptureKit で収録し、現在の出力はセッションごとに次の場所へ保存されます。
+
+```text
+recordings/mac/<timestamp>/
+  system.caf
+  microphone.caf
+  result.json
+  postprocess.json
+  session.log
+  recording.mp3
+```
+
+`result.json` は capture evidence、`postprocess.json` は balancing / MP3 diagnostics、`session.log` は永続化された terminal / capture transcript、`recording.mp3` は通常の視聴用出力です。詳細と現在の検証範囲は [`docs/MACOS.md`](docs/MACOS.md) を参照してください。
 
 ---
 

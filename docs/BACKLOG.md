@@ -24,6 +24,30 @@ This document separates the implemented baseline from work that still requires e
 
 The normal native path requires no third-party runtime package. `PyAudioWPatch` remains an explicitly selected optional backend.
 
+## macOS
+
+### Implemented macOS baseline
+
+- ScreenCaptureKit system + microphone capture
+- Separate CAF raw tracks
+- PTS-based post-capture alignment
+- Shared source balancing
+- Mono MP3 post-processing
+- Finder output opening after successful completion
+- Persistent `session.log`
+- `postprocess.json` diagnostics
+
+### Remaining macOS validation
+
+The following scenarios remain validation work and are not marked complete:
+
+- Long sessions
+- AirPods and other Bluetooth combinations
+- Permission lifecycle
+- Device transitions
+- Interruption and failure behavior
+- Broader real-hardware acceptance
+
 ## P0 — representative real-PC validation
 
 Do not treat automated or single-development-machine results as hardware acceptance. Validate on representative managed Windows laptops and actual device combinations:

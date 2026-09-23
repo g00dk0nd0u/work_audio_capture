@@ -8,6 +8,8 @@ These instructions apply to the entire repository.
 
 `AudioCapture/` is the user-facing distribution source of truth. A runtime change is not complete until the distribution copy is synchronized.
 
+The existing Windows runtime and `AudioCapture/` distribution are externally used and must not be modified by repository-hygiene or macOS-documentation tasks unless the task explicitly requires a Windows/distribution change. Documentation-only work that explicitly freezes the distribution, including the macOS documentation task recorded in repository history, intentionally does not modify `AudioCapture/`.
+
 When changing runtime code in the repository root or under `src/audio_capture/`:
 
 1. Update the corresponding runtime file under `AudioCapture/`.
