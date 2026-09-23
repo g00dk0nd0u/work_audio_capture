@@ -1,3 +1,5 @@
+> Archived snapshot of the repository state on 2026-09-04; this is not current normative documentation.
+
 # Repository hygiene audit report
 
 この文書は、audio runtime baseline commit `af08af05b659327a3414000fab22229e9cbe0089`
