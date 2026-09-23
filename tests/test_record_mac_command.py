@@ -53,6 +53,9 @@ import signal
 import sys
 
 session = Path(sys.argv[sys.argv.index("--output-dir") + 1])
+if session.exists() and any(session.iterdir()):
+    print(f"error: output directory must be empty: {session}", file=sys.stderr)
+    raise SystemExit(8)
 if os.environ.get("INTERRUPT_RECORDER") == "1":
     def stop(_signum, _frame):
         print("capture complete: interrupted test capture", flush=True)
