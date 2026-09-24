@@ -40,11 +40,12 @@ while ! mkdir "$session" 2>/dev/null; do
 done
 
 session_log="$session/session.log"
-if : > "$session_log" 2>/dev/null; then
+temporary_session_log=""
+if temporary_session_log=$(mktemp "$repo_root/recordings/mac/.session-log.XXXXXX") 2>/dev/null; then
   # Keep the terminal interactive while preserving both output streams for
   # troubleshooting. A tee failure must never invalidate captured audio.
-  exec > >(trap '' INT; exec tee -a "$session_log") \
-    2> >(trap '' INT; exec tee -a "$session_log" >&2)
+  exec > >(trap '' INT; exec tee -a "$temporary_session_log") \
+    2> >(trap '' INT; exec tee -a "$temporary_session_log" >&2)
 else
   echo "Warning: could not create session log: $session_log" >&2
 fi
@@ -65,6 +66,10 @@ trap '' INT
 "${recorder_command[@]}"
 recording_exit_code=$?
 trap - INT
+
+if [[ -n "$temporary_session_log" ]] && ! mv "$temporary_session_log" "$session_log"; then
+  echo "Warning: could not move session log to: $session_log" >&2
+fi
 
 mp3_exit_code=0
 if [[ -f "$session/system.caf" && -f "$session/microphone.caf" && -f "$session/result.json" ]]; then
