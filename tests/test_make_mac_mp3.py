@@ -58,6 +58,8 @@ def test_postprocess_records_shared_plan_and_success_metadata(session, monkeypat
         "schemaVersion": 1,
         "systemActiveLevelDbfs": plan["render_active_level_dbfs"],
         "microphoneActiveLevelDbfs": plan["microphone_active_level_dbfs"],
+        "microphoneTargetOverSystemDb":
+            make_mac_mp3.MICROPHONE_TARGET_OVER_SYSTEM_DB,
         "appliedSystemGainDb": plan["applied_render_gain_db"],
         "appliedMicrophoneGainDb": plan["applied_microphone_gain_db"],
         "transcriptionBalanceState": plan["transcription_balance_state"],
@@ -69,6 +71,15 @@ def test_postprocess_records_shared_plan_and_success_metadata(session, monkeypat
         "mp3Created": True,
         "postprocessSucceeded": True,
     }
+
+
+def test_balance_console_reports_microphone_target(session, monkeypatch, capsys):
+    _configure_processing(monkeypatch, _plan())
+    monkeypatch.setattr(sys, "argv", ["make_mac_mp3.py", str(session)])
+
+    assert make_mac_mp3.main() == 0
+
+    assert "microphone target=+2.0 dB" in capsys.readouterr().out
 
 
 def test_failed_encode_records_plan_and_failure(session, monkeypatch):

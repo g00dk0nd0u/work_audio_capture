@@ -29,6 +29,7 @@ SAMPLE_RATE = 48000
 MP3_BITRATE = "48k"
 MIX_FRAMES = 262144
 POSTPROCESS_SCHEMA_VERSION = 1
+MICROPHONE_TARGET_OVER_SYSTEM_DB = 2.0
 
 
 def _fail(message: str, code: int = 4) -> int:
@@ -146,7 +147,11 @@ def _gain_plan(system_pcm: Path, microphone_pcm: Path,
             system_pcm, microphone_pcm, system_delay_frames,
             microphone_delay_frames, block_frames)
 
-    return transcription_balance.gain_plan(SAMPLE_RATE, block_pairs)
+    return transcription_balance.gain_plan(
+        SAMPLE_RATE,
+        block_pairs,
+        microphone_target_over_render_db=MICROPHONE_TARGET_OVER_SYSTEM_DB,
+    )
 
 
 def _mix_to_pcm(system_pcm: Path, microphone_pcm: Path, mixed_pcm: Path,
@@ -214,6 +219,7 @@ def main() -> int:
         "schemaVersion": POSTPROCESS_SCHEMA_VERSION,
         "systemActiveLevelDbfs": None,
         "microphoneActiveLevelDbfs": None,
+        "microphoneTargetOverSystemDb": MICROPHONE_TARGET_OVER_SYSTEM_DB,
         "appliedSystemGainDb": None,
         "appliedMicrophoneGainDb": None,
         "transcriptionBalanceState": None,
@@ -275,6 +281,7 @@ def main() -> int:
                 "Balance: "
                 f"system={_format_level(plan['render_active_level_dbfs'])}, "
                 f"microphone={_format_level(plan['microphone_active_level_dbfs'])}, "
+                f"microphone target=+{MICROPHONE_TARGET_OVER_SYSTEM_DB:.1f} dB, "
                 f"system gain={system_gain_db:.1f} dB, "
                 f"microphone gain={microphone_gain_db:.1f} dB, "
                 f"state={plan['transcription_balance_state']}"
