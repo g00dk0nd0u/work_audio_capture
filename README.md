@@ -9,6 +9,18 @@ Windows PC の再生音声（Teams / Zoom / YouTube など）とマイク音声�
 - Media Foundation による mono MP3（通常は 48 kbps、明示指定時は 80 kbps。silent fallback なし）
 - 約 10 分ごとの recovery WAV と 12 時間の録音安全上限
 
+## Repository layout
+
+| 区分 | 場所 | 役割 |
+| --- | --- | --- |
+| Windows | `record_one_click.py`, `run.py`, `src/audio_capture/` | established implementation。互換性のため既存パスを維持 |
+| macOS | `record_mac.py`, `record_mac.command`, `platforms/macos/sck/` | 公開 entrypoint と production ScreenCaptureKit 実装 |
+| shared/core | `src/audio_capture/` | Python core と cross-platform balancing |
+| experiments | `experiments/` | 非 production の研究。`macos_capture/catap/` は blocked candidate |
+| distribution | `AudioCapture/` | 外部利用される配布 mirror（編集元ではない） |
+
+詳しい区分は [`platforms/README.md`](platforms/README.md) を参照してください。
+
 ## macOS 15+（実機検証を拡大中）
 
 Xcode Command Line Tools（Swift）と ffmpeg を用意し、リポジトリ直下で次を実行します。

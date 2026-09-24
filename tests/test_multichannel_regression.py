@@ -176,10 +176,13 @@ def test_distribution_runtime_files_match_repository_runtime():
         ).read_bytes(), launcher
 
     mac_runtime_files = (
-        "experiments/macos_capture/sck/Package.swift",
-        "experiments/macos_capture/sck/Sources/sck-audio-spike/CaptureCoverageEvidence.swift",
-        "experiments/macos_capture/sck/Sources/sck-audio-spike/SCKAudioSpike.swift",
+        "platforms/macos/sck/Package.swift",
+        "platforms/macos/sck/Sources/sck-audio-spike/CaptureCoverageEvidence.swift",
+        "platforms/macos/sck/Sources/sck-audio-spike/SCKAudioSpike.swift",
     )
+    assert not (PROJECT_ROOT / "experiments/macos_capture/sck").exists()
+    assert (PROJECT_ROOT / mac_runtime_files[0]).is_file()
+    assert (PROJECT_ROOT / mac_runtime_files[2]).is_file()
     for relative_path in mac_runtime_files:
         assert (DISTRIBUTION_ROOT / relative_path).read_bytes() == (
             PROJECT_ROOT / relative_path

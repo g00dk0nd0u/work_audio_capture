@@ -29,7 +29,7 @@ aligned, combined listening file is intentionally deferred.
 In Terminal on a Mac running macOS 15 or newer:
 
 ```bash
-cd experiments/macos_capture/sck
+cd platforms/macos/sck
 swift build -c release
 rm -rf ./capture-30s && .build/release/sck-audio-spike --duration 30 --output-dir ./capture-30s
 ```

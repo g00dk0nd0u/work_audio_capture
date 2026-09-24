@@ -61,7 +61,7 @@ folder in Finder.
 ## Current implementation versus earlier research
 
 The current runnable path is `record_mac.command` plus the ScreenCaptureKit
-Swift helper under `experiments/macos_capture/sck/` and the repository's macOS
+Swift helper under `platforms/macos/sck/` and the repository's macOS
 post-processor. It performs the capture and post-capture workflow described
 above.
 
