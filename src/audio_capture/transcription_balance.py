@@ -79,8 +79,10 @@ class _LevelHistogram:
 
 
 def gain_plan(sample_rate: int,
-              block_pairs: BlockPairFactory) -> dict[str, object]:
-    """Choose one session-wide safe gain for the quieter aligned source."""
+              block_pairs: BlockPairFactory,
+              microphone_target_over_render_db: float = 0.0,
+              ) -> dict[str, object]:
+    """Choose one session-wide safe gain to reach the requested source offset."""
     block_frames = max(1, round(sample_rate * BALANCE_BLOCK_SECONDS))
     render_levels, microphone_levels = _LevelHistogram(), _LevelHistogram()
     for render, microphone in block_pairs(block_frames):
@@ -110,13 +112,16 @@ def gain_plan(sample_rate: int,
         return plan
     difference = abs(render_level - microphone_level)
     plan["measured_level_difference_db"] = difference
-    if difference < 0.05:
+    current_offset = microphone_level - render_level
+    correction = microphone_target_over_render_db - current_offset
+    requested_gain = abs(correction)
+    if requested_gain < 0.05:
         plan["transcription_balance_skip_reason"] = "levels_already_balanced"
-        plan["residual_difference_db"] = difference
+        plan["residual_difference_db"] = requested_gain
         return plan
-    quieter = "render" if render_level < microphone_level else "microphone"
+    quieter = "microphone" if correction > 0.0 else "render"
     plan["quieter_source"] = quieter
-    plan["requested_gain_db"] = difference
+    plan["requested_gain_db"] = requested_gain
 
     clipping_onset = [0] * 12001
     baseline = active_samples = 0
@@ -172,9 +177,9 @@ def gain_plan(sample_rate: int,
 
     allowance = baseline + int(
         active_samples * BALANCE_MAX_ADDED_CLIPPING_FRACTION)
-    safe = difference
-    if clipping(difference) > allowance:
-        low, high = 0.0, difference
+    safe = requested_gain
+    if clipping(requested_gain) > allowance:
+        low, high = 0.0, requested_gain
         for _ in range(16):
             candidate = (low + high) / 2.0
             if clipping(candidate) <= allowance:
@@ -186,11 +191,12 @@ def gain_plan(sample_rate: int,
     plan.update({
         "safe_gain_db": safe,
         f"applied_{quieter}_gain_db": safe,
-        "residual_difference_db": max(0.0, difference - safe),
+        "residual_difference_db": max(0.0, requested_gain - safe),
         "baseline_clipping": baseline, "balanced_clipping": balanced,
         "active_headroom_sample_count": active_samples,
         "baseline_clipping_fraction": baseline / active_samples if active_samples else 0.0,
         "balanced_clipping_fraction": balanced / active_samples if active_samples else 0.0,
-        "transcription_balance_state": "full" if safe >= difference - 0.05 else "partial",
+        "transcription_balance_state": (
+            "full" if safe >= requested_gain - 0.05 else "partial"),
     })
     return plan

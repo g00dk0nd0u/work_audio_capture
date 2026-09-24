@@ -31,8 +31,10 @@ tracks using their media presentation timestamps (PTS), applies the shared
 `transcription_balance` policy, mixes to mono, and invokes ffmpeg to create
 `recording.mp3`.
 
-Balancing uses one fixed gain plan for the entire session. Capture does not
-apply AGC, compression, normalization, or other capture-time gain processing.
+For the listening MP3, the shared balance planner uses a fixed, session-wide
+target of +2.0 dB for microphone relative to system audio. Its existing
+clipping safety may reduce the requested correction. This is not AGC,
+compression, or normalization, and the raw CAF capture is unchanged.
 
 ## Session output
 
