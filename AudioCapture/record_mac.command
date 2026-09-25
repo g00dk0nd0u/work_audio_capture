@@ -23,8 +23,25 @@ fi
 repo_root="$(cd -- "$(dirname -- "$0")" && pwd -P)" || exit $?
 package_path="$repo_root/platforms/macos/sck"
 
-echo "Work Audio Capture — macOS"
-swift build -c release --package-path "$package_path" || exit $?
+build_log=""
+if build_log=$(mktemp "$repo_root/.record-mac-build.XXXXXX") 2>/dev/null; then
+  swift build -c release --package-path "$package_path" >"$build_log" 2>&1
+  build_exit_code=$?
+  if [[ $build_exit_code -ne 0 ]]; then
+    echo "Could not start recording: Swift build failed." >&2
+    cat "$build_log" >&2
+    rm -f "$build_log"
+    exit $build_exit_code
+  fi
+  rm -f "$build_log"
+else
+  swift build -c release --package-path "$package_path"
+  build_exit_code=$?
+  if [[ $build_exit_code -ne 0 ]]; then
+    echo "Could not start recording: Swift build failed." >&2
+    exit $build_exit_code
+  fi
+fi
 
 timestamp=$(date '+%Y-%m-%d_%H-%M-%S')
 session="$repo_root/recordings/mac/$timestamp"
@@ -41,19 +58,22 @@ done
 
 session_log="$session/session.log"
 temporary_session_log=""
-if temporary_session_log=$(mktemp "$repo_root/recordings/mac/.session-log.XXXXXX") 2>/dev/null; then
-  # Keep the terminal interactive while preserving both output streams for
-  # troubleshooting. A tee failure must never invalidate captured audio.
-  exec > >(trap '' INT; exec tee -a "$temporary_session_log") \
-    2> >(trap '' INT; exec tee -a "$temporary_session_log" >&2)
-else
+if ! temporary_session_log=$(mktemp "$repo_root/recordings/mac/.session-log.XXXXXX") 2>/dev/null; then
   echo "Warning: could not create session log: $session_log" >&2
+  temporary_session_log=""
 fi
 
-echo "Recording..."
-echo "Press Ctrl+C to stop."
-echo "Session:"
-echo "$session"
+log_line() {
+  local message="$1"
+  echo "$message"
+  if [[ -n "$temporary_session_log" && -f "$temporary_session_log" ]]; then
+    echo "$message" >> "$temporary_session_log" 2>/dev/null || true
+  elif [[ -f "$session_log" ]]; then
+    echo "$message" >> "$session_log" 2>/dev/null || true
+  fi
+}
+
+log_line "Session active. Press Ctrl + C to end."
 
 recorder_command=("$package_path/.build/release/sck-audio-spike" --output-dir "$session")
 if [[ $# -eq 1 ]]; then
@@ -63,33 +83,70 @@ fi
 # Ctrl+C is handled by the Swift recorder. Ignore SIGINT in this wrapper while
 # the child is running so the wrapper can continue to MP3 creation afterward.
 trap '' INT
-"${recorder_command[@]}"
+if [[ -n "$temporary_session_log" ]]; then
+  "${recorder_command[@]}" >> "$temporary_session_log" 2>&1
+else
+  "${recorder_command[@]}"
+fi
 recording_exit_code=$?
 trap - INT
 
-if [[ -n "$temporary_session_log" ]] && ! mv "$temporary_session_log" "$session_log"; then
-  echo "Warning: could not move session log to: $session_log" >&2
+active_log=""
+if [[ -n "$temporary_session_log" ]]; then
+  if mv "$temporary_session_log" "$session_log"; then
+    active_log="$session_log"
+    temporary_session_log=""
+  else
+    echo "Warning: could not move session log to: $session_log" >&2
+    active_log="$temporary_session_log"
+  fi
 fi
+
+append_status() {
+  local message="$1"
+  echo "$message"
+  if [[ -n "$active_log" && -f "$active_log" ]]; then
+    echo "$message" >> "$active_log" 2>/dev/null || true
+  fi
+}
 
 mp3_exit_code=0
 if [[ -f "$session/system.caf" && -f "$session/microphone.caf" && -f "$session/result.json" ]]; then
-  echo "Creating listening MP3..."
-  python3 "$repo_root/make_mac_mp3.py" "$session"
+  append_status "Analyzing..."
+  if [[ -n "$active_log" ]]; then
+    python3 "$repo_root/make_mac_mp3.py" "$session" >> "$active_log" 2>&1
+  else
+    python3 "$repo_root/make_mac_mp3.py" "$session"
+  fi
   mp3_exit_code=$?
+  if [[ $mp3_exit_code -eq 0 && -f "$session/recording.mp3" ]]; then
+    append_status "Finalizing... 100%"
+  fi
 fi
 
-echo "Recording stopped."
-echo "Saved:"
-echo "$session"
+show_log_tail() {
+  if [[ -n "$active_log" && -f "$active_log" ]]; then
+    tail -n 20 "$active_log" >&2
+  fi
+}
+
+if [[ $recording_exit_code -ne 0 ]]; then
+  echo "Recording failed; diagnostics: ${active_log:-$session}" >&2
+  show_log_tail
+  exit $recording_exit_code
+fi
+
+if [[ $mp3_exit_code -ne 0 ]]; then
+  echo "MP3 creation failed; diagnostics: ${active_log:-$session}" >&2
+  show_log_tail
+  exit $mp3_exit_code
+fi
+
 if [[ -f "$session/recording.mp3" ]]; then
-  echo "MP3:"
-  echo "$session/recording.mp3"
-  if [[ $recording_exit_code -eq 0 && $mp3_exit_code -eq 0 ]] && ! open "$session"; then
+  append_status "Completed."
+  if ! open "$session"; then
     echo "Recording saved, but could not open output folder: $session" >&2
   fi
 fi
 
-if [[ $recording_exit_code -ne 0 ]]; then
-  exit $recording_exit_code
-fi
-exit $mp3_exit_code
+exit 0
