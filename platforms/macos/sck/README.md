@@ -1,11 +1,15 @@
-# ScreenCaptureKit audio spike (Candidate A)
+# macOS ScreenCaptureKit capture
 
-This isolated experiment requires **macOS 15 or newer** and records system audio and the default
+This is the native macOS capture component used by Work Audio Capture. It
+requires **macOS 15 or newer** and records system audio and the default
 microphone from one `SCStream`. A minimal 2x2, approximately 1 fps screen
 output is attached because ScreenCaptureKit is screen-capture oriented; its
-frames are discarded. Audio is not mixed or processed.
+frames are discarded. The component writes raw `system.caf`, `microphone.caf`,
+and `result.json` files; it does not mix audio or encode MP3 itself. The
+root-level workflow subsequently runs `make_mac_mp3.py` to align, balance, mix,
+and encode the final listening MP3.
 
-## Quick macOS MVP recording
+## Quick macOS recording
 
 From the repository root on a Mac running macOS 15 or newer, run:
 
@@ -20,9 +24,9 @@ duration argument, for example `./record_mac.command 30`.
 On first use, macOS may ask for **Screen & System Audio Recording** and
 **Microphone** access. Grant both to Terminal (or the process used to launch
 the recorder) in **System Settings > Privacy & Security**, then rerun if
-needed. The MVP deliberately writes separate `system.caf` and
-`microphone.caf` raw recordings plus `result.json`; creating a resampled,
-aligned, combined listening file is intentionally deferred.
+needed. The ScreenCaptureKit component writes separate `system.caf` and
+`microphone.caf` raw recordings plus `result.json`. The normal root workflow
+then creates the final listening MP3 from those files.
 
 ## Build and run
 
@@ -38,6 +42,9 @@ For the first built-in-output + built-in-microphone test, select **Built-in
 Speakers** for output and **Built-in Microphone** for input in System Settings,
 play audible content through the speakers, and run the exact command above.
 Use `--help` or `-h` for CLI usage.
+
+The internal executable name `sck-audio-spike` is retained from the original
+research phase for compatibility and history.
 
 Grant Screen & System Audio Recording and Microphone access when macOS asks.
 If permission was previously denied, enable both for Terminal (or your shell)
@@ -85,11 +92,12 @@ as silent and does not pass evidence validation. Permission fields report the
 screen preflight and microphone authorization states observable before and
 after capture; an unresolvable screen authorization is `null`, not guessed.
 
-## Limitations
+## Validation history and remaining limitations
 
-This is a research spike, not production recording code. On macOS 15.5, a
-real-Mac release build and simultaneous capture from built-in output and the
-built-in microphone succeeded, with non-silent evidence from both sources.
+The implementation began as the Candidate A research spike before becoming
+the production macOS capture component. On macOS 15.5, a real-Mac release
+build and simultaneous capture from built-in output and the built-in
+microphone succeeded, with non-silent evidence from both sources.
 Repeated authorized runs measured an approximately 0.697--0.699 second
 microphone-minus-system PTS start offset. That is machine/run evidence, never a
 hard-coded compensation; a permission-prompt run differed substantially. A
@@ -120,12 +128,12 @@ were 0.016845818 and 57.409217648 seconds. Consequently,
 `evidencePassed`, and `succeeded` were all `false`. These observations do not
 establish the exact physical disconnect timestamp.
 
-Candidate A has not yet met the full acceptance matrix. Permission-denied
-behavior, a 30--60 minute run, abnormal termination, and additional hardware
-coverage still require real-hardware validation.
+The original Candidate A acceptance matrix is not yet complete.
+Permission-denied behavior, a 30--60 minute run, abnormal termination, and
+additional hardware coverage still require real-hardware validation.
 
-The spike always selects the first available display and the system-default
-microphone at capture start. Source sample rate, channels, and PCM
+The production capture component selects the first available display and the
+system-default microphone at capture start. Source sample rate, channels, and PCM
 characteristics are derived from the incoming buffer, and raw/lossless PCM
 evidence is preserved. A default microphone change during an active stream is
 not assumed to migrate the already captured microphone source automatically.
