@@ -10,5 +10,5 @@ __pycache__/
 /AudioCapture.zip
 .build/
 .DS_Store
-/experiments/macos_capture/sck/capture-*/
+/platforms/macos/sck/capture-*/
 /experiments/macos_capture/catap/capture-*/

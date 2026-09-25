@@ -21,7 +21,7 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 repo_root="$(cd -- "$(dirname -- "$0")" && pwd -P)" || exit $?
-package_path="$repo_root/experiments/macos_capture/sck"
+package_path="$repo_root/platforms/macos/sck"
 
 echo "Work Audio Capture — macOS"
 swift build -c release --package-path "$package_path" || exit $?

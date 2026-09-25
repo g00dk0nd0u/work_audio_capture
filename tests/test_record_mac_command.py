@@ -33,7 +33,7 @@ def _run_launcher(
 ):
     launcher = tmp_path / "record_mac.command"
     launcher.write_bytes((REPOSITORY / "record_mac.command").read_bytes())
-    (tmp_path / "experiments/macos_capture/sck").mkdir(parents=True)
+    (tmp_path / "platforms/macos/sck").mkdir(parents=True)
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
