@@ -423,8 +423,10 @@ private final class AudioTrackWriter {
         self.sourceName = sourceName
         originalFormat = format
         originalChannelLayout = channelLayout
+        var fileSettings = audioFormat.settings
+        fileSettings[AVLinearPCMIsNonInterleaved] = false
         file = try AVAudioFile(
-            forWriting: url, settings: audioFormat.settings,
+            forWriting: url, settings: fileSettings,
             commonFormat: audioFormat.commonFormat, interleaved: audioFormat.isInterleaved)
     }
 
