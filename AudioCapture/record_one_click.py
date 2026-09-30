@@ -174,6 +174,9 @@ _LOG_EXTRA_FIELDS = (
     "active_headroom_sample_count", "baseline_clipping_fraction",
     "balanced_clipping_fraction",
     "transcription_balance_state", "transcription_balance_skip_reason",
+    "native_render_sample_rate", "native_microphone_sample_rate",
+    "canonical_output_sample_rate", "resampling_required",
+    "resampled_sources", "resampling_method",
 )
 
 
@@ -544,13 +547,16 @@ def _pcm16_bytes(samples: array) -> bytes:
 
 
 def _source_mono_samples(source, channels: int, source_rate: int,
-                         output_rate: int, block_frames: int):
+                         output_rate: int, block_frames: int,
+                         raw_stats=None):
     """Downmix native PCM blocks, then stream a canonical-rate conversion."""
     def native_samples():
         while True:
             data = source.readframes(block_frames)
             if not data:
                 return
+            if raw_stats is not None:
+                raw_stats.add(_pcm16_samples(data))
             yield from _mono_samples(data, channels)
     yield from resample_pcm16_mono(native_samples(), source_rate, output_rate)
 
@@ -611,9 +617,9 @@ def _encode_chunk_pairs_mp3(
     normalized = [(*pair, None) if len(pair) == 2 else pair for pair in pairs]
     source_rates = {"render": None, "microphone": None}
     durations = []
-    inferred_frames = []
+    native_extents = []
     for render_path, microphone_path, duration_100ns in normalized:
-        counts = []
+        extents = []
         for role, path in (("render", render_path), ("microphone", microphone_path)):
             if path is not None:
                 with wave.open(str(path), "rb") as source:
@@ -630,20 +636,20 @@ def _encode_chunk_pairs_mp3(
                             f"{path}: expected at least one channel, got {channels}; "
                             "source WAVs were kept"
                         )
+                    if rate not in SUPPORTED_MP3_SAMPLE_RATES:
+                        raise ValueError(
+                            f"{path}: MP3 encoder does not support {rate}Hz native "
+                            "source without resampling; source WAVs were kept"
+                        )
                     if source_rates[role] is None:
                         source_rates[role] = rate
                     elif rate != source_rates[role]:
                         raise ValueError(
-                            f"{path}: sample rate changed within {role}: expected {source_rates[role]}Hz, "
+                            f"{path}: sample rate mismatch within {role}: expected {source_rates[role]}Hz, "
                             f"got {rate}Hz; source WAVs were kept"
                         )
-                    counts.append(source.getnframes())
-        if duration_100ns is None:
-            present_rates = [source_rates[role] for role, path in (("render", render_path), ("microphone", microphone_path)) if path is not None]
-            duration_100ns = max((count * 10_000_000 // rate for count, rate in zip(counts, present_rates)), default=0)
-            inferred_frames.append((counts, present_rates))
-        else:
-            inferred_frames.append(None)
+                    extents.append((source.getnframes(), rate))
+        native_extents.append(extents)
         durations.append(duration_100ns)
     present_rates = [rate for rate in source_rates.values() if rate is not None]
     if not present_rates:
@@ -654,7 +660,8 @@ def _encode_chunk_pairs_mp3(
         "native_render_sample_rate": source_rates["render"],
         "native_microphone_sample_rate": source_rates["microphone"],
         "canonical_output_sample_rate": sample_rate,
-        "resampling_required": source_rates["render"] != source_rates["microphone"],
+        "resampling_required": any(
+            rate != sample_rate for rate in present_rates),
         "resampled_sources": [role for role, rate in source_rates.items()
                               if rate is not None and rate != sample_rate],
         "resampling_method": "linear_rational_phase" if any(
@@ -662,11 +669,10 @@ def _encode_chunk_pairs_mp3(
         ) else "none",
     })
     # Convert durations only after selecting the canonical output rate.
-    pair_frames = [max((count * sample_rate // rate
-                        for count, rate in zip(*native_frames)), default=0)
-                   if native_frames is not None else
-                   duration * sample_rate // 10_000_000
-                   for duration, native_frames in zip(durations, inferred_frames)]
+    pair_frames = [max(
+        max((count * sample_rate // rate for count, rate in extents), default=0),
+        duration * sample_rate // 10_000_000 if duration is not None else 0,
+    ) for duration, extents in zip(durations, native_extents)]
     total_frames = sum(pair_frames)
     if sample_rate not in SUPPORTED_MP3_SAMPLE_RATES:
         raise ValueError(
@@ -734,8 +740,12 @@ def _write_recording_pair(encoder, render_path: Path | None,
 
         render_rate = render_file.getframerate() if render_file else sample_rate
         microphone_rate = microphone_file.getframerate() if microphone_file else sample_rate
-        render_iterator = iter(_source_mono_samples(render_file, render_params.nchannels, render_rate, sample_rate, MIX_FRAMES)) if render_file else None
-        microphone_iterator = iter(_source_mono_samples(microphone_file, microphone_params.nchannels, microphone_rate, sample_rate, MIX_FRAMES)) if microphone_file else None
+        render_iterator = iter(_source_mono_samples(
+            render_file, render_params.nchannels, render_rate, sample_rate,
+            MIX_FRAMES, raw_render_stats)) if render_file else None
+        microphone_iterator = iter(_source_mono_samples(
+            microphone_file, microphone_params.nchannels, microphone_rate,
+            sample_rate, MIX_FRAMES, raw_microphone_stats)) if microphone_file else None
         while True:
             requested = min(MIX_FRAMES, total_frames - processed_frames)
             if requested <= 0:
@@ -744,8 +754,6 @@ def _write_recording_pair(encoder, render_path: Path | None,
             microphone_samples = array("h", islice(microphone_iterator, requested)) if microphone_iterator else array("h", [0]) * requested
             if len(render_samples) < requested: render_samples.extend([0] * (requested - len(render_samples)))
             if len(microphone_samples) < requested: microphone_samples.extend([0] * (requested - len(microphone_samples)))
-            raw_render_stats.add(render_samples)
-            raw_microphone_stats.add(microphone_samples)
             mono_render_stats.add(render_samples)
             mono_microphone_stats.add(microphone_samples)
             mixed, block_clipped = _mix_mono_with_diagnostics(
