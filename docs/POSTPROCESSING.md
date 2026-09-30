@@ -65,7 +65,7 @@ Completed.
 
 Progress is global and monotonic across all recovery chunks in the session; it does not reset to 0% at chunk boundaries. Publication is the transaction boundary: the final path is not exposed until the complete MP3 is finalized, non-empty, and renamed from `<final-name>.part.mp3`.
 
-Before analysis begins, every selected WAV header is checked for one common supported sample rate, PCM16 two-byte samples, and at least one channel. Different channel counts are accepted. A header failure names the input and starts neither gain analysis nor the encoder.
+Before analysis begins, every logical source's WAV headers are checked for a consistent supported native sample rate, PCM16 two-byte samples, and at least one channel. Render and microphone may have different rates. The lower supported rate (32, 44.1, or 48 kHz) is linearly upsampled to the higher native rate during post-processing; capture remains at each endpoint's native rate. Downmixing occurs before conversion. Gain analysis and encoding consume the same canonical-rate aligned blocks. Adaptive clock-drift correction and time stretching are not implemented.
 
 ## Cancellation and failure
 

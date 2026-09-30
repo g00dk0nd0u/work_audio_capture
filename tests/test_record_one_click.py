@@ -441,6 +441,26 @@ def test_json_formatter_serializes_session_health_fields():
     assert {name: payload[name] for name in expected} == expected
 
 
+def test_json_formatter_serializes_resampling_fields():
+    record = logging.LogRecord(
+        "work_audio_capture", logging.INFO, __file__, 1,
+        "post-processing sample-rate conversion", (), None)
+    expected = {
+        "native_render_sample_rate": 44_100,
+        "native_microphone_sample_rate": 48_000,
+        "canonical_output_sample_rate": 48_000,
+        "resampling_required": True,
+        "resampled_sources": ["render"],
+        "resampling_method": "linear_rational_phase",
+    }
+    for name, value in expected.items():
+        setattr(record, name, value)
+
+    payload = json.loads(record_one_click._JsonFormatter().format(record))
+
+    assert {name: payload[name] for name in expected} == expected
+
+
 def test_runtime_environment_contains_log_only_diagnostics():
     payload = record_one_click._runtime_environment()
 
@@ -450,18 +470,97 @@ def test_runtime_environment_contains_log_only_diagnostics():
     assert payload["os_version"]
 
 
-def test_encode_keeps_sources_when_sample_rates_differ(tmp_path):
+def test_encode_resamples_mismatched_sources_and_keeps_equal_rate_mix(tmp_path):
     render = tmp_path / "render.wav"
     microphone = tmp_path / "microphone.wav"
     output = tmp_path / "recording.part.mp3"
     _write(render, 2, 48000, [1, 2])
     _write(microphone, 1, 44100, [3])
 
-    with pytest.raises(ValueError, match="sample rate mismatch"):
-        record_one_click._encode_recordings_mp3(render, microphone, output)
+    record_one_click._encode_recordings_mp3(render, microphone, output)
+    assert _FakeEncoder.instances[-1].sample_rate == 48000
+    assert render.exists() and microphone.exists()
+    assert output.exists()
+
+
+@pytest.mark.parametrize(("render_rate", "microphone_rate"), [
+    (44_100, 48_000), (48_000, 44_100), (32_000, 48_000),
+])
+def test_mismatched_native_rates_encode_at_highest_rate(
+        tmp_path, render_rate, microphone_rate):
+    render = tmp_path / "render.wav"
+    microphone = tmp_path / "microphone.wav"
+    _write(render, 1, render_rate, [100] * render_rate)
+    _write(microphone, 1, microphone_rate, [10] * microphone_rate)
+
+    record_one_click._encode_recordings_mp3(
+        render, microphone, tmp_path / "recording.part.mp3")
+
+    encoder = _FakeEncoder.instances[-1]
+    assert encoder.sample_rate == 48_000
+    assert len(_samples(bytes(encoder.data))) == 48_000
+    assert set(_samples(bytes(encoder.data))) == {110}
+
+
+@pytest.mark.parametrize("with_supported_peer", [True, False])
+def test_unsupported_saved_native_rate_is_rejected_before_analysis_or_encoder(
+        tmp_path, monkeypatch, with_supported_peer):
+    render = tmp_path / "render.wav"
+    microphone = tmp_path / "microphone.wav" if with_supported_peer else None
+    _write(render, 1, 22_050, [1, 2])
+    if microphone:
+        _write(microphone, 1, 48_000, [3, 4])
+    monkeypatch.setattr(
+        record_one_click, "_gain_plan",
+        lambda *_args: pytest.fail("analysis must not start"))
+    monkeypatch.setattr(
+        record_one_click, "MP3_ENCODER_FACTORY",
+        lambda *_args, **_kwargs: pytest.fail("encoder must not start"))
+
+    with pytest.raises(ValueError, match="does not support 22050Hz native"):
+        record_one_click._encode_chunk_pairs_mp3(
+            [(render, microphone)], tmp_path / "recording.part.mp3")
+
     assert render.exists()
-    assert microphone.exists()
-    assert not output.exists()
+    assert microphone is None or microphone.exists()
+
+
+def test_one_sided_source_does_not_claim_resampling(tmp_path, caplog):
+    render = tmp_path / "render.wav"
+    _write(render, 1, 44_100, [1, 2])
+    caplog.set_level(logging.INFO, logger="work_audio_capture")
+
+    record_one_click._encode_chunk_pairs_mp3(
+        [(render, None)], tmp_path / "recording.part.mp3")
+
+    conversion = next(record for record in caplog.records
+                      if record.getMessage() ==
+                      "post-processing sample-rate conversion")
+    assert conversion.resampling_required is False
+    assert conversion.resampled_sources == []
+    assert conversion.resampling_method == "none"
+
+
+def test_native_multichannel_raw_diagnostics_precede_downmix_and_resampling(
+        tmp_path, caplog):
+    render = tmp_path / "render.wav"
+    _write(render, 2, 44_100, [1000, 0, 0, 2000])
+    caplog.set_level(logging.INFO, logger="work_audio_capture")
+
+    record_one_click._encode_chunk_pairs_mp3(
+        [(render, None)], tmp_path / "recording.part.mp3")
+
+    raw = next(record for record in caplog.records
+               if getattr(record, "audio_stage", None) == "raw_render")
+    downmixed = next(record for record in caplog.records
+                     if getattr(record, "audio_stage", None) ==
+                     "downmixed_render")
+    assert raw.channel_peak_dbfs == pytest.approx([
+        record_one_click._LevelStatistics._dbfs(1000),
+        record_one_click._LevelStatistics._dbfs(2000),
+    ])
+    assert len(downmixed.channel_peak_dbfs) == 1
+    assert downmixed.peak == 1000
 
 
 def test_mix_common_chunks_promotes_mp3_and_keeps_unpaired_final_chunk(tmp_path, caplog):
@@ -920,7 +1019,6 @@ def test_recording_preflight_queries_actual_common_endpoint_rate(
 
 
 @pytest.mark.parametrize(("render_rate", "microphone_rate", "bitrates", "reason"), [
-    (48_000, 44_100, [48_000], "sample rates differ"),
     (22_050, 22_050, [48_000], "does not support 22050Hz"),
     (44_100, 44_100, [80_000], "no exact mono 44100 Hz / 48000 bps"),
 ])
@@ -937,6 +1035,27 @@ def test_recording_preflight_rejects_before_session_creation(
     assert record_one_click.run() == 1
     assert reason in capsys.readouterr().err
     assert not output.exists()
+
+
+@pytest.mark.parametrize(("render_rate", "microphone_rate"), [
+    (44_100, 48_000), (48_000, 44_100), (32_000, 48_000),
+    (44_100, 44_100),
+])
+def test_recording_preflight_uses_highest_supported_source_rate(
+        monkeypatch, tmp_path, render_rate, microphone_rate):
+    import audio_capture.native_backend
+
+    output = _prepare_recording_start(monkeypatch, tmp_path)
+    monkeypatch.setattr(audio_capture.native_backend, "NativeWasapiBackend",
+                        _backend_with_rates(render_rate, microphone_rate))
+    queried = []
+    monkeypatch.setattr(record_one_click, "available_mp3_bitrates",
+                        lambda rate: queried.append(rate) or [48_000])
+    monkeypatch.setattr(record_one_click, "main", lambda: 1)
+
+    assert record_one_click.run() == 1
+    assert queried == [max(render_rate, microphone_rate)]
+    assert output.exists()
 
 
 def test_recording_preflight_reports_format_query_failure_without_session(
@@ -1266,6 +1385,44 @@ def test_timeline_normal_stop_after_speech_uses_qpc_session_duration(
     assert len(samples) == 120_000
     assert samples[0] == 7
     assert samples[1:] == [0] * 119_999
+
+
+def test_timeline_final_slot_keeps_native_audio_beyond_qpc_stop(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(record_one_click, "DEFAULT_CHUNK_DURATION_SECONDS", 1)
+    # The QPC stop says half a second, but a complete final packet extends to
+    # one second.  Valid captured samples must win over the timeline extent.
+    _write(tmp_path / "speaker_00-10min.wav", 1, 44_100, [7] * 44_100)
+    _write(tmp_path / "mic_____00-10min.wav", 1, 48_000, [1] * 48_000)
+    (tmp_path / record_one_click.SESSION_FILE).write_text(json.dumps({
+        "status": record_one_click.RECOVERY_PENDING,
+        "session_timeline_capture": True,
+        "session_duration_100ns": 5_000_000,
+    }), encoding="utf-8")
+
+    record_one_click._mix_available_chunks(
+        tmp_path, logging.getLogger("test-qpc-tail"))
+
+    samples = _samples(bytes(_FakeEncoder.instances[0].data))
+    assert len(samples) == 48_000
+    assert samples[-1] == 8
+    assert not list(tmp_path.glob("*.wav"))
+
+
+def test_mismatched_rate_recovery_chunks_retain_order(tmp_path):
+    for number, value in ((1, 100), (2, 200)):
+        _write(tmp_path / f"render_{number:04d}.wav", 1, 44_100,
+               [value] * 441)
+        _write(tmp_path / f"microphone_{number:04d}.wav", 1, 48_000,
+               [1] * 480)
+
+    record_one_click._mix_available_chunks(
+        tmp_path, logging.getLogger("test-mismatched-order"))
+
+    samples = _samples(bytes(_FakeEncoder.instances[0].data))
+    assert len(samples) == 960
+    assert samples[:480] == [101] * 480
+    assert samples[480:] == [201] * 480
 
 
 def test_timeline_endpoint_missing_for_consecutive_slots_is_silence(
