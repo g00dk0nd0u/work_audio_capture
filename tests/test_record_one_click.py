@@ -450,18 +450,17 @@ def test_runtime_environment_contains_log_only_diagnostics():
     assert payload["os_version"]
 
 
-def test_encode_keeps_sources_when_sample_rates_differ(tmp_path):
+def test_encode_resamples_mismatched_sources_and_keeps_equal_rate_mix(tmp_path):
     render = tmp_path / "render.wav"
     microphone = tmp_path / "microphone.wav"
     output = tmp_path / "recording.part.mp3"
     _write(render, 2, 48000, [1, 2])
     _write(microphone, 1, 44100, [3])
 
-    with pytest.raises(ValueError, match="sample rate mismatch"):
-        record_one_click._encode_recordings_mp3(render, microphone, output)
-    assert render.exists()
-    assert microphone.exists()
-    assert not output.exists()
+    record_one_click._encode_recordings_mp3(render, microphone, output)
+    assert _FakeEncoder.instances[-1].sample_rate == 48000
+    assert render.exists() and microphone.exists()
+    assert output.exists()
 
 
 def test_mix_common_chunks_promotes_mp3_and_keeps_unpaired_final_chunk(tmp_path, caplog):
@@ -920,7 +919,6 @@ def test_recording_preflight_queries_actual_common_endpoint_rate(
 
 
 @pytest.mark.parametrize(("render_rate", "microphone_rate", "bitrates", "reason"), [
-    (48_000, 44_100, [48_000], "sample rates differ"),
     (22_050, 22_050, [48_000], "does not support 22050Hz"),
     (44_100, 44_100, [80_000], "no exact mono 44100 Hz / 48000 bps"),
 ])
@@ -937,6 +935,27 @@ def test_recording_preflight_rejects_before_session_creation(
     assert record_one_click.run() == 1
     assert reason in capsys.readouterr().err
     assert not output.exists()
+
+
+@pytest.mark.parametrize(("render_rate", "microphone_rate"), [
+    (44_100, 48_000), (48_000, 44_100), (32_000, 48_000),
+    (44_100, 44_100),
+])
+def test_recording_preflight_uses_highest_supported_source_rate(
+        monkeypatch, tmp_path, render_rate, microphone_rate):
+    import audio_capture.native_backend
+
+    output = _prepare_recording_start(monkeypatch, tmp_path)
+    monkeypatch.setattr(audio_capture.native_backend, "NativeWasapiBackend",
+                        _backend_with_rates(render_rate, microphone_rate))
+    queried = []
+    monkeypatch.setattr(record_one_click, "available_mp3_bitrates",
+                        lambda rate: queried.append(rate) or [48_000])
+    monkeypatch.setattr(record_one_click, "main", lambda: 1)
+
+    assert record_one_click.run() == 1
+    assert queried == [max(render_rate, microphone_rate)]
+    assert output.exists()
 
 
 def test_recording_preflight_reports_format_query_failure_without_session(

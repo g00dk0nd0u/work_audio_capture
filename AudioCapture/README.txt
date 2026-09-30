@@ -50,5 +50,5 @@ The default native WASAPI/Media Foundation path needs no NumPy, ffmpeg, extra DL
 
 開始前検査 / Preflight
 ------------------------
-one-click MP3は新規録音前に実際のrender/microphone周波数の一致（32/44.1/48 kHz）と指定bitrateの厳密なMedia Foundation対応を検査します。repairは現在のendpointに依存せず、保存済みWAV形式を使います。
-New one-click recordings validate matching actual endpoint rates (32/44.1/48 kHz) and exact requested Media Foundation bitrate support. Repair uses saved WAV formats without requiring current endpoints.
+one-click MP3は各endpointのnative rateで録音します。対応する32/44.1/48 kHzの不一致は後処理で低い方を高い方へupsampleし、出力周波数で指定bitrateのMedia Foundation対応を検査します。repairは現在のendpointに依存せず、保存済みWAV形式を使います。
+One-click capture preserves each endpoint's native rate. Supported mismatched 32/44.1/48 kHz sources are aligned in post-processing by upsampling the lower rate to the higher rate. The exact requested Media Foundation bitrate is checked at the output rate. Repair uses saved WAV formats without querying current endpoints. Adaptive clock-drift correction and time stretching are not implemented.
