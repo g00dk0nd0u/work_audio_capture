@@ -13,7 +13,7 @@ jobs:
       - run: PYTHONPATH=src python -m pytest
       - run: python run.py --help
       - name: Compile repository and distribution Python
-        run: python -m compileall -q run.py record_one_click.py src tests AudioCapture
+        run: python -m compileall -q run.py record_one_click.py make_mac_mp3.py src platforms/macos tests AudioCapture
       - name: Verify distribution runtime mirrors source
         shell: bash
         run: |
@@ -21,6 +21,15 @@ jobs:
           from pathlib import Path
 
           dist = Path("AudioCapture")
+          forbidden = [
+              dist / "record_mac.command",
+              dist / "make_mac_mp3.py",
+              dist / "platforms/macos",
+          ]
+          present = [str(path) for path in forbidden if path.exists()]
+          if present:
+              raise SystemExit("macOS runtime found in Windows distribution: " + ", ".join(present))
+
           entry_points = {
               Path("record_one_click.py"): dist / "record_one_click.py",
           }
@@ -77,7 +86,7 @@ jobs:
           python -c "import runpy; runpy.run_path('run.py'); runpy.run_path('record_one_click.py')"
           python -c "import runpy; runpy.run_path('AudioCapture/record_one_click.py')"
       - name: Compile one-click and distribution Python
-        run: python -m compileall -q run.py record_one_click.py src tests AudioCapture
+        run: python -m compileall -q run.py record_one_click.py make_mac_mp3.py src platforms/macos tests AudioCapture
       - name: COM and MMDevice smoke (endpoints are not required on hosted CI)
         shell: bash
         run: |

@@ -60,12 +60,11 @@ folder in Finder.
 
 ## Current implementation versus earlier research
 
-The current runnable path is `record_mac.command` plus the ScreenCaptureKit
-Swift helper under `platforms/macos/sck/` and the repository's macOS
-post-processor. It performs the capture and post-capture workflow described
+The current runnable path uses the root `record_mac.command` compatibility shim,
+which forwards to the canonical launcher and post-processor under
+`platforms/macos/`, plus its ScreenCaptureKit Swift helper in `sck/`. It performs the capture and post-capture workflow described
 above.
 
-The older `experiments/macos_capture/catap/` directory is a separate historical
-research experiment. It is not the current ScreenCaptureKit implementation and
-is not the documented user path. Its code is retained unchanged for research
-history.
+The rejected catap experiment is no longer executable in the current tree. Its
+findings and Git-history recovery details are preserved in
+[`docs/archive/macos-catap-experiment.md`](archive/macos-catap-experiment.md).

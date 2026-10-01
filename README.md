@@ -14,10 +14,10 @@ Windows PC の再生音声（Teams / Zoom / YouTube など）とマイク音声�
 | 区分 | 場所 | 役割 |
 | --- | --- | --- |
 | Windows | `record_one_click.py`, `run.py`, `src/audio_capture/` | established implementation。互換性のため既存パスを維持 |
-| macOS | `record_mac.py`, `record_mac.command`, `platforms/macos/sck/` | 公開 entrypoint と production ScreenCaptureKit 実装 |
+| macOS | `platforms/macos/` | canonical production runtime。root の macOS files は compatibility entrypoints のみ |
 | shared/core | `src/audio_capture/` | Python core と cross-platform balancing |
-| experiments | `experiments/` | 非 production の研究。`macos_capture/catap/` は blocked candidate |
-| distribution | `AudioCapture/` | 外部利用される配布 mirror（編集元ではない） |
+| historical evidence | `docs/archive/` | rejected / non-production research の記録 |
+| distribution | `AudioCapture/` | Windows-only end-user distribution |
 
 詳しい区分は [`platforms/README.md`](platforms/README.md) を参照してください。
 
@@ -221,5 +221,5 @@ Windows CI covers Python 3.10, 3.12, 3.13, and 3.14.
 ```bash
 python -m pip install pytest
 PYTHONPATH=src python -m pytest
-python -m compileall -q run.py record_one_click.py src tests AudioCapture
+python -m compileall -q run.py record_one_click.py make_mac_mp3.py src platforms/macos tests AudioCapture
 ```

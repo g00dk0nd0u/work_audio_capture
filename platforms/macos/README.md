@@ -1,9 +1,15 @@
 # macOS
 
-The public developer entrypoints remain `record_mac.py` and `record_mac.command`
-at the repository root. The production native ScreenCaptureKit implementation is
-the Swift package in `platforms/macos/sck/`. After capture, `make_mac_mp3.py`
-performs balancing and MP3 post-processing.
+The canonical macOS production runtime is here:
 
-`experiments/macos_capture/catap/` is a rejected/blocked candidate and is not part
-of the production path.
+- `record_mac.command` builds and runs the ScreenCaptureKit recorder.
+- `make_mac_mp3.py` performs balancing and MP3 post-processing.
+- `sck/` is the active native ScreenCaptureKit Swift package.
+
+Repository-root `record_mac.command` and `make_mac_mp3.py` are compatibility
+entrypoints only; `record_mac.py` continues to launch the root command shim.
+The macOS runtime is not copied into the Windows-only `AudioCapture/`
+distribution.
+
+Rejected catap research is summarized in
+[`docs/archive/macos-catap-experiment.md`](../../docs/archive/macos-catap-experiment.md).

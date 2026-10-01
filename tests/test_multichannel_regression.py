@@ -168,25 +168,16 @@ def test_distribution_runtime_files_match_repository_runtime():
             repository_package / relative_path
         ).read_bytes(), relative_path
 
-    for launcher in ("record_one_click.py", "record_mac.command", "make_mac_mp3.py"):
+    for launcher in ("record_one_click.py",):
         assert (
             DISTRIBUTION_ROOT / launcher
         ).read_bytes() == (
             PROJECT_ROOT / launcher
         ).read_bytes(), launcher
 
-    mac_runtime_files = (
-        "platforms/macos/sck/Package.swift",
-        "platforms/macos/sck/Sources/sck-audio-spike/CaptureCoverageEvidence.swift",
-        "platforms/macos/sck/Sources/sck-audio-spike/SCKAudioSpike.swift",
-    )
-    assert not (PROJECT_ROOT / "experiments/macos_capture/sck").exists()
-    assert (PROJECT_ROOT / mac_runtime_files[0]).is_file()
-    assert (PROJECT_ROOT / mac_runtime_files[2]).is_file()
-    for relative_path in mac_runtime_files:
-        assert (DISTRIBUTION_ROOT / relative_path).read_bytes() == (
-            PROJECT_ROOT / relative_path
-        ).read_bytes(), relative_path
+    assert not (DISTRIBUTION_ROOT / "record_mac.command").exists()
+    assert not (DISTRIBUTION_ROOT / "make_mac_mp3.py").exists()
+    assert not (DISTRIBUTION_ROOT / "platforms/macos").exists()
 
     # run.py is the repository-only advanced/developer CLI, not an end-user launcher.
     assert not (DISTRIBUTION_ROOT / "run.py").exists()

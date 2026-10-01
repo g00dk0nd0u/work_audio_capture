@@ -1,10 +1,11 @@
 import json
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-import make_mac_mp3
+from platforms.macos import make_mac_mp3
 
 
 @pytest.fixture
@@ -110,9 +111,17 @@ def test_postprocess_logging_failure_does_not_fail_valid_mp3(session, monkeypatc
     assert (session / "recording.mp3").is_file()
 
 
-def test_runtime_distribution_files_are_byte_identical():
+def test_root_compatibility_entrypoint_forwards_to_canonical_implementation():
     repository = Path(__file__).resolve().parents[1]
-    for relative in ("record_mac.command", "make_mac_mp3.py"):
-        assert (repository / relative).read_bytes() == (
-            repository / "AudioCapture" / relative
-        ).read_bytes()
+    shim = (repository / "make_mac_mp3.py").read_text(encoding="utf-8")
+    assert "platforms/macos/make_mac_mp3.py" in shim
+    assert "runpy.run_path" in shim
+
+    result = subprocess.run(
+        [sys.executable, str(repository / "make_mac_mp3.py")],
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 2
+    assert "Usage: python3 make_mac_mp3.py <session-directory>" in result.stderr
