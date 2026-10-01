@@ -2,7 +2,7 @@ from array import array
 
 import pytest
 
-import make_mac_mp3
+from platforms.macos import make_mac_mp3
 from audio_capture import transcription_balance
 
 

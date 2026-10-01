@@ -31,8 +31,9 @@ def _run_launcher(
     log_creation_failure: bool = False,
     interrupt_recorder: bool = False,
 ):
-    launcher = tmp_path / "record_mac.command"
-    launcher.write_bytes((REPOSITORY / "record_mac.command").read_bytes())
+    launcher = tmp_path / "platforms/macos/record_mac.command"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_bytes((REPOSITORY / "platforms/macos/record_mac.command").read_bytes())
     (tmp_path / "platforms/macos/sck").mkdir(parents=True)
 
     bin_dir = tmp_path / "bin"
@@ -283,7 +284,7 @@ def test_finder_failure_keeps_successful_exit_status(tmp_path):
     assert f"Recording saved, but could not open output folder: {session}" in result.stderr
 
 
-def test_root_and_distribution_launchers_are_byte_identical():
-    assert (REPOSITORY / "record_mac.command").read_bytes() == (
-        REPOSITORY / "AudioCapture/record_mac.command"
-    ).read_bytes()
+def test_root_launcher_forwards_to_canonical_implementation():
+    launcher = (REPOSITORY / "record_mac.command").read_text(encoding="utf-8")
+    assert "platforms/macos/record_mac.command" in launcher
+    assert "exec" in launcher

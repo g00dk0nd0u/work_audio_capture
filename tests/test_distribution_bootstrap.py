@@ -23,3 +23,10 @@ def test_launcher_without_src_shows_extract_zip_guidance(tmp_path):
     assert "please extract the ZIP first" in combined
     assert "extracted AudioCapture folder" in combined
     assert "Traceback" not in combined
+
+
+def test_distribution_contains_no_macos_runtime():
+    distribution = PROJECT_ROOT / "AudioCapture"
+    assert not (distribution / "record_mac.command").exists()
+    assert not (distribution / "make_mac_mp3.py").exists()
+    assert not (distribution / "platforms/macos").exists()

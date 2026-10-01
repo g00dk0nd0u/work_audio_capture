@@ -1,9 +1,10 @@
 # Windows
 
-Windows is the established, publicly distributed implementation.
-`record_one_click.py` is the normal entrypoint, while `run.py` provides the
-advanced CLI. To preserve compatibility for existing users and integrations, the
-Python implementation intentionally remains at the repository root and under
-`src/audio_capture/`.
+Windows production runtime remains at repository-root `record_one_click.py` and
+`run.py`, and under `src/audio_capture/`. This unusual root location is
+intentional and compatibility-frozen because existing users and integrations
+rely on it; repository-hygiene work must not relocate it.
 
-Do not relocate Windows runtime files as part of repository-hygiene changes.
+`AudioCapture/` is the Windows-only end-user distribution. Its
+`record_one_click.py` and `src/audio_capture/` runtime must remain byte-identical
+to their canonical Windows counterparts.

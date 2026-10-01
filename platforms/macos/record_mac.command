@@ -20,7 +20,7 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-repo_root="$(cd -- "$(dirname -- "$0")" && pwd -P)" || exit $?
+repo_root="$(cd -- "$(dirname -- "$0")/../.." && pwd -P)" || exit $?
 package_path="$repo_root/platforms/macos/sck"
 
 build_log=""
@@ -114,9 +114,9 @@ mp3_exit_code=0
 if [[ -f "$session/system.caf" && -f "$session/microphone.caf" && -f "$session/result.json" ]]; then
   append_status "Analyzing..."
   if [[ -n "$active_log" ]]; then
-    python3 "$repo_root/make_mac_mp3.py" "$session" >> "$active_log" 2>&1
+    python3 "$repo_root/platforms/macos/make_mac_mp3.py" "$session" >> "$active_log" 2>&1
   else
-    python3 "$repo_root/make_mac_mp3.py" "$session"
+    python3 "$repo_root/platforms/macos/make_mac_mp3.py" "$session"
   fi
   mp3_exit_code=$?
   if [[ $mp3_exit_code -eq 0 && -f "$session/recording.mp3" ]]; then
