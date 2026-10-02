@@ -11,7 +11,21 @@ import record_one_click
 
 WORKFLOW = Path(__file__).parents[1] / ".github/workflows/release-audiocapture.yml"
 COMMIT = "67f8744df581654eb113daf768fb5fd3eaf25dae"
-pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="workflow uses bash")
+
+
+def _find_bash():
+    if os.name == "nt":
+        for variable in ("ProgramFiles", "ProgramFiles(x86)"):
+            root = os.environ.get(variable)
+            if root:
+                candidate = Path(root) / "Git" / "bin" / "bash.exe"
+                if candidate.is_file():
+                    return str(candidate)
+    return shutil.which("bash")
+
+
+BASH = _find_bash()
+pytestmark = pytest.mark.skipif(BASH is None, reason="workflow uses bash")
 
 
 def _resolve_version(tmp_path, version, event="workflow_dispatch"):
@@ -27,7 +41,7 @@ def _resolve_version(tmp_path, version, event="workflow_dispatch"):
     env_file = tmp_path / "github_env"
     (tmp_path / ".audiocapture-version").write_text(version + "\n", encoding="ascii")
     result = subprocess.run(
-        ["bash", "-c", script], cwd=tmp_path,
+        [BASH, "-c", script], cwd=tmp_path,
         env={**os.environ, "GITHUB_ENV": str(env_file),
              "RELEASE_EVENT_NAME": event, "RELEASE_VERSION_INPUT": version},
         capture_output=True, text=True, timeout=10,
