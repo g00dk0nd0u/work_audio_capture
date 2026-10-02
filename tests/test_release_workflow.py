@@ -21,6 +21,7 @@ def _find_bash():
                 candidate = Path(root) / "Git" / "bin" / "bash.exe"
                 if candidate.is_file():
                     return str(candidate)
+        return None
     return shutil.which("bash")
 
 
