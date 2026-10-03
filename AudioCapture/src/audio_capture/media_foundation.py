@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,29 @@ MF_MT_AUDIO_BITS_PER_SAMPLE = GUID.from_string("f2deb57f-40fa-4764-aa33-ed4f2d1f
 
 class MediaFoundationUnavailable(WasapiUnavailable):
     """Raised when the built-in Windows MP3 path cannot be initialized."""
+
+
+def canonical_mp3_sample_rate(native_rates: Mapping[str, int]) -> int:
+    """Choose the smallest MP3 output rate allowing only upward conversion.
+
+    Supply only sources actually present. Linear interpolation has no
+    anti-alias filter, so native rates above the highest output are unsafe.
+    """
+    if not native_rates:
+        raise ValueError("no native source sample rates were supplied")
+    for source, rate in native_rates.items():
+        if isinstance(rate, bool) or not isinstance(rate, int) or rate <= 0:
+            raise ValueError(
+                f"{source}: invalid native sample rate {rate!r}; expected a positive integer Hz"
+            )
+        if rate > max(SUPPORTED_MP3_SAMPLE_RATES):
+            raise ValueError(
+                f"{source}: unsupported native sample rate {rate}Hz; "
+                "safe downsampling is not implemented"
+            )
+    highest_native_rate = max(native_rates.values())
+    return min(rate for rate in SUPPORTED_MP3_SAMPLE_RATES
+               if rate >= highest_native_rate)
 
 
 def bitrate_bytes_per_second(bitrate_bps: int) -> int:

@@ -23,7 +23,8 @@ def resample_pcm16_mono(samples: Iterable[int], source_rate: int,
     try:
         right = int(next(source))
     except StopIteration:
-        yield left
+        for _ in range(target_rate // source_rate):
+            yield left
         return
     left_index = 0
     output_index = 0
