@@ -23,21 +23,24 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Resolve release version
+        env:
+          RELEASE_EVENT_NAME: ${{ github.event_name }}
+          RELEASE_VERSION_INPUT: ${{ github.event.inputs.version }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ github.event.inputs.version }}"
+          if [ "${RELEASE_EVENT_NAME}" = "workflow_dispatch" ]; then
+            VERSION="${RELEASE_VERSION_INPUT}"
           else
             VERSION="$(tr -d '\r\n' < .audiocapture-version)"
           fi
-          case "${VERSION}" in
-            v[0-9]*.[0-9]*.[0-9]*) ;;
-            *)
-              echo "Invalid release version: ${VERSION}" >&2
-              exit 1
-              ;;
-          esac
+          # Match the runtime reader's version format and 128-byte metadata limit,
+          # reserving one byte for the newline written during packaging.
+          VERSION_PATTERN='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+          if [ "${#VERSION}" -gt 127 ] || [[ ! "${VERSION}" =~ ${VERSION_PATTERN} ]]; then
+            echo "Invalid release version: ${VERSION}" >&2
+            exit 1
+          fi
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
           echo "ASSET=AudioCapture-${VERSION}.zip" >> "${GITHUB_ENV}"
 
@@ -46,7 +49,45 @@ jobs:
         run: |
           set -euo pipefail
           test -d AudioCapture
-          zip -r "${ASSET}" AudioCapture
+          STAGING_DIR="$(mktemp -d "${RUNNER_TEMP}/audiocapture.XXXXXX")"
+          trap 'rm -rf "${STAGING_DIR}"' EXIT
+          cp -a AudioCapture "${STAGING_DIR}/AudioCapture"
+          printf '%s\n' "${VERSION}" > "${STAGING_DIR}/AudioCapture/VERSION"
+          printf '%s\n' "${GITHUB_SHA}" > "${STAGING_DIR}/AudioCapture/BUILD_COMMIT"
+          (cd "${STAGING_DIR}" && zip -r "${GITHUB_WORKSPACE}/${ASSET}" AudioCapture)
+
+      - name: Verify Windows release package
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from zipfile import ZipFile
+
+          with ZipFile(os.environ["ASSET"]) as package:
+              names = set(package.namelist())
+              required = {
+                  "AudioCapture/README.txt",
+                  "AudioCapture/record_one_click.py",
+                  "AudioCapture/src/audio_capture/__init__.py",
+                  "AudioCapture/VERSION",
+                  "AudioCapture/BUILD_COMMIT",
+              }
+              missing = required - names
+              if missing:
+                  raise SystemExit(f"Missing release files: {sorted(missing)}")
+              forbidden = {"AudioCapture/record_mac.command", "AudioCapture/make_mac_mp3.py"}
+              if names & forbidden or any(
+                  name == "AudioCapture/platforms/macos" or
+                  name.startswith("AudioCapture/platforms/macos/") for name in names
+              ):
+                  raise SystemExit("Windows release contains macOS runtime files")
+              for filename, variable in (("VERSION", "VERSION"), ("BUILD_COMMIT", "GITHUB_SHA")):
+                  expected = (os.environ[variable] + "\n").encode("ascii")
+                  if package.read(f"AudioCapture/{filename}") != expected:
+                      raise SystemExit(f"Release {filename} does not match {variable}")
+          print("Windows release package verified")
+          PY
 
       - name: Publish GitHub Release
         env:

@@ -94,6 +94,9 @@ _SLOT_WAV = re.compile(
     r"^(?P<prefix>speaker_|mic_____)(?P<start>\d+)-(?P<end>\d+)min\.wav$"
 )
 _LOG_EXTRA_FIELDS = (
+    "distribution_version",
+    "build_commit",
+    "distribution_kind",
     "python_version",
     "python_implementation",
     "python_architecture",
@@ -296,8 +299,39 @@ def _configure_logging() -> logging.Logger:
     return logger
 
 
-def _runtime_environment() -> dict[str, str]:
+def _distribution_identity(directory: Path | None = None) -> dict[str, str | None]:
+    """Read optional packaging metadata without making startup depend on it."""
+    development = {
+        "distribution_version": "development",
+        "build_commit": None,
+        "distribution_kind": "development",
+    }
+    directory = PROJECT_ROOT if directory is None else directory
+    try:
+        # Metadata is tiny; bound reads even if a file is accidentally replaced.
+        with (directory / "VERSION").open(encoding="ascii") as source:
+            version_text = source.read(129)
+        with (directory / "BUILD_COMMIT").open(encoding="ascii") as source:
+            commit_text = source.read(129)
+    except (OSError, UnicodeError):
+        return development
+    if len(version_text) > 128 or len(commit_text) > 128:
+        return development
+    version = version_text.strip()
+    commit = commit_text.strip()
+    if (re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", version) is None or
+            re.fullmatch(r"[0-9a-fA-F]{40}", commit) is None):
+        return development
     return {
+        "distribution_version": version,
+        "build_commit": commit,
+        "distribution_kind": "release",
+    }
+
+
+def _runtime_environment() -> dict[str, str | None]:
+    return {
+        **_distribution_identity(),
         "python_version": platform.python_version(),
         "python_implementation": platform.python_implementation(),
         "python_architecture": "64bit" if sys.maxsize > 2**32 else "32bit",

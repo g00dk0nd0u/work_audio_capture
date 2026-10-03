@@ -42,6 +42,7 @@ Repairing an interrupted recording
 All usable WAV chunks are mixed/downmixed sequentially into one `<final-name>.part.mp3` and atomically published. Incorporated WAVs are deleted only after publication. A second Ctrl+C during MP3 creation, or any conversion/finalize failure, removes `.part` but preserves recovery data.
 
 The default native WASAPI/Media Foundation path needs no NumPy, ffmpeg, extra DLL, or runtime pip install. Recording has a 12-hour safety limit. See `audio_capture.log` for diagnostics.
+Windows release ZIPs that include this feature record their release version and build commit in `audio_capture.log`.
 
 開始前検査 / Preflight
 ------------------------

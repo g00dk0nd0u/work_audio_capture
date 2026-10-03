@@ -110,6 +110,7 @@ MP3 生成中にもう一度 `Ctrl+C` を押すと後処理をキャンセルし
 ## 診断と既知制約
 
 問題が起きた場合は、実行したフォルダ直下の `audio_capture.log` を確認してください。OS / Python、endpoint、channel、sample rate、出力先、例外、後処理の進捗と結果が記録されます。
+この機能を含む Windows リリース ZIP では、リリースバージョンとビルド commit も記録されます。
 
 - one-click MP3 は各 endpoint の native rate で録音し、対応する 32 / 44.1 / 48 kHz の不一致は後処理で低い方を高い方へ upsample します。指定 bitrate は出力周波数で Media Foundation に確認します。repair は保存済み WAV の形式を使い、現在の endpoint を照会しません。
 - 独立 clock の adaptive drift 補正と time stretching は未実装です。
@@ -197,6 +198,7 @@ The MP3 is written to `<final-name>.part.mp3` so that its temporary path retains
 ## Diagnostics and current limitations
 
 Inspect `audio_capture.log` in the repository/distribution directory for environment, endpoint, format, exception, and post-processing details.
+Windows release ZIPs that include this feature also record their release version and build commit in this log.
 
 - One-click capture keeps each endpoint's native rate. Supported mismatched 32/44.1/48 kHz sources are aligned in post-processing by upsampling the lower rate to the higher rate; the exact requested Media Foundation bitrate is checked at that output rate. Repair uses saved WAV formats without querying current endpoints.
 - Session-wide fixed-gain source balancing is implemented. Clock-drift correction, channel-mask-aware mixing, AGC/limiting, and loudness normalization are not implemented.
