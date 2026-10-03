@@ -112,7 +112,7 @@ MP3 生成中にもう一度 `Ctrl+C` を押すと後処理をキャンセルし
 問題が起きた場合は、実行したフォルダ直下の `audio_capture.log` を確認してください。OS / Python、endpoint、channel、sample rate、出力先、例外、後処理の進捗と結果が記録されます。
 この機能を含む Windows リリース ZIP では、リリースバージョンとビルド commit も記録されます。
 
-- one-click MP3 は各 endpoint の native rate で録音し、対応する 32 / 44.1 / 48 kHz の不一致は後処理で低い方を高い方へ upsample します。指定 bitrate は出力周波数で Media Foundation に確認します。repair は保存済み WAV の形式を使い、現在の endpoint を照会しません。
+- one-click MP3 は各 endpoint の native rate で録音します。48 kHz 以下の native rate は後処理で、最も高い source rate 以上の最小の対応 MP3 出力周波数（32 / 44.1 / 48 kHz）へ upsample します。48 kHz 超は downsample せず拒否します。同一 source の録音中・recovery sequence 内での sample-rate 変更は未対応です。指定 bitrate は出力周波数で Media Foundation に確認します。repair は保存済み WAV の形式を使い、現在の endpoint を照会しません。
 - 独立 clock の adaptive drift 補正と time stretching は未実装です。
 - multichannel downmix は算術平均です。文字起こし向け source balancing はセッション単位の固定ゲインで実装済みです。channel-mask-aware weighting、AGC、limiter、loudness normalization は未実装です。
 - 既定 role から選んだ録音 endpoint が invalidated された場合に、その時点の同じ role の current default を再解決し、default が変わっていれば新 endpoint への復旧を試みます。常時の default 変更監視は行いません。sample rate が変わった場合は resampling せず、その stream を unavailable として既存 recovery data を保持します。明示 endpoint は別の既定 endpoint へ切り替えません。
@@ -200,7 +200,7 @@ The MP3 is written to `<final-name>.part.mp3` so that its temporary path retains
 Inspect `audio_capture.log` in the repository/distribution directory for environment, endpoint, format, exception, and post-processing details.
 Windows release ZIPs that include this feature also record their release version and build commit in this log.
 
-- One-click capture keeps each endpoint's native rate. Supported mismatched 32/44.1/48 kHz sources are aligned in post-processing by upsampling the lower rate to the higher rate; the exact requested Media Foundation bitrate is checked at that output rate. Repair uses saved WAV formats without querying current endpoints.
+- One-click capture keeps each endpoint's native rate. Native source rates up to 48 kHz are converted upward during post-processing to the smallest supported 32/44.1/48 kHz MP3 output rate at or above the highest source rate. Rates above 48 kHz are rejected rather than downsampled. Sample-rate changes within one source during an active session or recovery sequence remain unsupported. The exact requested Media Foundation bitrate is checked at the output rate. Repair uses saved WAV formats without querying current endpoints.
 - Session-wide fixed-gain source balancing is implemented. Clock-drift correction, channel-mask-aware mixing, AGC/limiting, and loudness normalization are not implemented.
 - Adaptive clock-drift correction and time stretching are not implemented. When a role-selected recording endpoint is invalidated, recovery resolves that role's current default and tries the new endpoint if the default changed; defaults are not monitored continuously. A sample-rate change safely degrades that stream and preserves recovery data; explicitly selected endpoints never roam.
 - Representative real-PC validation and long-session hardware soak testing remain outstanding.

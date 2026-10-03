@@ -58,6 +58,7 @@ from audio_capture.media_foundation import (  # noqa: E402
     SUPPORTED_MP3_SAMPLE_RATES,
     Mp3Encoder,
     available_mp3_bitrates,
+    canonical_mp3_sample_rate,
 )
 from audio_capture.transcription_balance import (  # noqa: E402
     BALANCE_MAX_ADDED_CLIPPING_FRACTION,
@@ -584,6 +585,11 @@ def _source_mono_samples(source, channels: int, source_rate: int,
                          output_rate: int, block_frames: int,
                          raw_stats=None):
     """Downmix native PCM blocks, then stream a canonical-rate conversion."""
+    if output_rate < source_rate:
+        raise ValueError(
+            f"unsafe downward conversion {source_rate}Hz -> {output_rate}Hz; "
+            "safe downsampling is not implemented; source WAVs were kept"
+        )
     def native_samples():
         while True:
             data = source.readframes(block_frames)
@@ -670,11 +676,6 @@ def _encode_chunk_pairs_mp3(
                             f"{path}: expected at least one channel, got {channels}; "
                             "source WAVs were kept"
                         )
-                    if rate not in SUPPORTED_MP3_SAMPLE_RATES:
-                        raise ValueError(
-                            f"{path}: MP3 encoder does not support {rate}Hz native "
-                            "source without resampling; source WAVs were kept"
-                        )
                     if source_rates[role] is None:
                         source_rates[role] = rate
                     elif rate != source_rates[role]:
@@ -688,8 +689,18 @@ def _encode_chunk_pairs_mp3(
     present_rates = [rate for rate in source_rates.values() if rate is not None]
     if not present_rates:
         raise ValueError("no recoverable audio chunks were supplied")
-    sample_rate = max(present_rates)
     logger = logging.getLogger("work_audio_capture")
+    try:
+        sample_rate = canonical_mp3_sample_rate({
+            role: rate for role, rate in source_rates.items() if rate is not None
+        })
+    except ValueError as exc:
+        message = f"{exc}; source WAVs were kept"
+        logger.error(message, extra={
+            "native_render_sample_rate": source_rates["render"],
+            "native_microphone_sample_rate": source_rates["microphone"],
+        })
+        raise ValueError(message) from exc
     logger.info("post-processing sample-rate conversion", extra={
         "native_render_sample_rate": source_rates["render"],
         "native_microphone_sample_rate": source_rates["microphone"],
@@ -1258,13 +1269,13 @@ def run(arguments: list[str] | None = None) -> int:
     diagnostic_log = {**environment_log, **endpoint_log}
     logger.info("Selected audio endpoints", extra=diagnostic_log)
 
-    canonical_rate = max(render.sample_rate, microphone.sample_rate)
     preflight_error = None
-    if (render.sample_rate not in SUPPORTED_MP3_SAMPLE_RATES or
-            microphone.sample_rate not in SUPPORTED_MP3_SAMPLE_RATES):
-        unsupported = next(rate for rate in (render.sample_rate, microphone.sample_rate)
-                           if rate not in SUPPORTED_MP3_SAMPLE_RATES)
-        preflight_error = f"MP3 encoding does not support {unsupported}Hz without resampling"
+    try:
+        canonical_rate = canonical_mp3_sample_rate({
+            "render": render.sample_rate, "microphone": microphone.sample_rate,
+        })
+    except ValueError as exc:
+        preflight_error = str(exc)
     else:
         try:
             available_bitrates = available_mp3_bitrates(canonical_rate)
